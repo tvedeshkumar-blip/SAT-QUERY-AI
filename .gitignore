@@ -14,8 +14,10 @@ __pycache__/
 *.egg-info/
 
 # Environment Variables & Secrets
+# .env.production is intentionally tracked (contains only public URLs, no secrets)
 .env
 .env.local
+backend/.env
 
 # OS Artifacts
 .DS_Store
