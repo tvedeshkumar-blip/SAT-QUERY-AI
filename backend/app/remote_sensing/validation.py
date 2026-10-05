@@ -58,7 +58,6 @@ class InputValidator:
         return size
 
     @classmethod
-    @classmethod
     def validate_dual_scenes(
         cls,
         meta_a: Dict[str, Any],

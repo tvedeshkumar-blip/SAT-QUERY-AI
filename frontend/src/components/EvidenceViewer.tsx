@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Layers, ZoomIn, ZoomOut, Eye, Split, EyeOff, Sliders, Sparkles, Activity, Loader2 } from 'lucide-react';
 import { VisualEvidence } from '../types';
+import { API_BASE } from '../services/api';
 
 interface EvidenceViewerProps {
   evidenceList: VisualEvidence[];
@@ -47,7 +48,6 @@ export const EvidenceViewer: React.FC<EvidenceViewerProps> = ({
 
     try {
       setIsComputingIndices(true);
-      const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1';
       const targetImg = (mode === 'optical_sar' && type === 'sar_db' && secondaryImageUrl) 
         ? secondaryImageUrl 
         : (primaryImageUrl || '');

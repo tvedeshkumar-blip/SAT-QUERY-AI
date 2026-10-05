@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Production Builds
+dist/
+frontend/dist/
+
+# Python Cache & Testing
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+
+# Environment Variables & Secrets
+.env
+.env.local
+
+# OS Artifacts
+.DS_Store
+Thumbs.db
+
+# Model Checkpoints & Large Binary Weights
+models/weights/
+*.pth
+*.pt
+*.bin
+*.safetensors
+*.ckpt

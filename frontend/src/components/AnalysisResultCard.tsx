@@ -16,6 +16,7 @@ import {
   XCircle
 } from 'lucide-react';
 import { AnalysisResponse } from '../types';
+import { API_BASE } from '../services/api';
 import { MetadataInspectorModal } from './MetadataInspectorModal';
 import { ReportPreviewModal } from './ReportPreviewModal';
 
@@ -32,7 +33,6 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
   const handleDownloadPdf = async () => {
     try {
       setIsExportingPdf(true);
-      const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1';
       const res = await fetch(`${API_BASE}/reports/pdf`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -55,7 +55,6 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
   const handleDownloadJson = async () => {
     try {
       setIsExportingJson(true);
-      const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1';
       const res = await fetch(`${API_BASE}/reports/json`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
