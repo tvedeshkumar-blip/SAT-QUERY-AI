@@ -17,6 +17,15 @@ export interface BoundingBox {
   confidence?: number | null;
 }
 
+export type AOIBounds = [number, number, number, number]; // [min_lon, min_lat, max_lon, max_lat] in EPSG:4326
+
+export interface AOISelection {
+  bounds: AOIBounds;
+  label?: string;
+  crossesAntimeridian: boolean;
+  approxAreaKm2?: number;
+}
+
 export interface GeoTIFFMetadata {
   filename: string;
   crs: string | null;

@@ -11,6 +11,8 @@
     "test": "node --experimental-strip-types --test src/tests/*.test.ts"
   },
   "dependencies": {
+    "@types/leaflet": "^1.9.22",
+    "leaflet": "^1.9.4",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "react": "^19.0.0",

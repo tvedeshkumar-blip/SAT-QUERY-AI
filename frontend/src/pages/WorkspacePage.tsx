@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
-import { AnalysisMode, AnalysisResponse, PresetPhoto } from '../types';
+import { AnalysisMode, AnalysisResponse, PresetPhoto, AOIBounds } from '../types';
 import { ImageUploader, UploadedFileState } from '../components/ImageUploader';
 import { QuestionPanel } from '../components/QuestionPanel';
 import { AnalysisResultCard } from '../components/AnalysisResultCard';
 import { EvidenceViewer } from '../components/EvidenceViewer';
 import { ExecutionTracePanel } from '../components/ExecutionTracePanel';
 import { DemoPresetsBar } from '../components/DemoPresetsBar';
+import { MapViewer } from '../components/MapViewer';
 import { submitSatQueryAnalysis } from '../services/api';
 import { EARTH_OBSERVATION_PRESETS } from '../utils/presetPhotos';
 import { Sparkles, AlertCircle } from 'lucide-react';
@@ -17,6 +18,7 @@ export const WorkspacePage: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [response, setResponse] = useState<AnalysisResponse | null>(null);
+  const [selectedAOI, setSelectedAOI] = useState<AOIBounds | null>(null);
 
   // Filter preset sample queries for current mode
   const currentPresets = EARTH_OBSERVATION_PRESETS.filter((p) => p.mode === mode);
@@ -88,6 +90,9 @@ export const WorkspacePage: React.FC = () => {
       
       {/* 5 Required ISRO Demonstrations Bar */}
       <DemoPresetsBar onLoadDemo={handleLoadDemo} />
+
+      {/* Global Interactive Satellite Map & AOI Selection */}
+      <MapViewer selectedAOI={selectedAOI} onAOIChange={setSelectedAOI} />
 
       {/* Primary Ingestion & Query Section */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
