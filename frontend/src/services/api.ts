@@ -14,11 +14,15 @@ export interface AnalyzePayload {
     mimeType: string;
     filename?: string;
     role?: 'primary' | 'secondary' | 'optical' | 'sar';
+    asset_category?: string;
+    provenance?: Record<string, any>;
+    scientific_limitations?: string[];
   }[];
   query: string;
   mode: AnalysisMode | 'auto';
   metadata?: Record<string, any>;
 }
+
 
 export interface ModelDetail {
   name: string;
@@ -150,3 +154,139 @@ export async function checkChatHealth(): Promise<import('../types').ChatHealthRe
     };
   }
 }
+
+export async function searchSTACScenes(
+  payload: import('../types').STACSearchRequestPayload
+): Promise<import('../types').STACSearchResponsePayload> {
+  const res = await fetch(`${API_BASE}/acquisition/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(errorData.detail || `STAC catalog search failed (${res.status})`);
+  }
+
+  return await res.json();
+}
+
+export async function retrieveSTACAsset(
+  payload: import('../types').STACRetrieveRequestPayload
+): Promise<import('../types').STACRetrieveResponsePayload> {
+  const res = await fetch(`${API_BASE}/acquisition/retrieve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(errorData.detail || `Asset retrieval failed (${res.status})`);
+  }
+
+  return await res.json();
+}
+
+export async function validateSTACAsset(
+  payload: import('../types').STACValidateAssetRequestPayload
+): Promise<import('../types').STACValidateAssetResponsePayload> {
+  const res = await fetch(`${API_BASE}/acquisition/validate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(errorData.detail || `Asset validation failed (${res.status})`);
+  }
+
+  return await res.json();
+}
+
+export async function computeSpectralIndices(payload: AnalyzePayload): Promise<any> {
+  const res = await fetch(`${API_BASE}/analyze/spectral-indices`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(errorData.detail || `Spectral index computation failed (${res.status})`);
+  }
+
+  return await res.json();
+}
+
+export async function validateTemporalPair(
+  payload: import('../types').STACTemporalPairValidateRequestPayload
+): Promise<import('../types').STACTemporalPairValidateResponsePayload> {
+  const res = await fetch(`${API_BASE}/acquisition/validate-temporal-pair`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(errorData.detail || `Temporal pair validation failed (${res.status})`);
+  }
+
+  return await res.json();
+}
+
+export async function searchTemporalPair(
+  payload: import('../types').STACTemporalSearchRequestPayload
+): Promise<import('../types').STACTemporalSearchResponsePayload> {
+  const res = await fetch(`${API_BASE}/acquisition/search-temporal-pair`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(errorData.detail || `Temporal pair search failed (${res.status})`);
+  }
+
+  return await res.json();
+}
+
+export async function validateOpticalSARPair(
+  payload: import('../types').STACOpticalSARPairValidateRequestPayload
+): Promise<import('../types').STACOpticalSARPairValidateResponsePayload> {
+  const res = await fetch(`${API_BASE}/acquisition/validate-optical-sar-pair`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(errorData.detail || `Optical+SAR pair validation failed (${res.status})`);
+  }
+
+  return await res.json();
+}
+
+export async function searchOpticalSARPair(
+  payload: import('../types').STACOpticalSARSearchRequestPayload
+): Promise<import('../types').STACOpticalSARSearchResponsePayload> {
+  const res = await fetch(`${API_BASE}/acquisition/search-optical-sar-pair`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(errorData.detail || `Optical+SAR search failed (${res.status})`);
+  }
+
+  return await res.json();
+}
+
+

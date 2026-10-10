@@ -7,8 +7,10 @@ import { EvidenceViewer } from '../components/EvidenceViewer';
 import { ExecutionTracePanel } from '../components/ExecutionTracePanel';
 import { DemoPresetsBar } from '../components/DemoPresetsBar';
 import { MapViewer } from '../components/MapViewer';
-import { submitSatQueryAnalysis } from '../services/api';
+import { AcquisitionPanel } from '../components/AcquisitionPanel';
+import { submitSatQueryAnalysis, AnalyzePayload } from '../services/api';
 import { EARTH_OBSERVATION_PRESETS } from '../utils/presetPhotos';
+
 import { Sparkles, AlertCircle } from 'lucide-react';
 
 export const WorkspacePage: React.FC = () => {
@@ -36,6 +38,29 @@ export const WorkspacePage: React.FC = () => {
     setErrorMsg(null);
   };
 
+  const handleImportScene = (importedFile: UploadedFileState) => {
+    setFiles((prev) => {
+      const filtered = prev.filter((f) => f.role !== importedFile.role);
+      return [...filtered, importedFile];
+    });
+    setResponse(null);
+    setErrorMsg(null);
+  };
+
+  const handleImportPair = (t1File: UploadedFileState, t2File: UploadedFileState) => {
+    setMode('bitemporal');
+    setFiles([t1File, t2File]);
+    setResponse(null);
+    setErrorMsg(null);
+  };
+
+  const handleImportOpticalSARPair = (opticalFile: UploadedFileState, sarFile: UploadedFileState) => {
+    setMode('optical_sar');
+    setFiles([opticalFile, sarFile]);
+    setResponse(null);
+    setErrorMsg(null);
+  };
+
   const handleClearFiles = () => {
     setFiles([]);
     setResponse(null);
@@ -49,12 +74,17 @@ export const WorkspacePage: React.FC = () => {
 
     try {
       // Build image payload
-      const imagePayloads = files.map((f) => ({
+      const imagePayloads: AnalyzePayload['images'] = files.map((f) => ({
         data: f.dataUrl,
-        mimeType: f.isGeoTIFF ? 'image/tiff' : 'image/png',
+
+        mimeType: f.isGeoTIFF ? 'image/tiff' : (f.filename.endsWith('.jpg') || f.filename.endsWith('.jpeg') ? 'image/jpeg' : 'image/png'),
         filename: f.filename,
-        role: f.role
+        role: f.role,
+        asset_category: f.assetCategory,
+        provenance: f.stacProvenance,
+        scientific_limitations: f.scientificLimitations
       }));
+
 
       // Fallback synthetic preset if no file uploaded
       if (imagePayloads.length === 0) {
@@ -93,6 +123,14 @@ export const WorkspacePage: React.FC = () => {
 
       {/* Global Interactive Satellite Map & AOI Selection */}
       <MapViewer selectedAOI={selectedAOI} onAOIChange={setSelectedAOI} />
+
+      {/* Satellite Imagery Acquisition & STAC Catalog Search */}
+      <AcquisitionPanel 
+        selectedAOI={selectedAOI} 
+        onImportScene={handleImportScene} 
+        onImportPair={handleImportPair} 
+        onImportOpticalSARPair={handleImportOpticalSARPair}
+      />
 
       {/* Primary Ingestion & Query Section */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">

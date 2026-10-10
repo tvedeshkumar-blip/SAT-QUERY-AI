@@ -141,11 +141,36 @@ class PixelDifferenceChangeBaseline(BaseChangeDetector):
         change_map_b64 = convert_array_to_base64_png(change_map)
         overlay_b64 = convert_array_to_base64_png(overlay)
 
+        # Defensible physical area calculation
+        # Only compute area in hectares if CRS is projected (metric units like UTM, not geographic degrees)
+        res_a = meta_a.get("resolution")
+        crs_a_str = str(meta_a.get("crs") or "")
+        is_projected = any(proj in crs_a_str.upper() for proj in ["UTM", "EPSG:326", "EPSG:327", "PROJECTED"])
+        area_hectares = None
+        area_hectares_note = None
+        if reg_info.get("georeferenced", False) and res_a and is_projected:
+            try:
+                pixel_area_m2 = abs(float(res_a[0]) * float(res_a[1]))
+                area_hectares = round((changed_pixels * pixel_area_m2) / 10000.0, 3)
+            except Exception:
+                area_hectares = None
+        else:
+            if not reg_info.get("georeferenced", False):
+                area_hectares_note = "Physical area in hectares unavailable: scene lacks georeferencing."
+            elif not is_projected:
+                area_hectares_note = "Physical area in hectares omitted: geographic coordinate system (degrees) lacks uniform metric scale. Reporting defensible pixel percentage only."
+
         georef_note = ""
         if not reg_info.get("georeferenced", True):
             georef_note = " [Geospatial Notice]: Input imagery is not georeferenced (CRS unavailable). Genuine bi-temporal change detection requires georeferenced GeoTIFFs."
         elif not reg_info.get("co_registered", False):
             georef_note = " [Geospatial Notice]: Input imagery lacks verified spatial co-registration."
+
+        scientific_caveat = (
+            " [Scientific Caveat]: Detected regions represent raw pixel spectral reflectance differences and model candidate clusters; "
+            "they do not constitute confirmed real-world land cover alterations without independent ground verification "
+            "(potential confounders: illumination angle, atmospheric turbidity, seasonal vegetation phenology, and registration tolerances)."
+        )
 
         answer = (
             f"Bi-temporal spectral difference analysis completed across {w}x{h} scene. "
@@ -155,6 +180,7 @@ class PixelDifferenceChangeBaseline(BaseChangeDetector):
             f"Identified {len(boxes)} primary change cluster regions. "
             f"Spatial co-registration status: {reg_info.get('co_registered')} ({reg_info.get('registration_method')})."
             f"{georef_note}"
+            f"{scientific_caveat}"
         )
 
         evidence = [
@@ -166,11 +192,16 @@ class PixelDifferenceChangeBaseline(BaseChangeDetector):
                 "data_base64": change_map_b64,
                 "statistics": {
                     "changed_area_percent": f"{change_ratio:.2f}%",
+                    "detected_pixel_delta_percent": f"{change_ratio:.2f}%",
                     "changed_pixel_count": changed_pixels,
                     "total_scene_pixels": total_pixels,
+                    "changed_area_hectares": area_hectares,
+                    "area_hectares_status": f"{area_hectares} ha" if area_hectares is not None else area_hectares_note,
                     "difference_threshold": self.threshold,
                     "change_detected": change_detected,
                     "change_cluster_count": len(boxes),
+                    "candidate_change_clusters": len(boxes),
+                    "confirmed_real_world_status": "Unconfirmed without field verification (optical confounders: seasonal phenology, illumination angle, registration tolerances)",
                     "georeferenced": reg_info.get("georeferenced", False),
                     "co_registered": reg_info.get("co_registered"),
                     "registration_method": reg_info.get("registration_method")
@@ -523,11 +554,35 @@ class SiameseRSChangeDetector(BaseChangeDetector):
         change_map_b64 = convert_array_to_base64_png(change_map)
         overlay_b64 = convert_array_to_base64_png(overlay)
 
+        # Defensible physical area calculation
+        res_a = meta_t1.get("resolution")
+        crs_a_str = str(meta_t1.get("crs") or "")
+        is_projected = any(proj in crs_a_str.upper() for proj in ["UTM", "EPSG:326", "EPSG:327", "PROJECTED"])
+        area_hectares = None
+        area_hectares_note = None
+        if reg_info.get("georeferenced", False) and res_a and is_projected:
+            try:
+                pixel_area_m2 = abs(float(res_a[0]) * float(res_a[1]))
+                area_hectares = round((changed_pixels * pixel_area_m2) / 10000.0, 3)
+            except Exception:
+                area_hectares = None
+        else:
+            if not reg_info.get("georeferenced", False):
+                area_hectares_note = "Physical area in hectares unavailable: scene lacks georeferencing."
+            elif not is_projected:
+                area_hectares_note = "Physical area in hectares omitted: geographic coordinate system (degrees) lacks uniform metric scale. Reporting defensible pixel percentage only."
+
         georef_note = ""
         if not reg_info.get("georeferenced", True):
             georef_note = " [Geospatial Notice]: Input imagery is not georeferenced (CRS unavailable). Genuine bi-temporal change detection requires georeferenced GeoTIFFs."
         elif not reg_info.get("co_registered", False):
             georef_note = " [Geospatial Notice]: Input imagery lacks verified spatial co-registration."
+
+        scientific_caveat = (
+            " [Scientific Caveat]: Neural change probability masks represent candidate transformer-predicted change clusters; "
+            "they do not constitute confirmed real-world land alterations without independent ground verification "
+            "(potential confounders: illumination angle, atmospheric turbidity, seasonal vegetation phenology, and registration tolerances)."
+        )
 
         answer = (
             f"Neural bi-temporal change analysis using {self.model_name} completed across {w}x{h} scene. "
@@ -538,6 +593,7 @@ class SiameseRSChangeDetector(BaseChangeDetector):
             f"Spatial co-registration status: {reg_info.get('co_registered')} ({reg_info.get('registration_method')}). "
             f"Note: Specific semantic attribution requires auxiliary ground truth or multi-band spectral classification."
             f"{georef_note}"
+            f"{scientific_caveat}"
         )
 
         evidence = [
@@ -549,11 +605,16 @@ class SiameseRSChangeDetector(BaseChangeDetector):
                 "data_base64": change_map_b64,
                 "statistics": {
                     "changed_area_percent": f"{change_ratio:.2f}%",
+                    "detected_pixel_delta_percent": f"{change_ratio:.2f}%",
                     "changed_pixel_count": changed_pixels,
                     "total_scene_pixels": total_pixels,
+                    "changed_area_hectares": area_hectares,
+                    "area_hectares_status": f"{area_hectares} ha" if area_hectares is not None else area_hectares_note,
                     "model_name": self.model_name,
                     "change_detected": change_detected,
                     "change_cluster_count": len(boxes),
+                    "candidate_change_clusters": len(boxes),
+                    "confirmed_real_world_status": "Unconfirmed without field verification (optical confounders: seasonal phenology, illumination angle, registration tolerances)",
                     "georeferenced": reg_info.get("georeferenced", False),
                     "co_registered": reg_info.get("co_registered"),
                     "registration_method": reg_info.get("registration_method"),

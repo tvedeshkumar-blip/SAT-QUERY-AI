@@ -6,6 +6,18 @@ class ImageInput(BaseModel):
     mimeType: str = Field(default="image/png", description="MIME type e.g. image/tiff, image/png")
     filename: Optional[str] = Field(default="image.png", description="Filename if provided")
     role: Optional[str] = Field(default="primary", description="Role e.g. primary, secondary, optical, sar")
+    asset_category: Optional[str] = Field(
+        default=None, 
+        description="STAC asset category e.g. visual_preview, rgb_visual_raster, single_band_spectral"
+    )
+    provenance: Optional[Dict[str, Any]] = Field(
+        default_factory=dict, 
+        description="STAC scene and asset provenance metadata"
+    )
+    scientific_limitations: Optional[List[str]] = Field(
+        default_factory=list, 
+        description="Scientific caveats associated with this asset"
+    )
 
 class AnalysisRequest(BaseModel):
     images: List[ImageInput] = Field(..., description="List of input satellite images")

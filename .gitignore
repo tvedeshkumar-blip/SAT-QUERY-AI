@@ -6,6 +6,9 @@ frontend/node_modules/
 dist/
 frontend/dist/
 
+# Runtime Retrieved Imagery
+data/retrieved/
+
 # Python Cache & Testing
 __pycache__/
 *.py[cod]

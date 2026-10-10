@@ -164,3 +164,224 @@ export interface ChatHealthResponse {
   base_url: string;
   configured_model: string;
 }
+
+export interface STACAssetSummary {
+  key: string;
+  title?: string;
+  type: string;
+  roles: string[];
+  category: 'visual_preview' | 'scientific_raster' | 'unsupported';
+  href: string;
+  size_bytes?: number;
+}
+
+export interface STACSceneSummary {
+  id: string;
+  collection: string;
+  datetime: string;
+  bbox: [number, number, number, number];
+  cloud_cover?: number | null;
+  modality: 'OPTICAL' | 'SAR';
+  sensor: string;
+  platform?: string;
+  thumbnail_url?: string;
+  assets: Record<string, STACAssetSummary>;
+  provenance: Record<string, any>;
+}
+
+export interface STACSearchRequestPayload {
+  bbox: [number, number, number, number];
+  start_date?: string;
+  end_date?: string;
+  collection?: string;
+  max_cloud_cover?: number;
+  limit?: number;
+}
+
+export interface STACSearchResponsePayload {
+  status: 'success' | 'zero_results' | 'error';
+  provider: string;
+  catalog_url: string;
+  search_bbox: [number, number, number, number];
+  search_datetime?: string;
+  collection_requested: string;
+  total_results: number;
+  scenes: STACSceneSummary[];
+  message?: string;
+  error?: string;
+}
+
+export interface STACTaskCompatibility {
+  status: 'supported' | 'supported_with_limitations' | 'rejected';
+  reason: string;
+}
+
+export interface STACValidateAssetRequestPayload {
+  scene_id?: string;
+  asset_key?: string;
+  filename?: string;
+  data_base64?: string;
+  provenance?: Record<string, any>;
+}
+
+export interface STACValidateAssetResponsePayload {
+  status: 'valid' | 'invalid';
+  filename: string;
+  file_format: string;
+  asset_category: 'visual_preview' | 'rgb_visual_raster' | 'single_band_spectral' | 'multispectral_cube' | 'unsupported';
+  raster_metadata: Record<string, any>;
+  scientific_status: 'calibrated_surface_reflectance' | 'calibrated_sar_backscatter' | 'visual_display_only' | 'unverified';
+  analysis_compatibility: Record<string, STACTaskCompatibility>;
+  scientific_limitations: string[];
+  provenance: Record<string, any>;
+  error?: string | null;
+}
+
+export interface STACRetrieveRequestPayload {
+  scene_id: string;
+  asset_key: string;
+  collection?: string;
+  target_role?: 'primary' | 'secondary' | 'optical' | 'sar';
+}
+
+export interface STACRetrieveResponsePayload {
+  status: 'success' | 'error';
+  scene_id: string;
+  asset_key: string;
+  category: 'visual_preview' | 'scientific_raster' | 'unsupported';
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  data_base64: string;
+  metadata: Record<string, any>;
+  scientific_limitations: string[];
+  validation?: STACValidateAssetResponsePayload;
+  provenance?: Record<string, any>;
+  error?: string;
+}
+
+export interface STACTemporalPairValidateRequestPayload {
+  t1_scene_id?: string;
+  t2_scene_id?: string;
+  t1_asset_key?: string;
+  t2_asset_key?: string;
+  t1_filename?: string;
+  t2_filename?: string;
+  t1_data_base64?: string;
+  t2_data_base64?: string;
+  t1_provenance?: Record<string, any>;
+  t2_provenance?: Record<string, any>;
+  t1_metadata?: Record<string, any>;
+  t2_metadata?: Record<string, any>;
+  aoi_bbox?: [number, number, number, number];
+}
+
+export interface STACTemporalPairValidateResponsePayload {
+  status: 'compatible' | 'compatible_with_limitations' | 'rejected';
+  is_compatible: boolean;
+  rejection_reason?: string | null;
+  t1_validation?: STACValidateAssetResponsePayload;
+  t2_validation?: STACValidateAssetResponsePayload;
+  t1_datetime?: string | null;
+  t2_datetime?: string | null;
+  temporal_delta_days?: number | null;
+  chronology_status: 'chronological' | 'inverted' | 'identical' | 'unknown';
+  spatial_overlap_pct?: number | null;
+  overlap_detected: boolean;
+  crs_compatible: boolean;
+  resolution_compatible: boolean;
+  modality_compatible: boolean;
+  co_registered: boolean;
+  warnings: string[];
+  scientific_limitations: string[];
+  candidate_providers: string[];
+  primary_provider: string;
+  fallback_status: string;
+  recommended_action: string;
+}
+
+export interface STACTemporalSearchRequestPayload {
+  bbox: [number, number, number, number];
+  t1_start_date: string;
+  t1_end_date: string;
+  t2_start_date: string;
+  t2_end_date: string;
+  collection?: string;
+  max_cloud_cover?: number;
+  limit?: number;
+}
+
+export interface STACTemporalSearchResponsePayload {
+  status: 'success' | 'partial' | 'zero_results';
+  provider: string;
+  search_bbox: [number, number, number, number];
+  t1_results: STACSearchResponsePayload;
+  t2_results: STACSearchResponsePayload;
+  temporal_delta_days_estimate?: number | null;
+  message?: string;
+}
+
+export interface STACOpticalSARPairValidateRequestPayload {
+  optical_scene_id?: string;
+  sar_scene_id?: string;
+  optical_asset_key?: string;
+  sar_asset_key?: string;
+  optical_filename?: string;
+  sar_filename?: string;
+  optical_data_base64?: string;
+  sar_data_base64?: string;
+  optical_provenance?: Record<string, any>;
+  sar_provenance?: Record<string, any>;
+  optical_metadata?: Record<string, any>;
+  sar_metadata?: Record<string, any>;
+  aoi_bbox?: [number, number, number, number];
+}
+
+export interface STACOpticalSARPairValidateResponsePayload {
+  status: 'compatible' | 'compatible_with_limitations' | 'rejected';
+  is_compatible: boolean;
+  rejection_reason?: string | null;
+  optical_validation?: STACValidateAssetResponsePayload;
+  sar_validation?: STACValidateAssetResponsePayload;
+  optical_datetime?: string | null;
+  sar_datetime?: string | null;
+  temporal_delta_days?: number | null;
+  spatial_overlap_pct?: number | null;
+  overlap_detected: boolean;
+  crs_compatible: boolean;
+  resolution_compatible: boolean;
+  modality_compatible: boolean;
+  co_registered: boolean;
+  sar_polarization?: string;
+  sar_sensor?: string;
+  sar_calibration_status: 'calibrated_backscatter' | 'unverified_linear_dn' | 'rejected';
+  sar_terrain_correction_status: 'radiometrically_terrain_corrected' | 'ellipsoid_geocoded_grd' | 'rejected';
+  warnings: string[];
+  scientific_limitations: string[];
+  candidate_providers: string[];
+  primary_provider: string;
+  fallback_status: string;
+  recommended_action: string;
+}
+
+export interface STACOpticalSARSearchRequestPayload {
+  bbox: [number, number, number, number];
+  optical_start_date?: string;
+  optical_end_date?: string;
+  sar_start_date?: string;
+  sar_end_date?: string;
+  max_cloud_cover?: number;
+  limit?: number;
+}
+
+export interface STACOpticalSARSearchResponsePayload {
+  status: 'success' | 'partial' | 'zero_results';
+  provider: string;
+  search_bbox: [number, number, number, number];
+  optical_results: STACSearchResponsePayload;
+  sar_results: STACSearchResponsePayload;
+  temporal_delta_days_estimate?: number | null;
+  message?: string;
+}
+
+

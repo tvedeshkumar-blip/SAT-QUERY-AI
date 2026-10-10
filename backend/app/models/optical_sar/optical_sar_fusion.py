@@ -198,13 +198,18 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
         sar_b64 = convert_array_to_base64_png(sar_gray)
         joint_b64 = convert_array_to_base64_png(joint_composite)
 
-        polarization = meta_sar.get("polarization") or meta_sar.get("tags", {}).get("POLARIZATION", "VV/VH")
-        sensor_type = meta_sar.get("sensor") or meta_sar.get("tags", {}).get("SENSOR", "Microwave SAR")
+        polarization = meta_sar.get("polarization") or meta_sar.get("tags", {}).get("POLARIZATION", "VV")
+        sensor_type = meta_sar.get("sensor") or meta_sar.get("tags", {}).get("SENSOR", "Sentinel-1 C-Band SAR")
+        calib_status = meta_sar.get("calibration_status") or ("calibrated_backscatter" if any(k in str(meta_sar).lower() for k in ["sigma0", "gamma0", "calibrated"]) else "unverified_linear_dn")
+        terrain_status = meta_sar.get("terrain_correction_status") or ("radiometrically_terrain_corrected" if any(k in str(meta_sar).lower() for k in ["terrain_corrected", "rtc"]) else "ellipsoid_geocoded_grd")
+
+        calib_text = "Calibrated sigma-0 dB backscatter" if calib_status == "calibrated_backscatter" else "Unverified linear DN (empirical relative dB scaling)"
+        terrain_text = "Radiometrically Terrain Corrected (RTC)" if terrain_status == "radiometrically_terrain_corrected" else "Ellipsoid Geocoded GRD (uncorrected for relief distortion)"
 
         answer = (
             f"Optical + SAR Multimodal Joint Analysis completed across {w}x{h} scene. "
             f"Cross-modal integration combines optical surface reflectance (mean albedo: {mean_opt:.1f}) "
-            f"with {sensor_type} microwave backscatter ({polarization}, mean intensity: {mean_sar:.1f}). "
+            f"with {sensor_type} microwave radar backscatter ({polarization} polarization, {calib_text}, {terrain_text}, mean intensity: {mean_sar:.1f}). "
             f"Surface interpretations: "
             f"(1) Specular Water / Smooth Surfaces: {water_pct:.2f}% of scene ({water_px:,} px with joint low optical albedo & low radar return); "
             f"(2) Structural / Urban Double Bounce: {urban_pct:.2f}% of scene ({urban_px:,} px with high radar backscatter); "
@@ -233,11 +238,13 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
                 "id": "ev_sar_backscatter",
                 "type": "processed",
                 "title": f"SAR Scene ({sensor_type} Microwave Backscatter)",
-                "description": f"Decibel-scaled microwave intensity map ({polarization} polarization, surface roughness/dielectric response).",
+                "description": f"Decibel-scaled microwave intensity map ({polarization} polarization, {calib_text}, {terrain_text}).",
                 "data_base64": sar_b64,
                 "statistics": {
                     "modality": "SAR",
                     "polarization": polarization,
+                    "calibration_status": calib_status,
+                    "terrain_correction_status": terrain_status,
                     "mean_backscatter_intensity": round(mean_sar, 1)
                 }
             },
@@ -271,15 +278,19 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
         ]
 
         limitations = [
-            "Radiometric calibration coefficients (sigma0/gamma0) and incidence angle look-up tables are required for absolute quantitative backscatter modeling.",
-            "Sub-pixel geometric co-registration between steep terrain SAR range-Doppler projections and optical orthorectified imagery requires high-precision DEM data."
+            "Optical surface reflectance (spectral albedo) and SAR microwave backscatter (roughness/dielectric return) are physically non-interchangeable remote sensing measurements.",
+            "Radiometric calibration coefficients (sigma0/gamma0) and incidence angle look-up tables are required for absolute quantitative backscatter modeling." if calib_status != "calibrated_backscatter" else "Absolute quantitative backscatter calibrated using verified product calibration tags.",
+            "Ellipsoid-projected SAR rasters without DEM-based Radiometric Terrain Correction (RTC) may exhibit geometric layover and foreshortening in undulating terrain." if terrain_status != "radiometrically_terrain_corrected" else "Product verified with Radiometric Terrain Correction (RTC)."
         ]
 
         return {
             "answer": answer,
             "model_type": "joint_analysis_baseline",
             "model_name": self.model_name,
-            "model_status": "baseline",
+            "primary_model": self.model_name,
+            "actual_model_used": self.model_name,
+            "fallback_used": False,
+            "model_status": "loaded",
             "implementation_status": "baseline",
             "confidence": None,
             "confidence_label": "Not available (Physically Grounded Radiometric Baseline)",
@@ -289,7 +300,16 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
             "optical_evidence": opt_b64,
             "sar_evidence": sar_b64,
             "fused_evidence": joint_b64,
-            "limitations": limitations
+            "limitations": limitations,
+            "model_provenance": {
+                "primary_model": self.model_name,
+                "actual_model_used": self.model_name,
+                "fallback_used": False,
+                "polarization": polarization,
+                "sensor": sensor_type,
+                "calibration_status": calib_status,
+                "terrain_correction_status": terrain_status
+            }
         }
 
 class OpticalSARProvider(BaseModel):

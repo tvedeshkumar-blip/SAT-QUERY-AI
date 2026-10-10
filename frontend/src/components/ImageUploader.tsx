@@ -10,7 +10,12 @@ export interface UploadedFileState {
   size?: number;
   role: 'primary' | 'secondary' | 'optical' | 'sar';
   isGeoTIFF: boolean;
+  assetCategory?: 'visual_preview' | 'rgb_visual_raster' | 'single_band_spectral' | 'multispectral_cube' | 'scientific_raster' | 'unsupported';
+  stacProvenance?: Record<string, any>;
+  validation?: any;
+  scientificLimitations?: string[];
 }
+
 
 interface ImageUploaderProps {
   mode: AnalysisMode;
@@ -19,6 +24,7 @@ interface ImageUploaderProps {
   setFiles: React.Dispatch<React.SetStateAction<UploadedFileState[]>>;
   onClear: () => void;
 }
+
 
 export const ImageUploader: React.FC<ImageUploaderProps> = ({
   mode,
@@ -158,8 +164,25 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
                     <CheckCircle2 className="w-3 h-3 text-cyan-400" />
                     Ingested for Analysis
                   </span>
+                  {primaryFile.stacProvenance && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-teal-950 text-teal-300 border border-teal-800 truncate max-w-[200px]" title={primaryFile.stacProvenance.scene_id}>
+                        STAC: {primaryFile.stacProvenance.scene_id}
+                      </span>
+                      {primaryFile.assetCategory === 'visual_preview' ? (
+                        <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-950 text-amber-300 border border-amber-800">
+                          Visual Preview (8-bit)
+                        </span>
+                      ) : (
+                        <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800">
+                          Scientific Raster ({primaryFile.validation?.raster_metadata?.bands || 3}B)
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
+
             ) : (
               <div className="space-y-1.5">
                 <Upload className="w-6 h-6 text-slate-400 mx-auto group-hover:text-cyan-400 transition-colors" />

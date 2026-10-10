@@ -59,6 +59,26 @@ def analyze_spectral_indices(request: AnalysisRequest):
         img_in = request.images[0]
         arr, meta = parse_geotiff_or_image(img_in.data, img_in.filename)
 
+        # Enforce scientific integrity: reject uncalibrated visual preview browse assets
+        is_preview = (
+            getattr(img_in, "asset_category", None) == "visual_preview"
+            or (img_in.filename or "").lower().endswith((".jpg", ".jpeg"))
+        )
+        if is_preview:
+            raise HTTPException(
+                status_code=400,
+                detail="Scientific integrity validation failed: Quantitative spectral index calculation is strictly forbidden on visual preview browse imagery. Calibrated NDVI/NDWI requires verified multispectral surface reflectance bands (Red Band 4 and NIR Band 8)."
+            )
+
+
+        # Enforce band requirement: single-band raster cannot compute NDVI
+        if meta.get("bands", 1) == 1:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Scientific integrity validation failed: Asset '{img_in.filename}' contains only 1 spectral channel. NDVI calculation requires distinct multispectral Red and NIR bands."
+            )
+
+
         ndvi_f, ndvi_col = compute_ndvi(arr)
         ndwi_f, ndwi_col = compute_ndwi(arr)
         cir_rgb = compute_false_color_cir(arr)
