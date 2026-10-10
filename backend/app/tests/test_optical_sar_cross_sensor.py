@@ -448,3 +448,77 @@ def test_truthful_model_and_baseline_reporting():
     assert res_baseline["primary_model"] == "OpticalSARJointAnalysisProvider"
     assert res_baseline["actual_model_used"] == "OpticalSARVisualizationBaseline"
     assert res_baseline["fallback_used"] is True
+
+
+def test_controlled_real_asset_optical_sar_fusion_pipeline():
+    """
+    Stage 6D: Controlled Real-Asset Optical-SAR Fusion Test.
+    Executes the existing Stage 6 optical-SAR analysis on genuine Sentinel-2 B04
+    and Sentinel-1 RTC VV windows acquired over Bengaluru AOI.
+    """
+    from app.acquisition.windowed_reader import SafeWindowedCOGReader
+    import httpx
+
+    token_url = "https://planetarycomputer.microsoft.com/api/sas/v1/token/sentinel-1-rtc"
+    try:
+        with httpx.Client(timeout=10.0) as http_client:
+            resp = http_client.get(token_url)
+            if resp.status_code != 200:
+                pytest.skip("Planetary Computer token endpoint unavailable")
+            token = resp.json().get("token")
+    except Exception as e:
+        pytest.skip(f"Network error accessing token service: {e}")
+
+    aoi_bengaluru = [77.58, 12.96, 77.60, 12.98]
+    s2_url = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/43/P/GQ/2024/3/S2A_43PGQ_20240328_0_L2A/B04.tif"
+    s1_raw = "https://sentinel1euwestrtc.blob.core.windows.net/sentinel1-grd-rtc/GRD/2024/3/22/IW/DV/S1A_IW_GRDH_1SDV_20240322T004029_20240322T004054_053087_066E0A_9C2C/measurement/iw-vv.rtc.tiff"
+    s1_url = f"{s1_raw}?{token}"
+
+    # 1. Acquire bounded windows
+    s2_arr, s2_meta = SafeWindowedCOGReader.read_cog_window(s2_url, aoi_bengaluru)
+    s1_arr, s1_meta = SafeWindowedCOGReader.read_cog_window(s1_url, aoi_bengaluru)
+
+    assert s2_arr.shape == s1_arr.shape == (224, 220)
+    assert s2_arr.dtype == np.uint16
+    assert s1_arr.dtype == np.float32
+
+    # 2. Execute existing OpticalSARJointAnalysisProvider
+    provider = OpticalSARJointAnalysisProvider()
+    res = provider.predict(
+        images=[s2_arr, s1_arr],
+        query="Perform controlled real-asset cross-sensor analysis over Bengaluru downtown.",
+        metadata={
+            "optical": {
+                **s2_meta,
+                "modality": "OPTICAL",
+                "sensor": "Sentinel-2 L2A",
+                "item_id": "S2A_43PGQ_20240328_0_L2A",
+                "datetime": "2024-03-28T05:27:01Z"
+            },
+            "sar": {
+                **s1_meta,
+                "modality": "SAR",
+                "sensor": "Sentinel-1 C-SAR IW RTC",
+                "item_id": "S1A_IW_GRDH_1SDV_20240322T004029_20240322T004054_053087_066E0A_rtc",
+                "datetime": "2024-03-22T00:40:42Z",
+                "polarization": "VV",
+                "calibration_status": "calibrated_backscatter",
+                "terrain_correction_status": "radiometrically_terrain_corrected"
+            }
+        }
+    )
+
+    # 3. Verify pipeline execution, provenance, and registration safeguards
+    assert res["primary_model"] == "OpticalSARJointAnalysisProvider"
+    assert res["actual_model_used"] == "OpticalSARJointAnalysisProvider"
+    assert res["fallback_used"] is False
+    assert res["registration_info"]["co_registered"] is True
+    assert res["registration_info"]["registration_method"] == "identical_grid_co_registered"
+    assert res["registration_info"]["spatial_overlap_percent"] == 100.0
+    assert res["valid_pixel_count"] == 49280
+    assert res["water_pct"] is not None
+    assert res["urban_pct"] is not None
+    assert res["veg_pct"] is not None
+    assert len(res["evidence"]) == 4
+    assert any("preliminary scene-normalized empirical proxies" in lim for lim in res["limitations"])
+
