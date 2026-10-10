@@ -52,8 +52,11 @@ class DeterministicVerifier:
         contradictions: List[str] = []
         evaluated_claims: List[ClaimVerificationItem] = []
 
-        # Build lookup set of valid artifact IDs
-        valid_artifact_ids = {a.artifact_id for a in evidence_package.evidence_artifacts}
+        # Build lookup set and dictionary of valid artifact IDs
+        artifacts_by_id = {a.artifact_id.strip(): a for a in evidence_package.evidence_artifacts}
+        norm_artifact_ids = {a.artifact_id.strip().lower(): a.artifact_id.strip() for a in evidence_package.evidence_artifacts}
+        valid_artifact_ids = set(artifacts_by_id.keys())
+        phys_by_name = {pm.name: pm for pm in evidence_package.physical_measurements}
 
         # 1. Deterministic Check: Physical measurements must declare units, statistic type, and mask
         for pm in evidence_package.physical_measurements:
@@ -81,11 +84,14 @@ class DeterministicVerifier:
         # 4. Check for Gamma-0 vs Sigma-0 conflation in sensor / asset provenance
         has_gamma0 = False
         has_sigma0 = False
+        is_uncalibrated_asset = False
         for asset in evidence_package.source_assets:
             cal = str(asset.get("calibration", "")).lower()
             meas = str(asset.get("measurement", "")).lower()
             desc = str(asset.get("description", "")).lower()
             coll = str(asset.get("collection", "")).lower()
+            if "uncalibrated" in cal or "uncalibrated" in meas:
+                is_uncalibrated_asset = True
             if "gamma" in cal or "gamma" in meas or "rtc" in coll or "gamma0" in desc:
                 has_gamma0 = True
             if "sigma" in cal or "sigma" in meas or "sigma0" in desc:
@@ -121,28 +127,97 @@ class DeterministicVerifier:
             c_status = claim.status
             c_reason = claim.reason or ""
 
-            # Check A: Artifact citation integrity
+            # Check 0: Empty package check for physical measurements
+            if not evidence_package.physical_measurements and (
+                claim.claim_type == "measurement" or
+                any(t in c_text_lower for t in ["reflectance", "backscatter", "linear power", "gamma0", "sigma0"])
+            ):
+                msg = "Evidence package contains zero physical measurements; claim cannot be verified as supported."
+                failures.append(msg)
+                contradictions.append(msg)
+                c_status = "unsupported"
+                c_reason = msg
+
+            # Check A: Artifact citation integrity & Modality/Type Cross-Check
+            cleaned_cited_ids = []
             for art_id in claim.cited_artifact_ids:
-                if art_id not in valid_artifact_ids:
+                clean_id = art_id.strip()
+                # Check case-insensitive match
+                if clean_id not in valid_artifact_ids and clean_id.lower() in norm_artifact_ids:
+                    clean_id = norm_artifact_ids[clean_id.lower()]
+
+                if clean_id not in valid_artifact_ids:
                     msg = f"Claim references unknown artifact ID '{art_id}' not found in evidence package."
                     failures.append(msg)
                     contradictions.append(msg)
                     c_status = "unsupported"
                     c_reason = f"Unknown artifact ID '{art_id}'."
+                else:
+                    cleaned_cited_ids.append(clean_id)
+                    # Check modality compatibility
+                    art = artifacts_by_id[clean_id]
+                    art_type = (art.artifact_type or "").lower()
+                    art_title = (art.title or "").lower()
+
+                    is_optical_claim = any(t in c_text_lower for t in ["optical", "reflectance", "albedo", "b04", "ndvi", "rgb", "sentinel-2"])
+                    is_pure_sar_art = ("sar" in art_type or "sar" in art_title or "radar" in art_title or "rtc" in art_title) and not any(t in art_type or t in art_title for t in ["composite", "fused", "overlay"])
+                    if is_optical_claim and is_pure_sar_art:
+                        msg = f"Modality mismatch: Claim asserts optical property, but cites SAR artifact '{clean_id}'."
+                        failures.append(msg)
+                        contradictions.append(msg)
+                        c_status = "contradicted"
+                        c_reason = msg
+
+                    is_sar_claim = any(t in c_text_lower for t in ["sar", "radar", "backscatter", "gamma-0", "gamma0", "sigma-0", "sigma0", "linear power", "sentinel-1"])
+                    is_pure_opt_art = ("optical" in art_type or "optical" in art_title or "sentinel-2" in art_title) and not any(t in art_type or t in art_title for t in ["composite", "fused", "overlay"])
+                    if is_sar_claim and is_pure_opt_art:
+                        msg = f"Modality mismatch: Claim asserts SAR/radar property, but cites optical artifact '{clean_id}'."
+                        failures.append(msg)
+                        contradictions.append(msg)
+                        c_status = "contradicted"
+                        c_reason = msg
+
+            # Update cited artifact IDs with normalized versions
+            if cleaned_cited_ids:
+                claim.cited_artifact_ids = cleaned_cited_ids
+
+            # Check A2: Unobserved Environmental Variables
+            unobserved_terms = ["soil moisture", "surface temperature", "bathymetry", "precipitation", "wind speed", "salinity"]
+            for term in unobserved_terms:
+                if term in c_text_lower:
+                    found_in_evidence = any(
+                        term in pm.name.lower() or term in (pm.calibration_quantity or "").lower()
+                        for pm in evidence_package.physical_measurements
+                    )
+                    if not found_in_evidence:
+                        msg = f"Claim asserts unobserved environmental variable '{term}' absent from the evidence package."
+                        failures.append(msg)
+                        contradictions.append(msg)
+                        c_status = "unsupported"
+                        c_reason = msg
 
             # Check B: Co-registration claim consistency
-            if any(term in c_text_lower for term in ["co-registered", "coregistered", "sub-pixel registration", "pixel-aligned"]):
-                reg_status = evidence_package.registration_status
+            is_coreg_claim = any(
+                term in c_text_lower for term in [
+                    "co-registered", "coregistered", "co-registration", "coregistration",
+                    "sub-pixel registration", "pixel-aligned", "geometric alignment",
+                    "geometrically aligned", "registered and", "verified registration",
+                    "scenes are registered", "images are registered"
+                ]
+            )
+            if is_coreg_claim:
+                reg_status = evidence_package.registration_status or {}
                 is_coreg = bool(reg_status.get("co_registered", False))
                 if not is_coreg:
-                    msg = "Claim asserts co-registration, but registration metadata indicates co-registration is False or unperformed."
+                    msg = "Claim asserts geometric co-registration, but registration metadata indicates co-registration is False or unperformed."
                     failures.append(msg)
                     contradictions.append(msg)
                     c_status = "contradicted"
                     c_reason = "Contradicts registration metadata (co_registered=False)."
 
             # Check C: Trained model claim consistency
-            if any(term in c_text_lower for term in ["trained model", "deep learning", "neural network", "trained weights"]):
+            is_trained_claim = bool(re.search(r'\b(?:deep[\s-]learning|neural[\s-]network|trained[\s-]model|trained[\s-]weights)\b', c_text_lower))
+            if is_trained_claim:
                 prov = evidence_package.provider_info
                 if not prov.is_trained_model or prov.fallback_used:
                     msg = "Claim asserts a trained model was used, but provider metadata confirms a heuristic baseline or fallback was executed."
@@ -160,8 +235,15 @@ class DeterministicVerifier:
                     c_status = "contradicted"
                     c_reason = "Violates scientific integrity: heuristic proxy cannot be claimed as certified classification."
 
-            # Check E: Gamma-0 vs Sigma-0 conflation
-            if has_gamma0 and not has_sigma0:
+            # Check E: Gamma-0 vs Sigma-0 conflation and Uncalibrated Assets
+            if is_uncalibrated_asset:
+                if any(t in c_text_lower for t in ["certified gamma", "certified sigma", "calibrated backscatter", "calibrated sigma-0", "calibrated gamma-0"]):
+                    msg = "Asset calibration provenance is uncalibrated DN; cannot support certified backscatter claim."
+                    failures.append(msg)
+                    contradictions.append(msg)
+                    c_status = "contradicted"
+                    c_reason = msg
+            elif has_gamma0 and not has_sigma0:
                 if any(term in c_text_lower for term in ["sigma-0", "sigma_0", "sigma0", "sigma-naught", "sigma naught"]):
                     msg = "SAR gamma-naught backscatter is mislabeled as sigma-naught without supporting calibration provenance."
                     failures.append(msg)
@@ -169,10 +251,8 @@ class DeterministicVerifier:
                     c_status = "contradicted"
                     c_reason = "Mislabels gamma-naught RTC power as sigma-naught."
 
-            # Check F: Display values conflated with physical measurements
-            # (e.g. claiming 8-bit normalized value 92.8 or 105.8 as physical reflectance or calibrated backscatter)
+            # Check F: Display values conflated with physical measurements & Numerical verification
             if any(term in c_text_lower for term in ["surface reflectance", "boa reflectance", "albedo"]):
-                # Look for numbers > 1.0 described as reflectance without DN scale
                 match_before = re.search(r'(\d+\.?\d*)\s*(?:%|reflectance|albedo)', c_text_lower)
                 match_after = re.search(r'(?:surface reflectance|boa reflectance|reflectance|albedo)[^\d]*(\d+\.?\d*)', c_text_lower)
                 num_str = None
@@ -183,24 +263,68 @@ class DeterministicVerifier:
 
                 if num_str:
                     val = float(num_str)
-                    # If value > 1.0 and not explicitly a percentage of BOA or scaled DN
-                    # E.g. claiming 92.8 as BOA reflectance
                     if val > 1.0 and "display" not in c_text_lower and "%" not in c_text_lower and "dn" not in c_text_lower:
                         msg = f"Display-scale value ({val}) is conflated with physical BOA surface reflectance (range [0, 1])."
                         failures.append(msg)
                         contradictions.append(msg)
                         c_status = "contradicted"
                         c_reason = "Conflates 8-bit display value with physical BOA reflectance."
+                    elif val <= 1.0:
+                        # Verify against actual measured reflectance
+                        true_refl = phys_by_name.get("optical_mean_boa_reflectance")
+                        if true_refl and isinstance(true_refl.value, (int, float)):
+                            actual = float(true_refl.value)
+                            if abs(val - actual) > 0.05:
+                                msg = f"Claimed BOA surface reflectance ({val}) contradicts verified physical measurement ({actual})."
+                                failures.append(msg)
+                                contradictions.append(msg)
+                                c_status = "contradicted"
+                                c_reason = msg
 
-            # Check G: Decibel naming clarity
-            if "decibel" in c_text_lower or "db" in c_text_lower:
-                # If mean linear power is claimed as decibels directly
-                if "mean linear" in c_text_lower and "db" in c_text_lower and "10*log10" not in c_text_lower and "converted" not in c_text_lower:
-                    msg = "Linear power mean is incorrectly labeled as dB backscatter without logarithmic conversion."
-                    failures.append(msg)
-                    contradictions.append(msg)
-                    c_status = "contradicted"
-                    c_reason = "Conflates linear power with decibels."
+            # Check F2: SAR Display intensity conflation
+            if any(t in c_text_lower for t in ["backscatter", "sar", "radar"]):
+                m_sar_after = re.search(r'(?:backscatter|sar|radar)[^\d]*(\d+\.?\d*)', c_text_lower)
+                m_sar_before = re.search(r'(\d+\.?\d*)\s*(?:backscatter|sar|radar)', c_text_lower)
+                num_sar = None
+                if m_sar_after:
+                    num_sar = m_sar_after.group(1)
+                elif m_sar_before:
+                    num_sar = m_sar_before.group(1)
+
+                if num_sar:
+                    val_sar = float(num_sar)
+                    disp_sar = next((ds for ds in evidence_package.display_statistics if "sar" in ds.name), None)
+                    is_disp_val = (disp_sar and abs(val_sar - float(disp_sar.value)) < 0.5) or (val_sar > 25.0)
+                    if is_disp_val and "display" not in c_text_lower and "dn" not in c_text_lower and "index" not in c_text_lower:
+                        msg = f"Display-scale value ({val_sar}) is conflated with physical calibrated SAR backscatter."
+                        failures.append(msg)
+                        contradictions.append(msg)
+                        c_status = "contradicted"
+                        c_reason = "Conflates 8-bit display value with physical SAR backscatter."
+
+            # Check G: Decibel naming clarity & non-linear statistics
+            if any(t in c_text_lower for t in ["linear power", "linear gamma", "linear backscatter", "mean linear"]) and "db" in c_text_lower and "10*log10" not in c_text_lower and "converted" not in c_text_lower:
+                msg = "Linear power is incorrectly labeled as dB backscatter without logarithmic conversion."
+                failures.append(msg)
+                contradictions.append(msg)
+                c_status = "contradicted"
+                c_reason = "Conflates linear power with decibels."
+
+            if "mean pixel-wise" in c_text_lower or "pixel-wise db" in c_text_lower:
+                m_db = re.search(r'(-?\d+\.?\d*)\s*db', c_text_lower)
+                if m_db:
+                    db_val = float(m_db.group(1))
+                    true_lin_to_db = phys_by_name.get("sar_mean_linear_to_db")
+                    true_px_db = phys_by_name.get("sar_mean_pixel_db")
+                    if true_lin_to_db and true_px_db:
+                        v_lin_db = float(true_lin_to_db.value)
+                        v_px_db = float(true_px_db.value)
+                        if abs(db_val - v_lin_db) < 0.2 and abs(db_val - v_px_db) > 1.0:
+                            msg = f"Value ({db_val} dB) is the linear power mean converted to dB (10*log10(mean linear)), but is incorrectly claimed as mean pixel-wise dB."
+                            failures.append(msg)
+                            contradictions.append(msg)
+                            c_status = "contradicted"
+                            c_reason = msg
 
             evaluated_claims.append(ClaimVerificationItem(
                 claim_text=claim.claim_text,
@@ -695,27 +819,52 @@ class LLMScientificVerifier:
 
             # Merge LLM claims with deterministic evaluation
             final_claims = []
-            valid_art_ids = {a.artifact_id for a in evidence_package.evidence_artifacts}
+            valid_art_ids = {a.artifact_id.strip() for a in evidence_package.evidence_artifacts}
+            det_contradicted_claims = {
+                c.claim_text.strip().lower(): c
+                for c in evaluated_claims
+                if c.status in ("contradicted", "unsupported")
+            }
 
             for c_raw in llm_claims_raw:
                 c_item = ClaimVerificationItem(**c_raw)
                 # Check for hallucinated artifact citations by LLM
+                cleaned_cited = []
                 for art_id in c_item.cited_artifact_ids:
-                    if art_id not in valid_art_ids:
+                    clean_id = art_id.strip()
+                    if clean_id not in valid_art_ids and clean_id.lower() in {a.lower() for a in valid_art_ids}:
+                        clean_id = next(a for a in valid_art_ids if a.lower() == clean_id.lower())
+                    if clean_id not in valid_art_ids:
                         c_item.status = "unsupported"
                         c_item.reason = f"LLM cited invalid artifact ID '{art_id}' not in evidence package."
                         llm_contradictions.append(f"Invalid artifact ID '{art_id}' cited by LLM.")
+                    else:
+                        cleaned_cited.append(clean_id)
+                c_item.cited_artifact_ids = cleaned_cited
+
+                # NON-OVERRIDABLE GATE: A deterministically contradicted/unsupported claim CANNOT be promoted to supported!
+                c_text_l = c_item.claim_text.strip().lower()
+                for det_text, det_c in det_contradicted_claims.items():
+                    if det_text in c_text_l or c_text_l in det_text:
+                        if c_item.status == "supported":
+                            c_item.status = det_c.status
+                            c_item.reason = f"Deterministic gate: {det_c.reason}"
+
                 final_claims.append(c_item)
 
             if not final_claims and evaluated_claims:
+                final_claims = evaluated_claims
+            elif not llm_claims_raw and evaluated_claims:
                 final_claims = evaluated_claims
 
             # Step 5: Enforce Non-Overridable Deterministic Gate
             # A deterministic failure MUST NOT be overridden by an LLM assertion!
             final_status = llm_status
             if not det_passed:
-                final_status = "unsupported"
-                if any(c.status == "supported" for c in final_claims):
+                supported_count = sum(1 for c in final_claims if c.status == "supported")
+                if supported_count == 0:
+                    final_status = "unsupported"
+                else:
                     final_status = "partially_supported"
                 # Ensure all deterministic failures are in contradictions
                 for f in det_failures:

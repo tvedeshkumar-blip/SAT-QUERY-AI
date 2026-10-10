@@ -151,4 +151,41 @@ describe('Stage 7 Evidence-Grounded Scientific Verification', () => {
     assert.strictEqual(response.verification?.is_interpretive_only, true);
   });
 
+  test('adversarial: prevents false success badge when deterministic check failed', () => {
+    const failedVerification: VerificationResponse = {
+      verification_status: 'unsupported',
+      deterministic_passed: false,
+      deterministic_failures: ['Claim asserts geometric co-registration when co_registered=False.'],
+      claims: [
+        {
+          claim_text: 'Scenes are registered.',
+          claim_type: 'registration',
+          status: 'contradicted',
+          cited_artifact_ids: []
+        }
+      ],
+      contradictions: ['Claim asserts geometric co-registration when co_registered=False.'],
+      summary_explanation: 'Deterministic check failed.',
+      is_interpretive_only: true
+    };
+
+    assert.notStrictEqual(failedVerification.verification_status, 'supported');
+    assert.strictEqual(failedVerification.deterministic_passed, false);
+    assert.strictEqual(failedVerification.claims?.[0].status, 'contradicted');
+  });
+
+  test('adversarial: preserves contradicted status and cited artifacts under format anomalies', () => {
+    const claim: ClaimVerificationItem = {
+      claim_text: 'Radar backscatter is 105.8.',
+      claim_type: 'measurement',
+      status: 'contradicted',
+      cited_artifact_ids: ['sar_input'],
+      reason: 'Conflates 8-bit display value with physical SAR backscatter.'
+    };
+
+    assert.strictEqual(claim.status, 'contradicted');
+    assert.deepStrictEqual(claim.cited_artifact_ids, ['sar_input']);
+    assert.ok(claim.reason?.includes('Conflates 8-bit display value'));
+  });
+
 });
