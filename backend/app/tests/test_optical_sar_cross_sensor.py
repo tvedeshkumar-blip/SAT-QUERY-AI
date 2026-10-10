@@ -520,5 +520,27 @@ def test_controlled_real_asset_optical_sar_fusion_pipeline():
     assert res["urban_pct"] is not None
     assert res["veg_pct"] is not None
     assert len(res["evidence"]) == 4
+
+    # 4. Stage 6E Physical semantics and provenance verification
+    ev_map = {e["id"]: e for e in res["evidence"]}
+    opt_stat = ev_map["ev_optical_reflectance"]["statistics"]
+    sar_stat = ev_map["ev_sar_backscatter"]["statistics"]
+
+    assert opt_stat["physical_boa_reflectance_mean"] == pytest.approx(0.1298, rel=1e-2)
+    assert opt_stat["physical_reflectance_percent"] == "12.98%"
+    assert opt_stat["mean_albedo"] == 92.8
+    assert "8-bit uint8" in opt_stat["display_scale"]
+
+    assert sar_stat["calibration_quantity"] == "gamma-0"
+    assert sar_stat["linear_power_mean"] == pytest.approx(0.7417, rel=1e-2)
+    assert sar_stat["calibrated_db_mean"] == pytest.approx(-4.98, rel=1e-2)
+    assert sar_stat["mean_backscatter_intensity"] == 105.8
+    assert "8-bit uint8" in sar_stat["display_scale"]
+
+    assert "Calibrated gamma-0 backscatter" in res["answer"]
+    assert "mean linear gamma-0 power: 0.7417 (-4.98 dB)" in res["answer"]
+    assert "mean BOA surface reflectance: 0.1298 (12.98%" in res["answer"]
+    assert res["model_provenance"]["calibration_quantity"] == "gamma-0"
     assert any("preliminary scene-normalized empirical proxies" in lim for lim in res["limitations"])
+
 

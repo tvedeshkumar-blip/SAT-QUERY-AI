@@ -158,7 +158,12 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
         calib_status = meta_sar.get("calibration_status") or ("calibrated_backscatter" if any(k in str(meta_sar).lower() for k in ["sigma0", "gamma0", "calibrated"]) else "unverified_linear_dn")
         terrain_status = meta_sar.get("terrain_correction_status") or ("radiometrically_terrain_corrected" if any(k in str(meta_sar).lower() for k in ["terrain_corrected", "rtc"]) else "ellipsoid_geocoded_grd")
 
-        calib_text = "Calibrated sigma-0 dB backscatter" if calib_status == "calibrated_backscatter" else "Unverified linear DN (empirical relative dB scaling)"
+        is_gamma = any(k in str(meta_sar).lower() for k in ["gamma0", "gamma_0", "rtc"])
+        calib_quantity = "gamma-0" if is_gamma else ("sigma-0" if "sigma0" in str(meta_sar).lower() else "unspecified")
+        if calib_status == "calibrated_backscatter":
+            calib_text = f"Calibrated {calib_quantity} backscatter" if calib_quantity != "unspecified" else "Calibrated backscatter"
+        else:
+            calib_text = "Unverified linear DN (empirical relative dB scaling)"
         terrain_text = "Radiometrically Terrain Corrected (RTC)" if terrain_status == "radiometrically_terrain_corrected" else "Ellipsoid Geocoded GRD (uncorrected for relief distortion)"
 
         # Step 1: Normalize modalities separately
@@ -326,9 +331,29 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
         urban_pct = round((urban_px / valid_pixel_count) * 100.0, 2)
         veg_pct = round((veg_px / valid_pixel_count) * 100.0, 2)
 
-        # Radiometric averages computed strictly across valid pixels
-        mean_opt = float(np.mean(opt_rgb[valid_mask]))
-        mean_sar = float(np.mean(sar_gray[valid_mask]))
+        # Normalized 8-bit display averages computed strictly across valid pixels
+        mean_opt_display = float(np.mean(opt_rgb[valid_mask]))
+        mean_sar_display = float(np.mean(sar_gray[valid_mask]))
+
+        # Physical statistics on raw/calibrated rasters (strictly within valid_mask)
+        # 1. Optical Physical BOA Reflectance
+        opt_valid_raw = img_opt[valid_mask] if img_opt.ndim == 2 else img_opt[valid_mask, 0]
+        raw_opt_dn_mean = float(np.mean(opt_valid_raw))
+        # Sentinel-2 L2A surface reflectance uses 10,000 scale factor (reflectance = DN / 10000)
+        is_s2_l2a = "sentinel-2" in str(meta_opt).lower() or raw_opt_dn_mean > 100.0
+        physical_refl_mean = (raw_opt_dn_mean / 10000.0) if is_s2_l2a else raw_opt_dn_mean
+
+        # 2. SAR Physical Backscatter
+        sar_valid_raw = img_sar_aligned[valid_mask] if img_sar_aligned.ndim == 2 else img_sar_aligned[valid_mask, 0]
+        # Exclude nonpositive or nodata pixels for decibel calculation
+        pos_sar = sar_valid_raw[sar_valid_raw > 0]
+        if len(pos_sar) > 0 and calib_status == "calibrated_backscatter":
+            linear_sar_mean = float(np.mean(pos_sar))
+            # Pixel-level conversion: 10 * log10(power)
+            sar_db_mean = float(np.mean(10.0 * np.log10(np.clip(pos_sar, 1e-6, None))))
+        else:
+            linear_sar_mean = None
+            sar_db_mean = None
 
         # Step 6: Encode evidence artifacts
         joint_b64 = convert_array_to_base64_png(joint_composite)
@@ -339,11 +364,22 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
 
         valid_coverage_pct = round((valid_pixel_count / max(1, total_pixels)) * 100.0, 1)
 
+        sar_phys_text = (
+            f"mean linear {calib_quantity} power: {linear_sar_mean:.4f} ({sar_db_mean:.2f} dB)"
+            if (linear_sar_mean is not None and sar_db_mean is not None)
+            else f"display intensity: {mean_sar_display:.1f}"
+        )
+        opt_phys_text = (
+            f"mean BOA surface reflectance: {physical_refl_mean:.4f} ({physical_refl_mean*100:.2f}%; raw DN: {raw_opt_dn_mean:.1f})"
+            if is_s2_l2a
+            else f"display albedo: {mean_opt_display:.1f}"
+        )
+
         answer = (
             f"Optical + SAR Multimodal Joint Analysis completed across {w}x{h} scene "
             f"({valid_pixel_count:,} valid intersecting pixels; {valid_coverage_pct:.1f}% valid mutual footprint). "
-            f"Joint analysis combines optical surface reflectance (mean albedo: {mean_opt:.1f}) with {sensor_type} radar backscatter "
-            f"({polarization} polarization, {calib_text}, {terrain_text}, mean intensity: {mean_sar:.1f}). "
+            f"Physical Radiometry: Optical ({opt_phys_text}; display albedo: {mean_opt_display:.1f}) combined with {sensor_type} radar backscatter "
+            f"({polarization} polarization, {calib_text}, {terrain_text}, {sar_phys_text}; display intensity: {mean_sar_display:.1f}). "
             f"Preliminary Scene-Normalized Heuristic Indicators (relative empirical proxies, NOT certified physical land-cover classifications): "
             f"(1) Specular Water / Low-Scatter Candidate Proxy: {water_pct:.2f}% of valid footprint ({water_px:,} px with joint low optical albedo & low radar return); "
             f"(2) Structural / High-Scatter Candidate Proxy: {urban_pct:.2f}% of valid footprint ({urban_px:,} px with high radar backscatter); "
@@ -360,7 +396,11 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
                 "data_base64": opt_b64,
                 "statistics": {
                     "modality": "OPTICAL",
-                    "mean_albedo": round(mean_opt, 1),
+                    "physical_boa_reflectance_mean": round(physical_refl_mean, 4),
+                    "physical_reflectance_percent": f"{physical_refl_mean * 100:.2f}%",
+                    "raw_dn_mean": round(raw_opt_dn_mean, 1),
+                    "mean_albedo": round(mean_opt_display, 1),
+                    "display_scale": "8-bit uint8 (0-255, 2-98 percentile stretched)",
                     "bands": opt_rgb.shape[2]
                 }
             },
@@ -373,9 +413,13 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
                 "statistics": {
                     "modality": "SAR",
                     "polarization": polarization,
+                    "calibration_quantity": calib_quantity,
                     "calibration_status": calib_status,
                     "terrain_correction_status": terrain_status,
-                    "mean_backscatter_intensity": round(mean_sar, 1)
+                    "linear_power_mean": round(linear_sar_mean, 4) if linear_sar_mean is not None else None,
+                    "calibrated_db_mean": round(sar_db_mean, 2) if sar_db_mean is not None else None,
+                    "mean_backscatter_intensity": round(mean_sar_display, 1),
+                    "display_scale": "8-bit uint8 (0-255, decibel-percentile stretched)"
                 }
             },
             {
@@ -400,7 +444,7 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
                 "id": "ev_sar_specular_mask",
                 "type": "mask",
                 "title": "SAR Specular Water / Smooth Surface Indicator Mask",
-                "description": "Empirical joint low-intensity radar backscatter (< 45 DN) and optical albedo mask (< 60 DN) evaluated strictly within the valid mutual data footprint.",
+                "description": "Empirical joint low-intensity radar backscatter (< 45 display DN) and optical albedo mask (< 60 display DN) evaluated strictly within the valid mutual data footprint.",
                 "data_base64": sar_water_b64,
                 "statistics": {
                     "specular_pixels": water_px,
@@ -416,9 +460,9 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
             "Preliminary heuristic indicators: Thresholds applied to per-scene 8-bit percentile-stretched imagery are preliminary scene-normalized empirical proxies, not calibrated physical measurements or certified land-cover classifications.",
             "Heuristic indicator percentages are calculated strictly across valid intersecting pixels and must not be interpreted as authoritative physical coverage.",
             "No trained machine learning model or deep neural network is executed; this provider implements a deterministic radiometric composite and empirical thresholding pipeline.",
-            "Optical surface reflectance (spectral albedo) and SAR microwave backscatter (roughness/dielectric return) are physically non-interchangeable remote sensing measurements.",
-            "Radiometric calibration coefficients (sigma0/gamma0) and incidence angle look-up tables are required for absolute quantitative backscatter modeling." if calib_status != "calibrated_backscatter" else "Absolute quantitative backscatter calibrated using verified product calibration tags.",
-            "Ellipsoid-projected SAR rasters without DEM-based Radiometric Terrain Correction (RTC) may exhibit geometric layover and foreshortening in undulating terrain." if terrain_status != "radiometrically_terrain_corrected" else "Product verified with Radiometric Terrain Correction (RTC)."
+            "Optical surface reflectance (spectral albedo) and SAR microwave backscatter (roughness/dielectric return) are physically non-interchangeable remote sensing measurements and are not directly averaged.",
+            f"Physical SAR calibration: {calib_text} in {calib_quantity} linear power, with logarithmic dB scaling applied separately for display and thresholding.",
+            f"Terrain correction status: {terrain_text}."
         ]
 
         return {
@@ -451,6 +495,7 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
                 "polarization": polarization,
                 "sensor": sensor_type,
                 "calibration_status": calib_status,
+                "calibration_quantity": calib_quantity,
                 "terrain_correction_status": terrain_status
             }
         }
