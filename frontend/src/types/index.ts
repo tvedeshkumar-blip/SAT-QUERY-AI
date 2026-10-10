@@ -101,8 +101,39 @@ export interface AnalysisResponse {
   metadata?: Record<string, any>;
   confidence_breakdown?: ConfidenceBreakdown;
   conflict_info?: ConflictInfo;
+  verification?: VerificationResponse | null;
   execution_time_ms: number;
   created_at: string;
+}
+
+export type VerificationStatus = 'supported' | 'partially_supported' | 'unsupported' | 'not_run';
+export type ClaimStatus = 'supported' | 'partially_supported' | 'unsupported' | 'contradicted';
+
+export interface ClaimVerificationItem {
+  claim_text: string;
+  claim_type: string;
+  status: ClaimStatus;
+  cited_artifact_ids: string[];
+  evidence_found?: string | null;
+  reason?: string | null;
+}
+
+export interface VerificationResponse {
+  verification_status: VerificationStatus;
+  deterministic_passed: boolean;
+  deterministic_failures?: string[];
+  claims?: ClaimVerificationItem[];
+  contradictions?: string[];
+  unsupported_claims?: string[];
+  missing_evidence?: string[];
+  scientific_limitations?: string[];
+  recommended_checks?: string[];
+  summary_explanation: string;
+  is_interpretive_only: boolean;
+  interpretive_statement?: string;
+  llm_model_used?: string | null;
+  llm_run?: boolean;
+  execution_time_ms?: number;
 }
 
 export interface PresetPhoto {

@@ -24,6 +24,7 @@ import { AnalysisResponse } from '../types';
 import { API_BASE } from '../services/api';
 import { MetadataInspectorModal } from './MetadataInspectorModal';
 import { ReportPreviewModal } from './ReportPreviewModal';
+import { ScientificVerificationPanel } from './ScientificVerificationPanel';
 
 interface AnalysisResultCardProps {
   response: AnalysisResponse;
@@ -107,6 +108,20 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
           <span className="font-mono text-xs text-slate-400">
             ID: <span className="text-slate-200">{response.id}</span>
           </span>
+
+          {response.verification && (
+            <span className={`font-mono text-[11px] font-semibold px-2.5 py-1 rounded-lg border ${
+              response.verification.verification_status === 'supported'
+                ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                : response.verification.verification_status === 'partially_supported'
+                ? 'bg-amber-950 text-amber-300 border-amber-800'
+                : response.verification.verification_status === 'unsupported'
+                ? 'bg-rose-950 text-rose-300 border-rose-800'
+                : 'bg-slate-950 text-slate-400 border-slate-800'
+            }`}>
+              VERIFICATION: {response.verification.verification_status.toUpperCase()}
+            </span>
+          )}
         </div>
 
         {/* Latency & Quality Summary */}
@@ -460,6 +475,9 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
           {response.answer}
         </div>
       </div>
+
+      {/* Stage 7 Evidence-Grounded Scientific Verification Panel */}
+      <ScientificVerificationPanel verification={response.verification} />
 
       {/* Confidence & Evidence Quality Diagnostics */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/70 text-xs font-mono">

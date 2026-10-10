@@ -1,5 +1,6 @@
 from typing import List, Optional, Dict, Any, Union
 from pydantic import BaseModel, Field
+from app.schemas.verification import VerificationResponseSchema
 
 class ImageInput(BaseModel):
     data: str = Field(..., description="Base64 encoded image string or URL")
@@ -88,6 +89,7 @@ class AnalysisResponseSchema(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     confidence_breakdown: Optional[ConfidenceBreakdownSchema] = None
     conflict_info: Optional[ConflictInfoSchema] = None
+    verification: Optional["VerificationResponseSchema"] = Field(default=None, description="Stage 7 Evidence-Grounded Scientific Verification")
     execution_time_ms: float
     created_at: str
 

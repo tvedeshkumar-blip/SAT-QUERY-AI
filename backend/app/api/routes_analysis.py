@@ -1,6 +1,8 @@
 import numpy as np
 from fastapi import APIRouter, HTTPException
 from app.schemas.analysis import AnalysisRequest, AnalysisResponseSchema
+from app.schemas.verification import VerificationRequestSchema, VerificationResponseSchema
+from app.agent.verifier import scientific_verifier, EvidencePackageBuilder
 from app.agent.controller import agent_controller
 
 router = APIRouter()
@@ -106,5 +108,32 @@ def analyze_spectral_indices(request: AnalysisRequest):
                 }
             }
         }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/analyze/verify", response_model=VerificationResponseSchema)
+def verify_analysis_endpoint(request: VerificationRequestSchema):
+    """
+    Dedicated Stage 7 Scientific Verification endpoint.
+    Performs deterministic integrity checks and LLM-assisted verification
+    over a structured evidence package or prior analysis response.
+    """
+    try:
+        if request.evidence_package:
+            pkg = request.evidence_package
+        elif request.analysis_response:
+            pkg = EvidencePackageBuilder.from_analysis_response(request.analysis_response)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Either 'evidence_package' or 'analysis_response' must be provided."
+            )
+
+        return scientific_verifier.verify(
+            evidence_package=pkg,
+            candidate_claims=request.custom_claims
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

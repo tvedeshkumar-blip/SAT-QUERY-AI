@@ -20,6 +20,7 @@ from app.agent.trace import ExecutionTraceTracker
 from app.agent.registry import model_registry
 from app.agent.conflict_detector import ConflictDetector, ConflictCheckResult
 from app.rag.rag_service import rag_service
+from app.agent.verifier import scientific_verifier, EvidencePackageBuilder
 
 logger = logging.getLogger("satquery.agent")
 
@@ -505,7 +506,37 @@ class AgentController:
             }
         )
 
-        # Step 12: Final Response Assembly
+        # Step 12: Stage 7 Evidence-Grounded Scientific Verification
+        proto_resp = {
+            "id": req_id,
+            "task": task,
+            "query": request.query,
+            "answer": result["answer"],
+            "confidence": result.get("confidence"),
+            "confidence_label": result.get("confidence_label", "Not available"),
+            "models": trace.models_selected,
+            "implementation_status": result.get("implementation_status", "baseline"),
+            "primary_model": result.get("primary_model"),
+            "actual_model_used": result.get("actual_model_used"),
+            "fallback_used": result.get("fallback_used", False),
+            "model_status": result.get("model_status"),
+            "model_provenance": result.get("model_provenance"),
+            "evidence": evidence_objects,
+            "metadata": metadata_list[0] if metadata_list else {}
+        }
+        evidence_pkg = EvidencePackageBuilder.from_analysis_response(proto_resp, raw_metadata=metadata_list[0] if metadata_list else {})
+        verification_result = scientific_verifier.verify(
+            evidence_package=evidence_pkg,
+            answer_text=result["answer"]
+        )
+        trace.add_step(
+            "SCIENTIFIC_VERIFICATION",
+            f"Verification status: '{verification_result.verification_status}', "
+            f"deterministic_passed={verification_result.deterministic_passed}, "
+            f"claims_checked={len(verification_result.claims)}"
+        )
+
+        # Step 13: Final Response Assembly
         trace.add_step("RESPONSE_GENERATED", "Assembled final agentic multimodal response")
         execution_time_ms = round((time.time() - start_time) * 1000, 2)
 
@@ -528,6 +559,7 @@ class AgentController:
             metadata=metadata_list[0],
             confidence_breakdown=confidence_breakdown,
             conflict_info=conflict_info,
+            verification=verification_result,
             execution_time_ms=execution_time_ms,
             created_at=datetime.utcnow().isoformat() + "Z"
         )
