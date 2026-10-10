@@ -36,7 +36,9 @@ class SafeWindowedCOGReader:
         "sentinel-s2-l2a.s3.amazonaws.com",
         "landsat-pds.s3.amazonaws.com",
         "s3.us-west-2.amazonaws.com",
-        "s3.amazonaws.com"
+        "s3.amazonaws.com",
+        "sentinel1euwestrtc.blob.core.windows.net",
+        "planetarycomputer.microsoft.com"
     }
 
     DEFAULT_CUMULATIVE_BYTE_LIMIT = int(os.getenv("MAX_WINDOW_TRANSFER_BYTES", str(20 * 1024 * 1024)))  # 20 MB default
