@@ -28,6 +28,34 @@ def compute_bounds_overlap(bounds_a: List[float], bounds_b: List[float]) -> floa
 
     return float(round((inter_area / min_area) * 100.0, 2))
 
+def compute_source_valid_mask(arr: np.ndarray, nodata: Optional[Any] = None) -> np.ndarray:
+    """
+    Computes 2D boolean mask (True = valid data, False = nodata / NaN / Inf).
+    Preserves legitimate zero-valued pixels unless nodata is explicitly set to 0.
+    """
+    h, w = arr.shape[:2]
+    mask = np.ones((h, w), dtype=bool)
+
+    # 1. Floating-point NaN / Inf checks
+    if np.issubdtype(arr.dtype, np.floating):
+        if arr.ndim == 2:
+            mask &= ~(np.isnan(arr) | np.isinf(arr))
+        else:
+            mask &= ~(np.isnan(arr).any(axis=-1) | np.isinf(arr).any(axis=-1))
+
+    # 2. Source nodata exclusions
+    if nodata is not None:
+        try:
+            nd_val = float(nodata)
+            if arr.ndim == 2:
+                mask &= (arr != nd_val)
+            else:
+                mask &= ~np.all(arr == nd_val, axis=-1)
+        except Exception:
+            pass
+
+    return mask
+
 def align_image_pair(
     img_a: np.ndarray, 
     img_b: np.ndarray,
@@ -38,8 +66,14 @@ def align_image_pair(
     Performs rigorous geospatial compatibility check, CRS alignment, and resampling
     between two satellite scenes (Bi-temporal or Optical + SAR).
 
-    CRITICAL RULE: Never silently resizes unreferenced images and calls them 'co-registered'.
-    Truthfully reports georeferencing status, CRS compatibility, and spatial overlap.
+    Strict Scientific Rules:
+    1. Zero-padding and margins: Rasterio reprojection tracks valid data footprints explicitly;
+       zero-padded margins and non-overlapping pixels are never treated as observed data.
+    2. Valid-data mask: Produces an explicit shared boolean mask combining source nodata,
+       mutual footprint intersection, and validity across both modalities.
+    3. Missing georeferencing: When affine transforms or adequate geospatial metadata are missing,
+       does NOT claim geographic alignment. Resizing is labeled strictly as display-only.
+    4. Genuine zeros: Legitimate zero measurements within valid footprints are strictly preserved.
     """
     h_a, w_a = img_a.shape[:2]
     h_b, w_b = img_b.shape[:2]
@@ -51,128 +85,218 @@ def align_image_pair(
     crs_b = meta_b.get("crs")
     bounds_a = meta_a.get("bounds")
     bounds_b = meta_b.get("bounds")
+    transform_a = meta_a.get("transform")
+    transform_b = meta_b.get("transform")
+    nodata_a = meta_a.get("nodata")
+    nodata_b = meta_b.get("nodata")
+
+    # Compute source validity masks
+    src_valid_a = compute_source_valid_mask(img_a, nodata_a)
+    src_valid_b = compute_source_valid_mask(img_b, nodata_b)
 
     # Case 1: Both images have authentic CRS and bounds
     if crs_a and crs_b and bounds_a and bounds_b:
         overlap_pct = 0.0
-        reprojected = False
+        crs_matched = (crs_a == crs_b)
 
-        if crs_a == crs_b:
+        if crs_matched:
             overlap_pct = compute_bounds_overlap(bounds_a, bounds_b)
-            crs_matched = True
         else:
-            # Different CRS / UTM zones
-            crs_matched = False
-            overlap_pct = 0.0
             logger.warning(
                 f"CRS mismatch detected between scenes: primary={crs_a}, secondary={crs_b}. "
                 "Different UTM zones/projections cannot be assumed aligned."
             )
 
-        # Attempt Rasterio reprojection/resampling if CRS match and rasterio available
-        img_b_aligned = None
-        transform_a = meta_a.get("transform")
-        transform_b = meta_b.get("transform")
+        # Check if grids are already identical
+        same_dims = (h_a, w_a) == (h_b, w_b)
+        same_bounds = (bounds_a == bounds_b)
+        same_transforms = (transform_a == transform_b and transform_a is not None)
 
-        if crs_matched and (h_a, w_a) == (h_b, w_b) and (transform_a == transform_b or not transform_a or not transform_b):
+        if crs_matched and same_dims and (same_transforms or same_bounds):
             img_b_aligned = img_b.copy()
-            align_method = "identical_grid_co_registered"
-        else:
-            # Resample / reproject onto primary scene grid
-            reproject_success = False
-            if transform_a and transform_b and crs_a and crs_b:
-                try:
-                    import rasterio
-                    from rasterio.warp import reproject, Resampling
-                    from rasterio.transform import Affine
+            shared_valid_mask = src_valid_a & src_valid_b
+            valid_px = int(np.count_nonzero(shared_valid_mask))
+            is_co_reg = bool(overlap_pct > 0.0 and valid_px > 0)
+            registration_info = {
+                "georeferenced": True,
+                "co_registered": is_co_reg,
+                "alignment_valid": True,
+                "is_display_only": False,
+                "crs_matched": True,
+                "primary_crs": crs_a,
+                "secondary_crs": crs_b,
+                "spatial_overlap_percent": overlap_pct,
+                "primary_dimensions": [w_a, h_a],
+                "secondary_original_dimensions": [w_b, h_b],
+                "registration_method": "identical_grid_co_registered",
+                "valid_mask": shared_valid_mask,
+                "valid_pixel_count": valid_px,
+                "total_pixel_count": int(w_a * h_a),
+                "notes": "Verified identical pixel grid co-registration and CRS matching."
+            }
+            return img_a, img_b_aligned, registration_info
 
-                    aff_a = Affine(*transform_a[:6])
-                    aff_b = Affine(*transform_b[:6])
+        # Attempt Rasterio reprojection if transforms and CRS match
+        if crs_matched and transform_a and transform_b:
+            try:
+                import rasterio
+                from rasterio.warp import reproject, Resampling
+                from rasterio.transform import Affine
 
-                    if img_b.ndim == 2:
-                        src = img_b[np.newaxis, :, :]
-                        dst = np.zeros((1, h_a, w_a), dtype=img_b.dtype)
-                    else:
-                        src = np.transpose(img_b, (2, 0, 1))
-                        dst = np.zeros((img_b.shape[2], h_a, w_a), dtype=img_b.dtype)
+                aff_a = Affine(*transform_a[:6])
+                aff_b = Affine(*transform_b[:6])
 
-                    reproject(
-                        source=src,
-                        destination=dst,
-                        src_transform=aff_b,
-                        src_crs=crs_b,
-                        dst_transform=aff_a,
-                        dst_crs=crs_a,
-                        resampling=Resampling.bilinear
+                # 1. Reproject data
+                if img_b.ndim == 2:
+                    src = img_b[np.newaxis, :, :]
+                    dst = np.zeros((1, h_a, w_a), dtype=img_b.dtype)
+                else:
+                    src = np.transpose(img_b, (2, 0, 1))
+                    dst = np.zeros((img_b.shape[2], h_a, w_a), dtype=img_b.dtype)
+
+                reproject(
+                    source=src,
+                    destination=dst,
+                    src_transform=aff_b,
+                    src_crs=crs_b,
+                    dst_transform=aff_a,
+                    dst_crs=crs_a,
+                    resampling=Resampling.bilinear
+                )
+
+                # 2. Reproject validity mask of secondary image
+                # Map valid pixels to 255; unmapped / outside pixels remain 0
+                src_mask_u8 = (src_valid_b.astype(np.uint8) * 255)[np.newaxis, :, :]
+                dst_mask_u8 = np.zeros((1, h_a, w_a), dtype=np.uint8)
+
+                reproject(
+                    source=src_mask_u8,
+                    destination=dst_mask_u8,
+                    src_transform=aff_b,
+                    src_crs=crs_b,
+                    dst_transform=aff_a,
+                    dst_crs=crs_a,
+                    resampling=Resampling.nearest,
+                    src_nodata=0,
+                    dst_nodata=0
+                )
+
+                dst_valid_b = (dst_mask_u8[0] == 255)
+                shared_valid_mask = src_valid_a & dst_valid_b
+
+                if img_b.ndim == 2:
+                    img_b_aligned = dst[0]
+                else:
+                    img_b_aligned = np.transpose(dst, (1, 2, 0))
+
+                valid_px = int(np.count_nonzero(shared_valid_mask))
+                is_co_reg = bool(overlap_pct > 0.0 and valid_px > 0)
+
+                registration_info = {
+                    "georeferenced": True,
+                    "co_registered": is_co_reg,
+                    "alignment_valid": True,
+                    "is_display_only": False,
+                    "crs_matched": True,
+                    "primary_crs": crs_a,
+                    "secondary_crs": crs_b,
+                    "spatial_overlap_percent": overlap_pct,
+                    "primary_dimensions": [w_a, h_a],
+                    "secondary_original_dimensions": [w_b, h_b],
+                    "registration_method": "geospatial_rasterio_reprojected",
+                    "valid_mask": shared_valid_mask,
+                    "valid_pixel_count": valid_px,
+                    "total_pixel_count": int(w_a * h_a),
+                    "notes": (
+                        f"Rasterio reprojection succeeded. Overlap: {overlap_pct}%, "
+                        f"Valid intersecting pixels: {valid_px:,} of {w_a * h_a:,}."
                     )
+                }
+                return img_a, img_b_aligned, registration_info
+            except Exception as e:
+                logger.warning(f"Rasterio reprojection failed ({e}).")
 
-                    if img_b.ndim == 2:
-                        img_b_aligned = dst[0]
-                    else:
-                        img_b_aligned = np.transpose(dst, (1, 2, 0))
-
-                    align_method = "geospatial_rasterio_reprojected"
-                    reproject_success = True
-                except Exception as e:
-                    logger.debug(f"Rasterio reprojection fallback ({e}).")
-
-            if not reproject_success:
-                try:
-                    import cv2
-                    img_b_aligned = cv2.resize(img_b, (w_a, h_a), interpolation=cv2.INTER_LINEAR)
-                except ImportError:
-                    pil_b = Image.fromarray(img_b)
-                    img_b_aligned = np.array(pil_b.resize((w_a, h_a), Image.Resampling.BILINEAR))
-                align_method = "geospatial_grid_resampled"
-
-        is_co_reg = bool(crs_matched and overlap_pct > 10.0)
-        registration_info = {
-            "georeferenced": True,
-            "co_registered": is_co_reg,
-            "crs_matched": crs_matched,
-            "primary_crs": crs_a,
-            "secondary_crs": crs_b,
-            "spatial_overlap_percent": overlap_pct,
-            "primary_dimensions": [w_a, h_a],
-            "secondary_original_dimensions": [w_b, h_b],
-            "registration_method": align_method,
-            "notes": (
-                "Verified spatial overlap and CRS matching." if is_co_reg
-                else f"Warning: Low spatial overlap ({overlap_pct}%) or CRS mismatch."
-            )
-        }
-        return img_a, img_b_aligned, registration_info
-
-    # Case 2: One or both images lack georeferencing (unreferenced images)
-    # Perform pixel array rescaling only so downstream array operations can run,
-    # but strictly report that true co-registration was NOT established.
-    if (h_a, w_a) != (h_b, w_b):
-        logger.info(f"Rescaling secondary raster from ({w_b}x{h_b}) to ({w_a}x{h_a}) for array alignment.")
+        # Reprojection could not be performed (missing transform, CRS mismatch, or error)
+        # Rescaling secondary image for display only
         try:
             import cv2
             img_b_aligned = cv2.resize(img_b, (w_a, h_a), interpolation=cv2.INTER_LINEAR)
         except ImportError:
             pil_b = Image.fromarray(img_b)
             img_b_aligned = np.array(pil_b.resize((w_a, h_a), Image.Resampling.BILINEAR))
-    else:
-        img_b_aligned = img_b.copy()
 
+        notes_reason = (
+            f"CRS mismatch ({crs_a} vs {crs_b})" if not crs_matched
+            else "Missing affine transform or reprojection failed"
+        )
+        registration_info = {
+            "georeferenced": True,
+            "co_registered": False,
+            "alignment_valid": False,
+            "is_display_only": True,
+            "crs_matched": crs_matched,
+            "primary_crs": crs_a,
+            "secondary_crs": crs_b,
+            "spatial_overlap_percent": overlap_pct,
+            "primary_dimensions": [w_a, h_a],
+            "secondary_original_dimensions": [w_b, h_b],
+            "registration_method": "unreferenced_visual_resize_only",
+            "valid_mask": None,
+            "valid_pixel_count": 0,
+            "total_pixel_count": int(w_a * h_a),
+            "notes": (
+                f"{notes_reason}. Resizing is strictly display-only. "
+                "Safe geospatial alignment was NOT established and cannot be used for spatial masks or area calculations."
+            )
+        }
+        return img_a, img_b_aligned, registration_info
+
+    # Case 2: One or both images lack georeferencing
+    # Perform pixel array rescaling only for display preview
+    if (h_a, w_a) != (h_b, w_b):
+        try:
+            import cv2
+            img_b_aligned = cv2.resize(img_b, (w_a, h_a), interpolation=cv2.INTER_LINEAR)
+        except ImportError:
+            pil_b = Image.fromarray(img_b)
+            img_b_aligned = np.array(pil_b.resize((w_a, h_a), Image.Resampling.BILINEAR))
+        is_display_only = True
+        align_method = "unreferenced_visual_resize_only"
+        notes = (
+            "CRS or geospatial bounds unavailable for one or both inputs. "
+            "Rasters were dimensionally rescaled for display only; true physical geodetic co-registration was NOT established. "
+            "Display-only resizing cannot be used for spatial masks, area calculations, or geospatial conclusions."
+        )
+        shared_valid_mask = None
+        alignment_valid = False
+    else:
+        # Same dimension unreferenced arrays
+        img_b_aligned = img_b.copy()
+        shared_valid_mask = src_valid_a & src_valid_b
+        is_display_only = False
+        alignment_valid = True
+        align_method = "identical_grid_unreferenced"
+        notes = (
+            "Unreferenced pixel arrays with identical dimensions. "
+            "Processed on pixel grid; absolute geodetic coordinates unavailable."
+        )
+
+    valid_px = int(np.count_nonzero(shared_valid_mask)) if shared_valid_mask is not None else 0
     registration_info = {
         "georeferenced": False,
         "co_registered": False,
+        "alignment_valid": alignment_valid,
+        "is_display_only": is_display_only,
         "crs_matched": False,
         "primary_crs": crs_a or "CRS unavailable",
         "secondary_crs": crs_b or "CRS unavailable",
         "spatial_overlap_percent": None,
         "primary_dimensions": [w_a, h_a],
         "secondary_original_dimensions": [w_b, h_b],
-        "registration_method": "unreferenced_pixel_dimension_rescale",
-        "notes": (
-            "CRS or geospatial bounds unavailable for one or both inputs. "
-            "Rasters were dimensionally rescaled for baseline processing only; "
-            "true physical geodetic co-registration was NOT established. "
-            "Genuine bi-temporal remote sensing change detection requires georeferenced GeoTIFFs."
-        )
+        "registration_method": align_method,
+        "valid_mask": shared_valid_mask,
+        "valid_pixel_count": valid_px,
+        "total_pixel_count": int(w_a * h_a),
+        "notes": notes
     }
-
     return img_a, img_b_aligned, registration_info

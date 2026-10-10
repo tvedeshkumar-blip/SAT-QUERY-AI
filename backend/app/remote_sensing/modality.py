@@ -87,7 +87,7 @@ def detect_modality_structured(
         }
 
     # 7. Check if all 3 RGB channels are identical (grayscale encoded as RGB)
-    if arr.ndim == 3 and arr.shape[2] >= 3:
+    if arr.ndim == 3 and arr.shape[2] >= 3 and hint_lower not in ("primary", "secondary", "t1", "t2", "optical", "rgb"):
         r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
         if np.array_equal(r, g) and np.array_equal(g, b):
             variance = float(np.var(r))

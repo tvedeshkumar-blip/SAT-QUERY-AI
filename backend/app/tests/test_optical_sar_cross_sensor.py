@@ -417,13 +417,13 @@ def test_controller_optical_sar_success_with_scientific_provenance():
     resp = client.post("/api/v1/analyze", json=payload)
     assert resp.status_code == 200
     data = resp.json()
+    assert data["primary_model"] == "OpticalSARJointAnalysisProvider"
+    assert data["fallback_used"] is False
     assert "optical_sar_provenance" in data["metadata"]
     prov = data["metadata"]["optical_sar_provenance"]
-    assert prov["primary_model"] == "OpticalSARJointAnalysisProvider"
-    assert prov["fallback_used"] is False
-    assert prov["sar_calibration_status"] == "unverified_linear_dn"
-    assert prov["sar_terrain_correction_status"] == "ellipsoid_geocoded_grd"
-    assert "physical_non_interchangeability_standard" in prov
+    assert prov["sar"]["calibration_status"] == "unverified_linear_dn"
+    assert prov["sar"]["terrain_correction_status"] == "ellipsoid_geocoded_grd"
+    assert "physical_assertion" in prov["scientific_distinction"]
 
 
 # ============================================================================

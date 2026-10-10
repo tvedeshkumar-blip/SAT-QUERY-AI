@@ -91,6 +91,9 @@ class OpticalSARVisualizationBaseline(BaseOpticalSARFusion):
             "answer": answer,
             "model_type": "visualization_baseline",
             "implementation_status": "baseline",
+            "primary_model": "OpticalSARJointAnalysisProvider",
+            "actual_model_used": "OpticalSARVisualizationBaseline",
+            "fallback_used": True,
             "confidence": None,
             "confidence_label": "Not available (Visualization Baseline)",
             "models": [self.model_name],
@@ -148,6 +151,15 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
         img_opt, img_sar_aligned, reg_info = align_image_pair(img_opt, img_sar, meta_opt, meta_sar)
 
         h, w = img_opt.shape[:2]
+        total_pixels = h * w
+
+        polarization = meta_sar.get("polarization") or meta_sar.get("tags", {}).get("POLARIZATION", "VV")
+        sensor_type = meta_sar.get("sensor") or meta_sar.get("tags", {}).get("SENSOR", "Sentinel-1 C-Band SAR")
+        calib_status = meta_sar.get("calibration_status") or ("calibrated_backscatter" if any(k in str(meta_sar).lower() for k in ["sigma0", "gamma0", "calibrated"]) else "unverified_linear_dn")
+        terrain_status = meta_sar.get("terrain_correction_status") or ("radiometrically_terrain_corrected" if any(k in str(meta_sar).lower() for k in ["terrain_corrected", "rtc"]) else "ellipsoid_geocoded_grd")
+
+        calib_text = "Calibrated sigma-0 dB backscatter" if calib_status == "calibrated_backscatter" else "Unverified linear DN (empirical relative dB scaling)"
+        terrain_text = "Radiometrically Terrain Corrected (RTC)" if terrain_status == "radiometrically_terrain_corrected" else "Ellipsoid Geocoded GRD (uncorrected for relief distortion)"
 
         # Step 1: Normalize modalities separately
         opt_u8, meta_opt_proc = robust_remote_sensing_preprocess(img_opt, meta_opt, target_modality="OPTICAL")
@@ -163,63 +175,181 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
         # SAR extraction
         sar_gray = sar_u8 if sar_u8.ndim == 2 else sar_u8[:, :, 0]
 
-        # Step 2: Cross-modal false-color composite
-        # Channel 0 (Red) = SAR Microwave backscatter (surface roughness & structural double bounce)
-        # Channel 1 (Green) = Optical Green/NIR reflectance (vegetation vitality)
-        # Channel 2 (Blue) = Optical Blue reflectance (water absorption & cloud contrast)
-        joint_composite = np.zeros((h, w, 3), dtype=np.uint8)
-        joint_composite[:, :, 0] = sar_gray
-        joint_composite[:, :, 1] = opt_rgb[:, :, 1]
-        joint_composite[:, :, 2] = opt_rgb[:, :, 2]
-
-        # Step 3: Compute joint physical statistics
-        mean_opt = float(np.mean(opt_rgb))
-        mean_sar = float(np.mean(sar_gray))
-        
-        # Specular water candidates: Low Optical Reflectance (< 60) AND Low SAR Backscatter (< 45)
-        specular_water = np.logical_and(np.mean(opt_rgb, axis=-1) < 60, sar_gray < 45)
-        water_px = int(np.count_nonzero(specular_water))
-
-        # Urban double-bounce candidates: Moderate-to-High Optical AND High SAR Backscatter (> 190)
-        double_bounce_urban = np.logical_and(np.mean(opt_rgb, axis=-1) > 80, sar_gray > 190)
-        urban_px = int(np.count_nonzero(double_bounce_urban))
-
-        # Vegetated canopy: High Optical Green (> 90) AND Moderate SAR Backscatter (60 to 160)
-        canopy_veg = np.logical_and(opt_rgb[:, :, 1] > 90, np.logical_and(sar_gray >= 60, sar_gray <= 160))
-        veg_px = int(np.count_nonzero(canopy_veg))
-
-        total_pixels = h * w
-        water_pct = (water_px / total_pixels) * 100.0 if total_pixels > 0 else 0.0
-        urban_pct = (urban_px / total_pixels) * 100.0 if total_pixels > 0 else 0.0
-        veg_pct = (veg_px / total_pixels) * 100.0 if total_pixels > 0 else 0.0
-
-        # Step 4: Encode evidence artifacts
         opt_b64 = convert_array_to_base64_png(opt_rgb)
         sar_b64 = convert_array_to_base64_png(sar_gray)
+
+        # Step 2: Handle Display-Only Resizing (Missing Georeferencing / Unaligned Fallback)
+        if reg_info.get("is_display_only") or not reg_info.get("alignment_valid", True):
+            fused_rgb = (0.5 * opt_rgb.astype(float) + 0.5 * np.stack([sar_gray]*3, axis=-1).astype(float)).astype(np.uint8)
+            fused_b64 = convert_array_to_base64_png(fused_rgb)
+
+            answer = (
+                f"Optical + SAR joint analysis rejected for geospatial calculation: Safe geospatial alignment could not be established. "
+                f"Registration status: '{reg_info.get('registration_method')}'. "
+                f"Display-only resizing cannot feed geospatial classification, spatial masks, or area calculations. "
+                f"Visual preview provided for qualitative reference only."
+            )
+
+            return {
+                "status": "unsupported",
+                "analysis_status": "unsupported_alignment",
+                "answer": answer,
+                "model_type": "joint_analysis_baseline",
+                "model_name": self.model_name,
+                "primary_model": self.model_name,
+                "actual_model_used": self.model_name,
+                "fallback_used": False,
+                "confidence": None,
+                "confidence_label": "Not available (Display-Only Resizing - Geospatial Analysis Unsupported)",
+                "water_pct": None,
+                "urban_pct": None,
+                "veg_pct": None,
+                "registration_info": reg_info,
+                "evidence": [
+                    {
+                        "id": "ev_optical_reflectance",
+                        "type": "original",
+                        "title": "Optical Scene (Display Preview)",
+                        "description": "Optical raster preview (unaligned/display-only).",
+                        "data_base64": opt_b64,
+                        "statistics": {"modality": "OPTICAL"}
+                    },
+                    {
+                        "id": "ev_sar_backscatter",
+                        "type": "processed",
+                        "title": "SAR Scene (Display Preview)",
+                        "description": "SAR microwave preview (unaligned/display-only).",
+                        "data_base64": sar_b64,
+                        "statistics": {"modality": "SAR"}
+                    },
+                    {
+                        "id": "ev_fused_scene",
+                        "type": "fused",
+                        "title": "Display-Only Resized Preview (Visualization Only)",
+                        "description": "Display-only visual composite. Unaligned rasters cannot feed geospatial classification.",
+                        "data_base64": fused_b64,
+                        "statistics": {
+                            "co_registered": False,
+                            "registration_method": reg_info.get("registration_method"),
+                            "geospatial_classification": "Unsupported"
+                        }
+                    }
+                ],
+                "optical_evidence": opt_b64,
+                "sar_evidence": sar_b64,
+                "fused_evidence": fused_b64,
+                "limitations": [
+                    "Safe geospatial alignment could not be established; rasters were resized for display preview only.",
+                    "Display-only resizing cannot feed geospatial classification, spatial masks, or area calculations.",
+                    "True remote sensing cross-sensor analysis requires valid geodetic CRS and affine geotransforms."
+                ]
+            }
+
+        # Step 3: Handle Valid-Data Mask and Empty Intersection Check
+        valid_mask = reg_info.get("valid_mask")
+        valid_pixel_count = int(np.count_nonzero(valid_mask)) if valid_mask is not None else 0
+
+        if valid_pixel_count == 0:
+            answer = (
+                f"Optical + SAR Multimodal Joint Analysis unsupported: The valid-data intersection between Optical and SAR rasters "
+                f"is empty (0 valid intersecting pixels after excluding nodata, non-overlapping padding, and invalid values). "
+                f"Geospatial land-cover indicator percentages and classification masks cannot be computed."
+            )
+
+            return {
+                "status": "unsupported",
+                "analysis_status": "unsupported_empty_intersection",
+                "answer": answer,
+                "model_type": "joint_analysis_baseline",
+                "model_name": self.model_name,
+                "primary_model": self.model_name,
+                "actual_model_used": self.model_name,
+                "fallback_used": False,
+                "confidence": None,
+                "confidence_label": "Not available (Empty Valid-Data Intersection)",
+                "valid_pixel_count": 0,
+                "water_pct": None,
+                "urban_pct": None,
+                "veg_pct": None,
+                "registration_info": reg_info,
+                "evidence": [
+                    {
+                        "id": "ev_optical_reflectance",
+                        "type": "original",
+                        "title": "Optical Scene",
+                        "description": "Optical raster.",
+                        "data_base64": opt_b64,
+                        "statistics": {"modality": "OPTICAL"}
+                    },
+                    {
+                        "id": "ev_sar_backscatter",
+                        "type": "processed",
+                        "title": "SAR Scene",
+                        "description": "SAR microwave raster.",
+                        "data_base64": sar_b64,
+                        "statistics": {"modality": "SAR"}
+                    }
+                ],
+                "optical_evidence": opt_b64,
+                "sar_evidence": sar_b64,
+                "fused_evidence": None,
+                "limitations": [
+                    "Valid-data footprint intersection contains 0 valid pixels across both sensors (overlapping pixels were nodata or unmapped padding).",
+                    "Heuristic coverage percentages were not calculated to avoid misleading statistics."
+                ]
+            }
+
+        # Step 4: Cross-modal false-color composite on valid pixels
+        joint_composite = np.zeros((h, w, 3), dtype=np.uint8)
+        joint_composite[:, :, 0] = np.where(valid_mask, sar_gray, 0)
+        joint_composite[:, :, 1] = np.where(valid_mask, opt_rgb[:, :, 1], 0)
+        joint_composite[:, :, 2] = np.where(valid_mask, opt_rgb[:, :, 2], 0)
+
+        # Step 5: Compute joint preliminary scene-normalized heuristic indicators
+        # Strictly restricted to the shared valid-data mask
+        opt_mean_2d = np.mean(opt_rgb, axis=-1)
+
+        # Specular water proxy: Low Optical Reflectance (< 60) AND Low SAR Backscatter (< 45) within valid mask
+        specular_water = np.logical_and(valid_mask, np.logical_and(opt_mean_2d < 60, sar_gray < 45))
+        water_px = int(np.count_nonzero(specular_water))
+
+        # Structural / Urban double-bounce proxy: Moderate-to-High Optical (> 80) AND High SAR Backscatter (> 190) within valid mask
+        double_bounce_urban = np.logical_and(valid_mask, np.logical_and(opt_mean_2d > 80, sar_gray > 190))
+        urban_px = int(np.count_nonzero(double_bounce_urban))
+
+        # Vegetated canopy proxy: High Optical Green (> 90) AND Moderate SAR Backscatter (60 to 160) within valid mask
+        canopy_veg = np.logical_and(valid_mask, np.logical_and(opt_rgb[:, :, 1] > 90, np.logical_and(sar_gray >= 60, sar_gray <= 160)))
+        veg_px = int(np.count_nonzero(canopy_veg))
+
+        # Percentages are computed strictly against valid_pixel_count (never unmapped padding or full scene)
+        water_pct = round((water_px / valid_pixel_count) * 100.0, 2)
+        urban_pct = round((urban_px / valid_pixel_count) * 100.0, 2)
+        veg_pct = round((veg_px / valid_pixel_count) * 100.0, 2)
+
+        # Radiometric averages computed strictly across valid pixels
+        mean_opt = float(np.mean(opt_rgb[valid_mask]))
+        mean_sar = float(np.mean(sar_gray[valid_mask]))
+
+        # Step 6: Encode evidence artifacts
         joint_b64 = convert_array_to_base64_png(joint_composite)
 
-        polarization = meta_sar.get("polarization") or meta_sar.get("tags", {}).get("POLARIZATION", "VV")
-        sensor_type = meta_sar.get("sensor") or meta_sar.get("tags", {}).get("SENSOR", "Sentinel-1 C-Band SAR")
-        calib_status = meta_sar.get("calibration_status") or ("calibrated_backscatter" if any(k in str(meta_sar).lower() for k in ["sigma0", "gamma0", "calibrated"]) else "unverified_linear_dn")
-        terrain_status = meta_sar.get("terrain_correction_status") or ("radiometrically_terrain_corrected" if any(k in str(meta_sar).lower() for k in ["terrain_corrected", "rtc"]) else "ellipsoid_geocoded_grd")
+        # Specular water mask: strictly inside valid_mask
+        sar_water_mask = np.where(specular_water, 255, 0).astype(np.uint8)
+        sar_water_b64 = convert_array_to_base64_png(sar_water_mask)
 
-        calib_text = "Calibrated sigma-0 dB backscatter" if calib_status == "calibrated_backscatter" else "Unverified linear DN (empirical relative dB scaling)"
-        terrain_text = "Radiometrically Terrain Corrected (RTC)" if terrain_status == "radiometrically_terrain_corrected" else "Ellipsoid Geocoded GRD (uncorrected for relief distortion)"
+        valid_coverage_pct = round((valid_pixel_count / max(1, total_pixels)) * 100.0, 1)
 
         answer = (
-            f"Optical + SAR Multimodal Joint Analysis completed across {w}x{h} scene. "
-            f"Cross-modal integration combines optical surface reflectance (mean albedo: {mean_opt:.1f}) "
-            f"with {sensor_type} microwave radar backscatter ({polarization} polarization, {calib_text}, {terrain_text}, mean intensity: {mean_sar:.1f}). "
-            f"Surface interpretations: "
-            f"(1) Specular Water / Smooth Surfaces: {water_pct:.2f}% of scene ({water_px:,} px with joint low optical albedo & low radar return); "
-            f"(2) Structural / Urban Double Bounce: {urban_pct:.2f}% of scene ({urban_px:,} px with high radar backscatter); "
-            f"(3) Vegetated Canopy / Diffuse Scattering: {veg_pct:.2f}% of scene ({veg_px:,} px). "
+            f"Optical + SAR Multimodal Joint Analysis completed across {w}x{h} scene "
+            f"({valid_pixel_count:,} valid intersecting pixels; {valid_coverage_pct:.1f}% valid mutual footprint). "
+            f"Joint analysis combines optical surface reflectance (mean albedo: {mean_opt:.1f}) with {sensor_type} radar backscatter "
+            f"({polarization} polarization, {calib_text}, {terrain_text}, mean intensity: {mean_sar:.1f}). "
+            f"Preliminary Scene-Normalized Heuristic Indicators (relative empirical proxies, NOT certified physical land-cover classifications): "
+            f"(1) Specular Water / Low-Scatter Candidate Proxy: {water_pct:.2f}% of valid footprint ({water_px:,} px with joint low optical albedo & low radar return); "
+            f"(2) Structural / High-Scatter Candidate Proxy: {urban_pct:.2f}% of valid footprint ({urban_px:,} px with high radar backscatter); "
+            f"(3) Vegetated Canopy / Diffuse Candidate Proxy: {veg_pct:.2f}% of valid footprint ({veg_px:,} px). "
             f"Spatial co-registration status: {reg_info.get('co_registered')} ({reg_info.get('registration_method')})."
         )
-
-        # Empirical low-backscatter mask (< 45)
-        sar_water_mask = np.where(sar_gray < 45, 255, 0).astype(np.uint8)
-        sar_water_b64 = convert_array_to_base64_png(sar_water_mask)
 
         evidence = [
             {
@@ -256,9 +386,12 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
                 "data_base64": joint_b64,
                 "statistics": {
                     "fusion_type": "Radiometric Cross-Modal Composite",
-                    "specular_water_area": f"{water_pct:.2f}%",
-                    "structural_urban_area": f"{urban_pct:.2f}%",
-                    "vegetated_canopy_area": f"{veg_pct:.2f}%",
+                    "heuristic_water_indicator": f"{water_pct:.2f}% (preliminary scene-normalized proxy)",
+                    "heuristic_structural_indicator": f"{urban_pct:.2f}% (preliminary scene-normalized proxy)",
+                    "heuristic_canopy_indicator": f"{veg_pct:.2f}% (preliminary scene-normalized proxy)",
+                    "valid_footprint_pixels": valid_pixel_count,
+                    "total_scene_pixels": total_pixels,
+                    "classification_type": "Preliminary Scene-Normalized Heuristic (Non-Calibrated)",
                     "co_registered": reg_info.get("co_registered"),
                     "registration_method": reg_info.get("registration_method")
                 }
@@ -266,18 +399,23 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
             {
                 "id": "ev_sar_specular_mask",
                 "type": "mask",
-                "title": "SAR Specular Water / Smooth Surface Mask",
-                "description": "Empirical low-intensity radar backscatter mask (< 45 DN) indicating specular reflection away from sensor.",
+                "title": "SAR Specular Water / Smooth Surface Indicator Mask",
+                "description": "Empirical joint low-intensity radar backscatter (< 45 DN) and optical albedo mask (< 60 DN) evaluated strictly within the valid mutual data footprint.",
                 "data_base64": sar_water_b64,
                 "statistics": {
                     "specular_pixels": water_px,
-                    "specular_area_percent": f"{water_pct:.2f}%",
-                    "polarization": polarization
+                    "valid_footprint_pixels": valid_pixel_count,
+                    "specular_area_percent": f"{water_pct:.2f}% (of valid footprint)",
+                    "polarization": polarization,
+                    "classification_status": "Preliminary Scene-Normalized Heuristic Indicator (Non-Calibrated)"
                 }
             }
         ]
 
         limitations = [
+            "Preliminary heuristic indicators: Thresholds applied to per-scene 8-bit percentile-stretched imagery are preliminary scene-normalized empirical proxies, not calibrated physical measurements or certified land-cover classifications.",
+            "Heuristic indicator percentages are calculated strictly across valid intersecting pixels and must not be interpreted as authoritative physical coverage.",
+            "No trained machine learning model or deep neural network is executed; this provider implements a deterministic radiometric composite and empirical thresholding pipeline.",
             "Optical surface reflectance (spectral albedo) and SAR microwave backscatter (roughness/dielectric return) are physically non-interchangeable remote sensing measurements.",
             "Radiometric calibration coefficients (sigma0/gamma0) and incidence angle look-up tables are required for absolute quantitative backscatter modeling." if calib_status != "calibrated_backscatter" else "Absolute quantitative backscatter calibrated using verified product calibration tags.",
             "Ellipsoid-projected SAR rasters without DEM-based Radiometric Terrain Correction (RTC) may exhibit geometric layover and foreshortening in undulating terrain." if terrain_status != "radiometrically_terrain_corrected" else "Product verified with Radiometric Terrain Correction (RTC)."
@@ -293,7 +431,12 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
             "model_status": "loaded",
             "implementation_status": "baseline",
             "confidence": None,
-            "confidence_label": "Not available (Physically Grounded Radiometric Baseline)",
+            "confidence_label": "Not available (Preliminary Scene-Normalized Heuristic Baseline)",
+            "water_pct": water_pct,
+            "urban_pct": urban_pct,
+            "veg_pct": veg_pct,
+            "valid_pixel_count": valid_pixel_count,
+            "total_pixels": total_pixels,
             "models": [self.model_name],
             "registration_info": reg_info,
             "evidence": evidence,

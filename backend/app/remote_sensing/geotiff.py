@@ -35,7 +35,7 @@ def parse_geotiff_or_image(image_base64: str, filename: Optional[str] = None) ->
         "bands": 3,
         "dtype": "uint8",
         "nodata": None,
-        "modality": "OPTICAL",
+        "modality": None,
         "is_geotiff": False,
         "georeferenced": False,
         "tags": {}

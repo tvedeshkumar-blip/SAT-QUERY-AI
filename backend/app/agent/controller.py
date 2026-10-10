@@ -55,6 +55,9 @@ class AgentController:
 
         for idx, img_input in enumerate(request.images):
             arr, meta = parse_geotiff_or_image(img_input.data, img_input.filename)
+            prov = getattr(img_input, "provenance", {}) or {}
+            if prov.get("modality"):
+                meta["modality"] = prov["modality"]
             modality = detect_image_modality(arr, meta, hint=img_input.role or "primary")
             meta["modality"] = modality
             
@@ -197,17 +200,31 @@ class AgentController:
                 raise ValidationError("Optical + SAR joint analysis requires at least 2 satellite scenes (one Optical reflectance scene and one microwave SAR scene).")
 
             # Check preview-only status
-            is_opt_preview = (getattr(request.images[0], "asset_category", None) == "visual_preview" or metadata_list[0].get("asset_category") == "visual_preview")
-            is_sar_preview = (getattr(request.images[1], "asset_category", None) == "visual_preview" or metadata_list[1].get("asset_category") == "visual_preview")
-            if is_opt_preview or is_sar_preview:
+            fname0 = (getattr(request.images[0], "filename", None) or "").lower()
+            fname1 = (getattr(request.images[1], "filename", None) or "").lower()
+            is_preview = (
+                getattr(request.images[0], "asset_category", None) == "visual_preview"
+                or metadata_list[0].get("asset_category") == "visual_preview"
+                or getattr(request.images[1], "asset_category", None) == "visual_preview"
+                or metadata_list[1].get("asset_category") == "visual_preview"
+                or fname0.endswith((".jpg", ".jpeg"))
+                or fname1.endswith((".jpg", ".jpeg"))
+            )
+            if is_preview:
                 raise ValidationError(
-                    "Browse-only preview thumbnails (unprojected 8-bit images) cannot be used for quantitative Optical-SAR cross-sensor analysis. "
+                    "Browse-only preview asset detected. Unprojected 8-bit visual previews (JPEG/PNG browse images) "
+                    "cannot be used for quantitative Optical-SAR cross-sensor analysis. "
                     "Georeferenced GeoTIFF rasters with calibrated surface reflectance or microwave backscatter are required."
                 )
 
             # Detect which image is Optical and which is SAR
-            m0 = modalities[0].upper()
-            m1 = modalities[1].upper()
+            prov0 = getattr(request.images[0], "provenance", {}) or {}
+            prov1 = getattr(request.images[1], "provenance", {}) or {}
+            role0 = (getattr(request.images[0], "role", None) or "").lower()
+            role1 = (getattr(request.images[1], "role", None) or "").lower()
+
+            m0 = (prov0.get("modality") or ("SAR" if role0 == "sar" else ("OPTICAL" if role0 in ("optical", "rgb") else modalities[0]))).upper()
+            m1 = (prov1.get("modality") or ("SAR" if role1 == "sar" else ("OPTICAL" if role1 in ("optical", "rgb") else modalities[1]))).upper()
 
             opt_idx = None
             sar_idx = None
@@ -226,8 +243,6 @@ class AgentController:
                     "Cross-sensor analysis requires exactly one Optical reflectance scene and one microwave SAR scene."
                 )
             else:
-                role0 = (getattr(request.images[0], "role", None) or "").lower()
-                role1 = (getattr(request.images[1], "role", None) or "").lower()
                 if role0 in ("optical", "primary") and role1 in ("sar", "secondary"):
                     opt_idx, sar_idx = 0, 1
                 elif role0 in ("sar", "secondary") and role1 in ("optical", "primary"):
