@@ -364,6 +364,15 @@ export interface STACRetrieveRequestPayload {
   target_role?: 'primary' | 'secondary' | 'optical' | 'sar';
 }
 
+export interface STACWindowedRetrieveRequestPayload {
+  scene_id: string;
+  asset_key: string;
+  aoi_bbox: [number, number, number, number] | number[];
+  collection?: string;
+  target_role?: 'primary' | 'secondary' | 'optical' | 'sar';
+  resampling?: 'nearest' | 'bilinear' | 'cubic' | 'lanczos';
+}
+
 export interface STACRetrieveResponsePayload {
   status: 'success' | 'error';
   scene_id: string;

@@ -189,6 +189,24 @@ export async function retrieveSTACAsset(
   return await res.json();
 }
 
+export async function retrieveSTACWindowedAsset(
+  payload: import('../types').STACWindowedRetrieveRequestPayload
+): Promise<import('../types').STACRetrieveResponsePayload> {
+  const res = await fetch(`${API_BASE}/acquisition/retrieve-window`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(errorData.detail || `Windowed asset retrieval failed (${res.status})`);
+  }
+
+  return await res.json();
+}
+
+
 export async function validateSTACAsset(
   payload: import('../types').STACValidateAssetRequestPayload
 ): Promise<import('../types').STACValidateAssetResponsePayload> {

@@ -21,7 +21,8 @@ import {
   ArrowRight,
   ShieldAlert,
   Check,
-  XCircle
+  XCircle,
+  Crop
 } from 'lucide-react';
 import { 
   AOIBounds, 
@@ -33,12 +34,14 @@ import {
 } from '../types';
 import { 
   searchSTACScenes, 
-  retrieveSTACAsset, 
+  retrieveSTACAsset,
+  retrieveSTACWindowedAsset,
   validateTemporalPair,
   searchTemporalPair,
   searchOpticalSARPair,
   validateOpticalSARPair 
 } from '../services/api';
+
 import { UploadedFileState } from './ImageUploader';
 import { formatBBox } from '../utils/geoBounds';
 
@@ -98,10 +101,12 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
 
   // Asset retrieval and validation state tracking by scene ID
   const [retrievingSceneId, setRetrievingSceneId] = useState<string | null>(null);
+  const [retrievalAction, setRetrievalAction] = useState<'full' | 'window' | null>(null);
   const [selectedAssetKeys, setSelectedAssetKeys] = useState<Record<string, string>>({});
   const [retrievedAssets, setRetrievedAssets] = useState<Record<string, STACRetrieveResponsePayload>>({});
   const [importedSceneIds, setImportedSceneIds] = useState<Set<string>>(new Set());
   const [retrieveError, setRetrieveError] = useState<{ sceneId: string; message: string } | null>(null);
+
 
   // Temporal Pair Compatibility Validation State
   const [isValidatingPair, setIsValidatingPair] = useState<boolean>(false);
@@ -232,10 +237,11 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
     }
   };
 
-  // Safely Retrieve and Physically Validate Asset
+  // Safely Retrieve and Physically Validate Asset (Full File)
   const handleRetrieveAsset = async (scene: STACSceneSummary, targetAssetKey?: string) => {
     const assetKey = targetAssetKey || selectedAssetKeys[scene.id] || (scene.assets['visual'] ? 'visual' : Object.keys(scene.assets)[0]);
     setRetrievingSceneId(scene.id);
+    setRetrievalAction('full');
     setRetrieveError(null);
 
     try {
@@ -260,8 +266,52 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
       });
     } finally {
       setRetrievingSceneId(null);
+      setRetrievalAction(null);
     }
   };
+
+  // Safely Retrieve Windowed COG Crop (Stage 9 Subsystem)
+  const handleRetrieveWindowedAsset = async (scene: STACSceneSummary, targetAssetKey?: string) => {
+    if (!selectedAOI) {
+      setRetrieveError({
+        sceneId: scene.id,
+        message: 'Spatial AOI bounds required for windowed acquisition. Select an AOI on the map.'
+      });
+      return;
+    }
+
+    const assetKey = targetAssetKey || selectedAssetKeys[scene.id] || (scene.assets['visual'] ? 'visual' : Object.keys(scene.assets)[0]);
+    setRetrievingSceneId(scene.id);
+    setRetrievalAction('window');
+    setRetrieveError(null);
+
+    try {
+      const resp = await retrieveSTACWindowedAsset({
+        scene_id: scene.id,
+        asset_key: assetKey,
+        collection: scene.collection,
+        aoi_bbox: selectedAOI,
+        target_role: scene.modality === 'SAR' ? 'sar' : 'primary'
+      });
+
+      if (resp.status === 'error') {
+        throw new Error(resp.error || 'Windowed asset retrieval failed.');
+      }
+
+      setRetrievedAssets((prev) => ({ ...prev, [scene.id]: resp }));
+
+    } catch (err: any) {
+      console.error('Windowed asset retrieval error:', err);
+      setRetrieveError({
+        sceneId: scene.id,
+        message: err.message || 'Failed to acquire windowed crop from catalog.'
+      });
+    } finally {
+      setRetrievingSceneId(null);
+      setRetrievalAction(null);
+    }
+  };
+
 
   // Run Temporal Pair Compatibility Validation
   const handleValidatePairCompatibility = async () => {
@@ -660,13 +710,21 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
                     <CheckCircle2 className="w-3 h-3 text-teal-400" />
                     VALIDATED ASSET
                   </span>
-                  <span className={`px-1.5 py-0.2 rounded font-bold ${
-                    retrieved.category === 'visual_preview'
-                      ? 'bg-amber-950 text-amber-300 border border-amber-800'
-                      : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                  }`}>
-                    {retrieved.category.toUpperCase()}
-                  </span>
+                  <div className="flex items-center gap-1">
+                    {retrieved.provenance?.windowed_crop && (
+                      <span className="px-1.5 py-0.5 rounded font-bold bg-teal-950 text-teal-300 border border-teal-700 text-[8px] flex items-center gap-0.5">
+                        <Crop className="w-2.5 h-2.5" />
+                        WINDOW CROP
+                      </span>
+                    )}
+                    <span className={`px-1.5 py-0.2 rounded font-bold ${
+                      retrieved.category === 'visual_preview'
+                        ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                        : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                    }`}>
+                      {retrieved.category.toUpperCase()}
+                    </span>
+                  </div>
                 </div>
                 <div className="grid grid-cols-2 gap-1 text-slate-300">
                   <div>Format: <span className="text-slate-100">{retrieved.validation?.file_format || 'Raster'}</span></div>
@@ -684,24 +742,47 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
         {/* Action Buttons */}
         <div className="p-3 pt-0 space-y-1.5 border-t border-slate-900/80 mt-2">
           {!retrieved ? (
-            <button
-              onClick={() => handleRetrieveAsset(scene)}
-              disabled={isRetrieving}
-              className="w-full py-1.5 px-2.5 rounded-lg bg-slate-800 hover:bg-cyan-600 hover:text-slate-950 text-slate-200 font-mono text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-all disabled:opacity-50"
-            >
-              {isRetrieving ? (
-                <>
-                  <Loader2 className="w-3 h-3 animate-spin text-cyan-400" />
-                  <span>Downloading & Validating...</span>
-                </>
-              ) : (
-                <>
-                  <Download className="w-3 h-3" />
-                  <span>Retrieve & Validate Asset</span>
-                </>
+            <div className="space-y-1.5">
+              <button
+                onClick={() => handleRetrieveAsset(scene)}
+                disabled={isRetrieving}
+                className="w-full py-1.5 px-2.5 rounded-lg bg-slate-800 hover:bg-cyan-600 hover:text-slate-950 text-slate-200 font-mono text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-all disabled:opacity-50"
+              >
+                {isRetrieving && retrievalAction === 'full' ? (
+                  <>
+                    <Loader2 className="w-3 h-3 animate-spin text-cyan-400" />
+                    <span>Downloading Full Asset...</span>
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-3 h-3" />
+                    <span>Retrieve Full Asset</span>
+                  </>
+                )}
+              </button>
+              {selectedAOI && (
+                <button
+                  onClick={() => handleRetrieveWindowedAsset(scene)}
+                  disabled={isRetrieving}
+                  className="w-full py-1.5 px-2.5 rounded-lg bg-teal-950/80 hover:bg-teal-600 hover:text-slate-950 text-teal-300 border border-teal-800/80 font-mono text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-all disabled:opacity-50"
+                  title="Extracts windowed COG crop matching selected AOI bounds using HTTP Range requests"
+                >
+                  {isRetrieving && retrievalAction === 'window' ? (
+                    <>
+                      <Loader2 className="w-3 h-3 animate-spin text-teal-400" />
+                      <span>Acquiring Window (AOI Crop)...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Crop className="w-3 h-3 text-teal-400" />
+                      <span>Acquire Window (AOI Crop)</span>
+                    </>
+                  )}
+                </button>
               )}
-            </button>
+            </div>
           ) : (
+
             <div className="space-y-1">
               {panelMode === 'temporal_pair' ? (
                 <div className="grid grid-cols-2 gap-1.5">

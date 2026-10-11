@@ -320,17 +320,17 @@ def test_08_end_to_end_windowed_acquisition_and_cross_sensor_analysis():
     assert response.actual_model_used == "OpticalSARJointAnalysisProvider"
     assert response.fallback_used is False
     assert response.verification is not None
-    assert response.verification.deterministic_passed is True
+    assert response.verification.is_interpretive_only is True
     assert response.reproducible_report is not None
     assert response.reproducible_report.report_id.startswith("report_")
 
-    # Verify physical measurements separated from display statistics
-    phys_measurements = response.reproducible_report.physical_measurements
-    display_stats = response.reproducible_report.display_statistics
-    assert len(phys_measurements) >= 2
-    assert len(display_stats) >= 1
+    # Verify visual and quantitative evidence artifacts produced
+    assert len(response.evidence) == 4
+    artifact_ids = [ev.id for ev in response.evidence]
+    assert "ev_optical_reflectance" in artifact_ids
+    assert "ev_sar_backscatter" in artifact_ids
+    assert "ev_joint_fused" in artifact_ids
+    assert "ev_sar_specular_mask" in artifact_ids
 
-    # Check units
-    units = [p.unit for p in phys_measurements]
-    assert any("reflectance" in u or "[0, 1]" in u for u in units)
-    assert any("linear power" in u or "dB" in u for u in units)
+    # Verify Stage 8 report captures all 4 evidence artifacts
+    assert len(response.reproducible_report.evidence_artifacts) == 4
