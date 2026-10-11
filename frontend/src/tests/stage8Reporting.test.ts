@@ -148,7 +148,13 @@ describe('Stage 8 Scientific Analysis Quality and Evidence Reporting Frontend Co
       confidence_label: 'Calibrated 95%',
       models: ['DeterministicOpticalSARProvider'],
       evidence: [],
-      trace: { steps: [] },
+      trace: {
+        task: 'optical_sar',
+        models_selected: [],
+        steps: [],
+        parameters: {},
+        execution_time_ms: 100
+      },
       reproducible_report: sampleReport,
       execution_time_ms: 250,
       created_at: '2026-10-11T00:00:00Z'
