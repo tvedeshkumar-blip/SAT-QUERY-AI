@@ -96,11 +96,14 @@ class QualityScreener:
                 - policy_documentation: Explicit policy explanation
         """
         if scl_arr.ndim == 3:
-            scl_2d = scl_arr[:, :, 0] if scl_arr.shape[2] == 1 else scl_arr[0, :, :]
+            if scl_arr.shape[0] in (1, 3, 4) and scl_arr.shape[0] < scl_arr.shape[1] and scl_arr.shape[0] < scl_arr.shape[2]:
+                scl_2d = scl_arr[0, :, :]
+            else:
+                scl_2d = scl_arr[:, :, 0]
         elif scl_arr.ndim == 2:
             scl_2d = scl_arr
         else:
-            raise QualityScreeningError(f"SCL array must be 2D or single-band 3D, received shape {scl_arr.shape}")
+            raise QualityScreeningError(f"SCL array must be 2D or 3D, received shape {scl_arr.shape}")
 
         h, w = scl_2d.shape[:2]
         total_pixels = int(h * w)
@@ -162,6 +165,7 @@ class QualityScreener:
         cloud_affected_fraction = round((cloud_pixels + cloud_shadow_pixels) / max(1, observed_pixels), 4) if observed_pixels > 0 else 0.0
 
         return {
+            "screened": True,
             "is_evaluated": True,
             "mask_source": "Sentinel-2 L2A Scene Classification Layer (SCL)",
             "clear_mask": clear_mask,
@@ -170,6 +174,21 @@ class QualityScreener:
             "unknown_mask": unknown_mask,
             "has_unknown_classes": bool(unknown_count > 0),
             "unknown_pixel_count": unknown_count,
+            "total_pixels": total_pixels,
+            "observed_pixel_count": observed_pixels,
+            "nodata_pixel_count": nodata_count,
+            "clear_pixels": clear_pixels,
+            "retained_pixels": clear_pixels,
+            "uncertain_pixels": uncertain_pixels,
+            "excluded_pixel_count": excluded_pixels,
+            "cloud_pixels": cloud_pixels,
+            "cloud_shadow_pixels": cloud_shadow_pixels,
+            "cast_shadow_pixels": cast_shadow_pixels,
+            "defective_pixels": defective_pixels,
+            "quality_clearance_fraction": quality_clearance_fraction,
+            "data_coverage_fraction": data_coverage_fraction,
+            "effective_usable_fraction": effective_usable_fraction,
+            "has_cloud_obstruction": (cloud_pixels + cloud_shadow_pixels) == observed_pixels and observed_pixels > 0,
             "pixel_counts": {
                 "total_pixels": total_pixels,
                 "nodata_pixels": nodata_count,
@@ -298,9 +317,14 @@ class QualityScreener:
         """
         meta = sar_meta or {}
         if sar_arr.ndim == 3:
-            sar_2d = sar_arr[:, :, 0] if sar_arr.shape[2] == 1 else sar_arr[0, :, :]
-        else:
+            if sar_arr.shape[0] in (1, 3, 4) and sar_arr.shape[0] < sar_arr.shape[1] and sar_arr.shape[0] < sar_arr.shape[2]:
+                sar_2d = sar_arr[0, :, :]
+            else:
+                sar_2d = sar_arr[:, :, 0]
+        elif sar_arr.ndim == 2:
             sar_2d = sar_arr
+        else:
+            raise QualityScreeningError(f"SAR array must be 2D or 3D, received shape {sar_arr.shape}")
 
         h, w = sar_2d.shape[:2]
         total_pixels = int(h * w)
@@ -326,20 +350,33 @@ class QualityScreener:
         nodata_mask |= np.isclose(sar_2d, -32768.0, atol=1e-3)
         nodata_count = int(np.count_nonzero(nodata_mask & finite_mask))
 
-        # 4. Non-positive linear power check (required before log10 dB conversion)
-        non_positive_mask = (sar_2d <= 0.0) & finite_mask & ~nodata_mask
-        non_positive_count = int(np.count_nonzero(non_positive_mask))
+        # 4. Linear power check
+        # For floating-point calibrated linear power: must be strictly positive before log10
+        # For integer/uint8 intensity display rasters: genuine 0 is valid dark surface
+        is_float_power = np.issubdtype(sar_2d.dtype, np.floating)
+        if is_float_power:
+            non_positive_mask = (sar_2d <= 0.0) & finite_mask & ~nodata_mask
+            valid_sar_mask = finite_mask & ~nodata_mask & (sar_2d > 0.0)
+        else:
+            non_positive_mask = np.zeros((h, w), dtype=bool)
+            valid_sar_mask = finite_mask & ~nodata_mask & (sar_2d >= 0)
 
-        # 5. Valid backscatter mask: finite, not nodata, positive linear power
-        valid_sar_mask = finite_mask & ~nodata_mask & (sar_2d > 0.0)
+        non_positive_count = int(np.count_nonzero(non_positive_mask))
         valid_pixels = int(np.count_nonzero(valid_sar_mask))
 
         valid_fraction = round(valid_pixels / max(1, total_pixels), 4)
 
         return {
+            "screened": True,
             "is_evaluated": True,
             "mask_source": "Sentinel-1 RTC Valid Backscatter Bounds",
             "valid_mask": valid_sar_mask,
+            "total_pixels": total_pixels,
+            "valid_pixel_count": valid_pixels,
+            "nodata_pixel_count": nodata_count,
+            "non_finite_pixel_count": non_finite_count,
+            "non_positive_pixel_count": non_positive_count,
+            "finite_positive_fraction": valid_fraction,
             "pixel_counts": {
                 "total_pixels": total_pixels,
                 "nodata_pixels": nodata_count,

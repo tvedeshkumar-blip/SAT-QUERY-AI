@@ -254,8 +254,12 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
         # Step 3: Stage 10 Radiometric Quality Screening & Valid-Data Masking
         scl_eval = None
         scl_aligned = None
-        if "scl" in meta_opt or "scl_arr" in meta_opt or "quality_screening" in meta_opt:
-            scl_input = meta_opt.get("scl") if meta_opt.get("scl") is not None else meta_opt.get("scl_arr")
+        if "scl" in meta_opt or "scl_arr" in meta_opt or "scl_mask" in meta_opt or "quality_screening" in meta_opt:
+            scl_input = meta_opt.get("scl")
+            if scl_input is None:
+                scl_input = meta_opt.get("scl_arr")
+            if scl_input is None:
+                scl_input = meta_opt.get("scl_mask")
             if scl_input is not None:
                 scl_meta = meta_opt.get("scl_meta") or meta_opt
                 try:
@@ -571,6 +575,7 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
             limitations.extend(sar_eval.get("scientific_limitations", []))
 
         return {
+            "status": "success",
             "answer": answer,
             "model_type": "joint_analysis_baseline",
             "model_name": self.model_name,

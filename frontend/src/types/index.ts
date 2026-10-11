@@ -133,6 +133,10 @@ export interface ReportProvenance {
   valid_pixel_count?: number | null;
   total_pixel_count?: number | null;
   valid_pixel_percentage?: number | null;
+  quality_screening?: Record<string, any>;
+  observed_pixel_count?: number | null;
+  excluded_quality_pixel_count?: number | null;
+  quality_clearance_percentage?: number | null;
   provider_name: string;
   actual_model_used?: string | null;
   fallback_used: boolean;
@@ -371,6 +375,7 @@ export interface STACWindowedRetrieveRequestPayload {
   collection?: string;
   target_role?: 'primary' | 'secondary' | 'optical' | 'sar';
   resampling?: 'nearest' | 'bilinear' | 'cubic' | 'lanczos';
+  screen_quality?: boolean;
 }
 
 export interface STACRetrieveResponsePayload {
@@ -384,6 +389,7 @@ export interface STACRetrieveResponsePayload {
   data_base64: string;
   metadata: Record<string, any>;
   scientific_limitations: string[];
+  quality_screening?: Record<string, any>;
   validation?: STACValidateAssetResponsePayload;
   provenance?: Record<string, any>;
   error?: string;

@@ -294,6 +294,8 @@ describe('Stage 9: Live Windowed COG Acquisition & Subsystem Ingestion Tests', (
       mime_type: 'image/jpeg',
       size_bytes: 8192,
       data_base64: 'data:image/jpeg;base64,12345',
+      metadata: {},
+      scientific_limitations: [],
       provenance: {
         windowed_crop: false,
         retrieval_method: 'full_download'

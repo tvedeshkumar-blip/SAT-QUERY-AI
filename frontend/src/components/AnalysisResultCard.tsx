@@ -107,6 +107,11 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
   const conflict = response.conflict_info;
   const confidenceBreakdown = response.confidence_breakdown;
   const quality = confidenceBreakdown?.evidence_quality || {};
+  const qualityScreening = response.metadata?.quality_screening ||
+    response.metadata?.optical_sar_joint?.quality_screening ||
+    (response.reproducible_report?.provenance as any)?.quality_screening;
+  const opticalQuality = qualityScreening?.optical;
+  const sarQuality = qualityScreening?.sar;
 
   return (
     <div className="glass-panel rounded-2xl p-6 border border-slate-800 bg-slate-900/60 shadow-xl space-y-4">
@@ -406,6 +411,64 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
             </p>
           </div>
 
+        </div>
+      )}
+
+      {/* Radiometric Quality Screening & SCL / SAR Validity Banner */}
+      {qualityScreening && (
+        <div className="p-4 rounded-xl bg-slate-950/90 border border-teal-800/60 space-y-3 text-xs font-mono">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-2">
+            <span className="text-teal-400 font-bold flex items-center gap-1.5 uppercase tracking-wider">
+              <ShieldCheck className="w-4 h-4 text-teal-400" />
+              RADIOMETRIC QUALITY SCREENING & PIXEL VALIDITY
+            </span>
+            <div className="flex items-center gap-1.5">
+              <span className={`px-2 py-0.5 rounded text-[10px] border ${
+                opticalQuality?.screened ? 'bg-emerald-950 text-emerald-300 border-emerald-800' : 'bg-slate-900 text-slate-400 border-slate-700'
+              }`}>
+                {opticalQuality?.screened ? 'SCL FILTER APPLIED' : 'SCL FILTER UNAVAILABLE'}
+              </span>
+              <span className="px-2 py-0.5 rounded bg-purple-950 text-purple-300 border border-purple-800 text-[10px]">
+                {sarQuality?.screened ? 'RTC VALIDATED' : 'SAR RAW'}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {/* Optical SCL Quality */}
+            <div className="p-2.5 rounded-lg bg-slate-900/90 border border-teal-900/40 space-y-1 text-[11px]">
+              <span className="text-teal-300 font-bold block">
+                OPTICAL SCL (SCENE CLASSIFICATION LAYER)
+              </span>
+              {opticalQuality?.screened ? (
+                <div className="space-y-0.5 text-[10px] text-slate-300">
+                  <div>Clear-Sky Footprint: <span className="text-emerald-400 font-bold">{(opticalQuality.quality_clearance_fraction * 100).toFixed(1)}%</span></div>
+                  <div>Observed Pixels: <span className="text-slate-100">{opticalQuality.observed_pixel_count?.toLocaleString()}</span> (Excluded: <span className="text-amber-400">{opticalQuality.excluded_pixel_count?.toLocaleString()}</span> px)</div>
+                  <div>Resampling: <span className="text-slate-100">rasterio nearest-neighbor (categorical)</span></div>
+                </div>
+              ) : (
+                <div className="text-[10px] text-slate-400">
+                  SCL screening unperformed or asset unavailable. Clear-sky pixels cannot be confirmed.
+                </div>
+              )}
+            </div>
+
+            {/* SAR Backscatter & Terrain Limitations */}
+            <div className="p-2.5 rounded-lg bg-slate-900/90 border border-purple-900/40 space-y-1 text-[11px]">
+              <span className="text-purple-300 font-bold block">
+                SAR BACKSCATTER & GEOMETRIC TERRAIN MASK
+              </span>
+              <div className="space-y-0.5 text-[10px] text-slate-300">
+                <div>Finite Linear Power: <span className="text-slate-100">{sarQuality?.valid_pixel_count ? `${sarQuality.valid_pixel_count.toLocaleString()} px` : 'Preserved'}</span></div>
+                <div className="text-amber-300">
+                  Layover/Shadow Mask: <span className="text-amber-400 font-semibold">Unavailable from STAC provider</span>
+                </div>
+                <div className="text-[9px] text-slate-400 italic">
+                  Terrain shadows cannot be ruled out without provider-level DEM layover/shadow asset.
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

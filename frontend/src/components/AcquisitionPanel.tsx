@@ -291,6 +291,7 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
         asset_key: assetKey,
         collection: scene.collection,
         aoi_bbox: selectedAOI,
+        screen_quality: true,
         target_role: scene.modality === 'SAR' ? 'sar' : 'primary'
       });
 
@@ -734,6 +735,18 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
                     CRS: <span className="text-slate-100">{retrieved.validation?.raster_metadata?.crs_display || 'Unprojected'}</span>
                   </div>
                 </div>
+                {retrieved.quality_screening && (
+                  <div className="pt-1 border-t border-slate-800 text-[8px] flex items-center justify-between text-cyan-300">
+                    <span>
+                      QUALITY: {retrieved.quality_screening.optical?.screened ? 'SCL FILTERED' : retrieved.quality_screening.sar?.screened ? 'RTC VALIDATED' : 'SCREENED'}
+                    </span>
+                    <span>
+                      {retrieved.quality_screening.optical?.quality_clearance_fraction !== undefined
+                        ? `${(retrieved.quality_screening.optical.quality_clearance_fraction * 100).toFixed(1)}% CLEAR`
+                        : `${retrieved.quality_screening.sar?.valid_pixel_count || ''} VALID PX`}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
           </div>

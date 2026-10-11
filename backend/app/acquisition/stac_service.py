@@ -762,6 +762,11 @@ class STACAcquisitionService:
                 "target_role": req.target_role or "primary",
                 "retrieval_method": "local_sample_windowed"
             }
+            validation_report = AssetValidator.validate_asset(
+                local_path,
+                filename=safe_name,
+                provenance=prov_data
+            )
             quality_screening_data = None
             if getattr(req, "screen_quality", False):
                 if "sar" in req.scene_id.lower() or "risat" in req.scene_id.lower():
