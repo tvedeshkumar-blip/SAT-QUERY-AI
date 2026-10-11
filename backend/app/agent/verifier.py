@@ -177,24 +177,36 @@ class DeterministicVerifier:
                         c_status = "contradicted"
                         c_reason = msg
 
-            # Update cited artifact IDs with normalized versions
+                    if claim.claim_type == "measurement" and art_type == "mask" and not any(t in c_text_lower for t in ["mask", "coverage", "valid pixel", "pixel count", "flag"]):
+                        msg = f"Quantity/type mismatch: Measurement claim cites mask artifact '{clean_id}' without measurement data."
+                        failures.append(msg)
+                        contradictions.append(msg)
+                        c_status = "contradicted"
+                        c_reason = msg
+
+            # Update cited artifact IDs with deduplicated, normalized versions
             if cleaned_cited_ids:
-                claim.cited_artifact_ids = cleaned_cited_ids
+                claim.cited_artifact_ids = list(dict.fromkeys(cleaned_cited_ids))
 
             # Check A2: Unobserved Environmental Variables
             unobserved_terms = ["soil moisture", "surface temperature", "bathymetry", "precipitation", "wind speed", "salinity"]
             for term in unobserved_terms:
                 if term in c_text_lower:
-                    found_in_evidence = any(
-                        term in pm.name.lower() or term in (pm.calibration_quantity or "").lower()
-                        for pm in evidence_package.physical_measurements
-                    )
-                    if not found_in_evidence:
-                        msg = f"Claim asserts unobserved environmental variable '{term}' absent from the evidence package."
-                        failures.append(msg)
-                        contradictions.append(msg)
-                        c_status = "unsupported"
-                        c_reason = msg
+                    is_disclaiming = any(neg in c_text_lower for neg in [
+                        "not observed", "unobserved", "absent", "cannot be inferred",
+                        "not measured", "not available", "no data", "without"
+                    ])
+                    if not is_disclaiming:
+                        found_in_evidence = any(
+                            term in pm.name.lower() or term in (pm.calibration_quantity or "").lower()
+                            for pm in evidence_package.physical_measurements
+                        )
+                        if not found_in_evidence:
+                            msg = f"Claim asserts unobserved environmental variable '{term}' absent from the evidence package."
+                            failures.append(msg)
+                            contradictions.append(msg)
+                            c_status = "unsupported"
+                            c_reason = msg
 
             # Check B: Co-registration claim consistency
             is_coreg_claim = any(
@@ -229,21 +241,34 @@ class DeterministicVerifier:
             # Check D: Heuristic proxy described as certified classification or ground truth
             if any(term in c_text_lower for term in ["water", "canopy", "structural", "built-up", "vegetation"]):
                 if any(term in c_text_lower for term in ["certified", "ground truth", "ground-truth", "validated accuracy", "ground truth classification"]):
-                    msg = "Heuristic proxy is improperly claimed as certified land-cover classification or ground truth."
-                    failures.append(msg)
-                    contradictions.append(msg)
-                    c_status = "contradicted"
-                    c_reason = "Violates scientific integrity: heuristic proxy cannot be claimed as certified classification."
+                    is_negated = any(neg in c_text_lower for neg in [
+                        "not certified", "not a certified", "not ground truth", "not ground-truth",
+                        "never certified", "neither certified", "no certified", "cannot be considered ground truth"
+                    ])
+                    if not is_negated:
+                        msg = "Heuristic proxy is improperly claimed as certified land-cover classification or ground truth."
+                        failures.append(msg)
+                        contradictions.append(msg)
+                        c_status = "contradicted"
+                        c_reason = "Violates scientific integrity: heuristic proxy cannot be claimed as certified classification."
 
             # Check E: Gamma-0 vs Sigma-0 conflation and Uncalibrated Assets
-            if is_uncalibrated_asset:
-                if any(t in c_text_lower for t in ["certified gamma", "certified sigma", "calibrated backscatter", "calibrated sigma-0", "calibrated gamma-0"]):
+            is_cert_cal_claim = any(t in c_text_lower for t in ["certified gamma", "certified sigma", "calibrated backscatter", "calibrated sigma-0", "calibrated gamma-0"])
+            if is_cert_cal_claim:
+                if is_uncalibrated_asset:
                     msg = "Asset calibration provenance is uncalibrated DN; cannot support certified backscatter claim."
                     failures.append(msg)
                     contradictions.append(msg)
                     c_status = "contradicted"
                     c_reason = msg
-            elif has_gamma0 and not has_sigma0:
+                elif not has_gamma0 and not has_sigma0:
+                    msg = "Calibration provenance metadata is missing or unverified; cannot support certified backscatter claim."
+                    failures.append(msg)
+                    contradictions.append(msg)
+                    c_status = "contradicted"
+                    c_reason = msg
+
+            if has_gamma0 and not has_sigma0:
                 if any(term in c_text_lower for term in ["sigma-0", "sigma_0", "sigma0", "sigma-naught", "sigma naught"]):
                     msg = "SAR gamma-naught backscatter is mislabeled as sigma-naught without supporting calibration provenance."
                     failures.append(msg)
@@ -253,6 +278,13 @@ class DeterministicVerifier:
 
             # Check F: Display values conflated with physical measurements & Numerical verification
             if any(term in c_text_lower for term in ["surface reflectance", "boa reflectance", "albedo"]):
+                if "db" in c_text_lower:
+                    msg = "Surface reflectance is a unitless ratio [0, 1] and cannot be expressed in decibels (dB)."
+                    failures.append(msg)
+                    contradictions.append(msg)
+                    c_status = "contradicted"
+                    c_reason = msg
+
                 match_before = re.search(r'(\d+\.?\d*)\s*(?:%|reflectance|albedo)', c_text_lower)
                 match_after = re.search(r'(?:surface reflectance|boa reflectance|reflectance|albedo)[^\d]*(\d+\.?\d*)', c_text_lower)
                 num_str = None
@@ -280,6 +312,23 @@ class DeterministicVerifier:
                                 contradictions.append(msg)
                                 c_status = "contradicted"
                                 c_reason = msg
+
+            # Numeric verification for SAR linear power
+            if any(t in c_text_lower for t in ["linear power", "linear backscatter", "linear gamma"]):
+                m_lin = re.search(r'(?:linear (?:gamma(?:-?0| naught)? )?(?:power|backscatter)|linear power|linear backscatter)[^\d]*(\d+\.?\d*)', c_text_lower)
+                if not m_lin:
+                    m_lin = re.search(r'(\d+\.?\d*)\s*(?:linear power|linear backscatter)', c_text_lower)
+                if m_lin:
+                    val_lin = float(m_lin.group(1))
+                    true_lin = phys_by_name.get("sar_mean_linear_power")
+                    if true_lin and isinstance(true_lin.value, (int, float)):
+                        actual_lin = float(true_lin.value)
+                        if abs(val_lin - actual_lin) > 0.05:
+                            msg = f"Claimed linear backscatter ({val_lin}) contradicts verified physical measurement ({actual_lin})."
+                            failures.append(msg)
+                            contradictions.append(msg)
+                            c_status = "contradicted"
+                            c_reason = msg
 
             # Check F2: SAR Display intensity conflation
             if any(t in c_text_lower for t in ["backscatter", "sar", "radar"]):
@@ -748,6 +797,12 @@ class LLMScientificVerifier:
         if not is_llm_online:
             # Fallback path: deterministic-only result, LLM not run
             elapsed = round((time.time() - start_time) * 1000, 2)
+            if not det_passed:
+                supp_c = sum(1 for c in evaluated_claims if c.status == "supported")
+                fallback_status = "partially_supported" if supp_c > 0 else "unsupported"
+            else:
+                fallback_status = "not_run"
+
             summary = (
                 "Deterministic scientific-integrity checks completed successfully. "
                 "LLM interpretive verification was not run because the local LLM service is offline or unreachable."
@@ -756,7 +811,7 @@ class LLMScientificVerifier:
                 "LLM verification was not run because the local LLM service is offline or unreachable."
             )
             return VerificationResponseSchema(
-                verification_status="not_run" if det_passed else "unsupported",
+                verification_status=fallback_status,
                 deterministic_passed=det_passed,
                 deterministic_failures=det_failures,
                 claims=evaluated_claims,
@@ -840,7 +895,7 @@ class LLMScientificVerifier:
                         llm_contradictions.append(f"Invalid artifact ID '{art_id}' cited by LLM.")
                     else:
                         cleaned_cited.append(clean_id)
-                c_item.cited_artifact_ids = cleaned_cited
+                c_item.cited_artifact_ids = list(dict.fromkeys(cleaned_cited))
 
                 # NON-OVERRIDABLE GATE: A deterministically contradicted/unsupported claim CANNOT be promoted to supported!
                 c_text_l = c_item.claim_text.strip().lower()
@@ -857,11 +912,18 @@ class LLMScientificVerifier:
             elif not llm_claims_raw and evaluated_claims:
                 final_claims = evaluated_claims
 
-            # Step 5: Enforce Non-Overridable Deterministic Gate
-            # A deterministic failure MUST NOT be overridden by an LLM assertion!
-            final_status = llm_status
+            # Step 5: Enforce Non-Overridable Deterministic Gate & Claim-Level Aggregation
+            valid_statuses = {"supported", "partially_supported", "unsupported", "contradicted"}
+            for c in final_claims:
+                if c.status not in valid_statuses:
+                    c.status = "unsupported"
+                    c.reason = (c.reason or "") + " [Normalized from invalid status string]"
+
+            supported_count = sum(1 for c in final_claims if c.status == "supported")
+            contradicted_count = sum(1 for c in final_claims if c.status == "contradicted")
+            unsupported_count = sum(1 for c in final_claims if c.status == "unsupported")
+
             if not det_passed:
-                supported_count = sum(1 for c in final_claims if c.status == "supported")
                 if supported_count == 0:
                     final_status = "unsupported"
                 else:
@@ -870,6 +932,16 @@ class LLMScientificVerifier:
                 for f in det_failures:
                     if f not in llm_contradictions:
                         llm_contradictions.insert(0, f)
+            else:
+                # Deterministic checks passed; aggregate based on claim evaluations
+                if not final_claims:
+                    final_status = "not_run" if not candidate_claims else "unsupported"
+                elif supported_count == len(final_claims) and contradicted_count == 0 and unsupported_count == 0:
+                    final_status = "supported" if llm_status == "supported" else llm_status
+                elif supported_count > 0:
+                    final_status = "partially_supported"
+                else:
+                    final_status = "unsupported"
 
             # Merge lists cleanly
             all_contradictions = list(dict.fromkeys(contradictions + llm_contradictions))
@@ -902,8 +974,14 @@ class LLMScientificVerifier:
         except (LMStudioConnectionError, httpx.TimeoutException, httpx.ConnectError, httpx.ConnectTimeout) as ce:
             logger.warning(f"LLM connection/timeout error during verification: {ce}")
             elapsed = round((time.time() - start_time) * 1000, 2)
+            if not det_passed:
+                supp_c = sum(1 for c in evaluated_claims if c.status == "supported")
+                fallback_status = "partially_supported" if supp_c > 0 else "unsupported"
+            else:
+                fallback_status = "not_run"
+
             return VerificationResponseSchema(
-                verification_status="not_run" if det_passed else "unsupported",
+                verification_status=fallback_status,
                 deterministic_passed=det_passed,
                 deterministic_failures=det_failures,
                 claims=evaluated_claims,
@@ -921,9 +999,15 @@ class LLMScientificVerifier:
         except Exception as e:
             logger.warning(f"LLM verification parsing or execution error: {e}")
             elapsed = round((time.time() - start_time) * 1000, 2)
+            if not det_passed:
+                supp_c = sum(1 for c in evaluated_claims if c.status == "supported")
+                fallback_status = "partially_supported" if supp_c > 0 else "unsupported"
+            else:
+                fallback_status = "not_run"
+
             # Malformed output or unexpected error must NOT be treated as successful verification
             return VerificationResponseSchema(
-                verification_status="not_run" if det_passed else "unsupported",
+                verification_status=fallback_status,
                 deterministic_passed=det_passed,
                 deterministic_failures=det_failures,
                 claims=evaluated_claims,
