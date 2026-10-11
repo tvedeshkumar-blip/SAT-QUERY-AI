@@ -102,8 +102,97 @@ export interface AnalysisResponse {
   confidence_breakdown?: ConfidenceBreakdown;
   conflict_info?: ConflictInfo;
   verification?: VerificationResponse | null;
+  reproducible_report?: ScientificReport | null;
   execution_time_ms: number;
   created_at: string;
+}
+
+export interface PhysicalMeasurementReportItem {
+  name: string;
+  value: number | string;
+  unit: string;
+  statistic_type: string;
+  calibration_quantity?: string | null;
+  mask_applied: string;
+  source_artifact_ids: string[];
+}
+
+export interface ReportProvenance {
+  analysis_id: string;
+  task: string;
+  query: string;
+  mode: string;
+  created_at: string;
+  sensor_identities: string[];
+  source_asset_ids: string[];
+  acquisition_timestamps: string[];
+  crs?: string | null;
+  spatial_resolution_m?: number | string | null;
+  dimensions?: string | null;
+  registration_status: Record<string, any>;
+  valid_pixel_count?: number | null;
+  total_pixel_count?: number | null;
+  valid_pixel_percentage?: number | null;
+  provider_name: string;
+  actual_model_used?: string | null;
+  fallback_used: boolean;
+  is_trained_model: boolean;
+  model_status?: string | null;
+}
+
+export interface ReportVerificationSummary {
+  verification_status: VerificationStatus;
+  deterministic_passed: boolean;
+  deterministic_failures: string[];
+  claims: ClaimVerificationItem[];
+  contradictions: string[];
+  unsupported_claims: string[];
+  missing_evidence: string[];
+  scientific_limitations: string[];
+  recommended_checks: string[];
+  is_interpretive_only: boolean;
+  interpretive_statement: string;
+  summary_explanation: string;
+}
+
+export interface ReportReproducibility {
+  software_version: string;
+  provider_config: Record<string, any>;
+  pipeline_steps: string[];
+  unavailable_fields: string[];
+}
+
+export interface ScientificReport {
+  report_id: string;
+  report_version: string;
+  generated_at: string;
+  provenance: ReportProvenance;
+  physical_measurements: PhysicalMeasurementReportItem[];
+  display_statistics: Array<{
+    name: string;
+    value: number | string;
+    scale: string;
+    purpose: string;
+  }>;
+  heuristic_indicators: Array<{
+    name: string;
+    percentage: number;
+    pixel_count: number;
+    definition: string;
+    is_certified_classification: boolean;
+    limitations: string;
+  }>;
+  evidence_artifacts: Array<{
+    artifact_id: string;
+    artifact_type: string;
+    title: string;
+    description?: string | null;
+    statistics?: Record<string, any>;
+  }>;
+  verification_summary?: ReportVerificationSummary | null;
+  reproducibility: ReportReproducibility;
+  executive_summary: string;
+  integrity_notice: string;
 }
 
 export type VerificationStatus = 'supported' | 'partially_supported' | 'unsupported' | 'not_run';

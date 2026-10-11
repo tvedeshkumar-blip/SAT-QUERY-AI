@@ -8,6 +8,14 @@ from app.schemas.analysis import (
     BoundingBoxSchema,
     HealthResponseSchema
 )
+from app.schemas.report import (
+    ScientificReportSchema,
+    ReportProvenanceSchema,
+    PhysicalMeasurementReportItem,
+    ReportEvidenceArtifactItem,
+    ReportVerificationSummarySchema,
+    ReportReproducibilitySchema,
+)
 
 __all__ = [
     "ImageInput",
@@ -17,5 +25,11 @@ __all__ = [
     "ExecutionTraceSchema",
     "TraceStepSchema",
     "BoundingBoxSchema",
-    "HealthResponseSchema"
+    "HealthResponseSchema",
+    "ScientificReportSchema",
+    "ReportProvenanceSchema",
+    "PhysicalMeasurementReportItem",
+    "ReportEvidenceArtifactItem",
+    "ReportVerificationSummarySchema",
+    "ReportReproducibilitySchema",
 ]

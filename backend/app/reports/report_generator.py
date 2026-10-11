@@ -9,6 +9,26 @@ def generate_json_report(analysis_response: Dict[str, Any]) -> str:
     """Generates formatted JSON report string."""
     return json.dumps(analysis_response, indent=2)
 
+def generate_markdown_report(analysis_response: Dict[str, Any]) -> str:
+    """Generates audit-grade reproducible scientific Markdown report."""
+    from app.reports.scientific_report import ScientificReportBuilder, generate_scientific_markdown
+    from app.schemas.report import ScientificReportSchema
+
+    # If reproducible_report is already provided in the response
+    if "reproducible_report" in analysis_response and analysis_response["reproducible_report"]:
+        rep = analysis_response["reproducible_report"]
+        if isinstance(rep, dict):
+            report_obj = ScientificReportSchema(**rep)
+        elif isinstance(rep, ScientificReportSchema):
+            report_obj = rep
+        else:
+            report_obj = ScientificReportBuilder.build_report(analysis_response)
+    else:
+        report_obj = ScientificReportBuilder.build_report(analysis_response)
+
+    return generate_scientific_markdown(report_obj)
+
+
 def generate_pdf_report(analysis_response: Dict[str, Any]) -> bytes:
     """
     Generates a professional PDF analysis report using ReportLab.

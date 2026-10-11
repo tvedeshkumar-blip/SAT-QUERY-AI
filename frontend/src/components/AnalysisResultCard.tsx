@@ -5,6 +5,7 @@ import {
   ShieldCheck, 
   Cpu, 
   FileSpreadsheet, 
+  FileText,
   Loader2, 
   Globe, 
   Eye, 
@@ -33,8 +34,31 @@ interface AnalysisResultCardProps {
 export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response }) => {
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [isExportingJson, setIsExportingJson] = useState(false);
+  const [isExportingMarkdown, setIsExportingMarkdown] = useState(false);
   const [isMetadataOpen, setIsMetadataOpen] = useState(false);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+
+  const handleDownloadMarkdown = async () => {
+    try {
+      setIsExportingMarkdown(true);
+      const res = await fetch(`${API_BASE}/reports/markdown`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(response),
+      });
+      if (!res.ok) throw new Error('Markdown export failed');
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `satquery_report_${response.id}.md`;
+      a.click();
+    } catch (err) {
+      console.error('Markdown Download Error:', err);
+    } finally {
+      setIsExportingMarkdown(false);
+    }
+  };
 
   const handleDownloadPdf = async () => {
     try {
@@ -544,6 +568,15 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
           </button>
 
           <button
+            onClick={handleDownloadMarkdown}
+            disabled={isExportingMarkdown}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-semibold bg-emerald-950 hover:bg-emerald-900 text-emerald-300 border border-emerald-800 transition-all shadow-sm"
+          >
+            {isExportingMarkdown ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileText className="w-3.5 h-3.5" />}
+            Export Markdown
+          </button>
+
+          <button
             onClick={handleDownloadPdf}
             disabled={isExportingPdf}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-semibold bg-gradient-to-r from-cyan-600 to-teal-600 hover:from-cyan-500 hover:to-teal-500 text-white shadow-sm shadow-cyan-900/30 transition-all"
@@ -579,8 +612,10 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
         response={response}
         onDownloadPdf={handleDownloadPdf}
         onDownloadJson={handleDownloadJson}
+        onDownloadMarkdown={handleDownloadMarkdown}
         isExportingPdf={isExportingPdf}
         isExportingJson={isExportingJson}
+        isExportingMarkdown={isExportingMarkdown}
       />
 
     </div>

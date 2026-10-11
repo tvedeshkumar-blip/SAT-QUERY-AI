@@ -137,3 +137,22 @@ def verify_analysis_endpoint(request: VerificationRequestSchema):
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/analyze/report")
+def generate_report_endpoint(payload: dict):
+    """
+    Stage 8: Generates or returns a validated ScientificReportSchema
+    from an analysis response dictionary.
+    """
+    try:
+        from app.reports.scientific_report import ScientificReportBuilder
+        from app.schemas.report import ScientificReportSchema
+        if "reproducible_report" in payload and payload["reproducible_report"]:
+            rep = payload["reproducible_report"]
+            if isinstance(rep, dict):
+                return ScientificReportSchema(**rep)
+            if isinstance(rep, ScientificReportSchema):
+                return rep
+        return ScientificReportBuilder.build_report(payload)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to generate scientific report: {str(e)}")

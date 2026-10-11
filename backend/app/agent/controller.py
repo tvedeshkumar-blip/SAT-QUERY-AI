@@ -21,6 +21,7 @@ from app.agent.registry import model_registry
 from app.agent.conflict_detector import ConflictDetector, ConflictCheckResult
 from app.rag.rag_service import rag_service
 from app.agent.verifier import scientific_verifier, EvidencePackageBuilder
+from app.reports.scientific_report import ScientificReportBuilder
 
 logger = logging.getLogger("satquery.agent")
 
@@ -539,6 +540,34 @@ class AgentController:
         # Step 13: Final Response Assembly
         trace.add_step("RESPONSE_GENERATED", "Assembled final agentic multimodal response")
         execution_time_ms = round((time.time() - start_time) * 1000, 2)
+        created_at_str = datetime.utcnow().isoformat() + "Z"
+
+        # Stage 8: Scientific Analysis Quality and Evidence Report
+        reproducible_report = None
+        try:
+            proto_for_report = {
+                "id": req_id,
+                "task": task,
+                "query": request.query or request.question or "",
+                "mode": request.mode,
+                "answer": result["answer"],
+                "created_at": created_at_str,
+                "primary_model": result.get("primary_model"),
+                "actual_model_used": result.get("actual_model_used"),
+                "fallback_used": result.get("fallback_used", False),
+                "model_status": result.get("model_status"),
+                "evidence": evidence_objects,
+                "metadata": metadata_list[0] if metadata_list else {},
+                "verification": verification_result,
+                "trace": trace.to_dict(),
+            }
+            reproducible_report = ScientificReportBuilder.build_report(
+                proto_for_report,
+                evidence_package=evidence_pkg,
+            )
+        except Exception as e:
+            logger.warning(f"Stage 8 report compilation failed safely: {e}")
+            reproducible_report = None
 
         return AnalysisResponseSchema(
             id=req_id,
@@ -560,8 +589,9 @@ class AgentController:
             confidence_breakdown=confidence_breakdown,
             conflict_info=conflict_info,
             verification=verification_result,
+            reproducible_report=reproducible_report,
             execution_time_ms=execution_time_ms,
-            created_at=datetime.utcnow().isoformat() + "Z"
+            created_at=created_at_str
         )
 
 # Global Controller Instance
