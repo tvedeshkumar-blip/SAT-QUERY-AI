@@ -94,6 +94,23 @@ def align_image_pair(
     src_valid_a = compute_source_valid_mask(img_a, nodata_a)
     src_valid_b = compute_source_valid_mask(img_b, nodata_b)
 
+    # Stage 10: Integrate radiometric quality masks if present
+    q_mask_a = meta_a.get("quality_mask")
+    if q_mask_a is None:
+        q_mask_a = meta_a.get("scl_mask")
+    if q_mask_a is None and isinstance(meta_a.get("quality_screening"), dict):
+        q_mask_a = meta_a["quality_screening"].get("clear_mask")
+    if q_mask_a is not None and isinstance(q_mask_a, np.ndarray) and q_mask_a.shape[:2] == (h_a, w_a):
+        src_valid_a = src_valid_a & q_mask_a
+
+    q_mask_b = meta_b.get("quality_mask")
+    if q_mask_b is None:
+        q_mask_b = meta_b.get("sar_valid_mask")
+    if q_mask_b is None and isinstance(meta_b.get("quality_screening"), dict):
+        q_mask_b = meta_b["quality_screening"].get("valid_mask")
+    if q_mask_b is not None and isinstance(q_mask_b, np.ndarray) and q_mask_b.shape[:2] == (h_b, w_b):
+        src_valid_b = src_valid_b & q_mask_b
+
     # Case 1: Both images have authentic CRS and bounds
     if crs_a and crs_b and bounds_a and bounds_b:
         overlap_pct = 0.0

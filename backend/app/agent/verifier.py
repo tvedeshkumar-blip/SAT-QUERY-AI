@@ -375,6 +375,59 @@ class DeterministicVerifier:
                             c_status = "contradicted"
                             c_reason = msg
 
+            # Check H: Radiometric Quality Screening & Cloud-Free Claims
+            is_cloud_free_claim = any(
+                term in c_text_lower for term in [
+                    "cloud-free", "cloud free", "cloudless", "clear sky", "clear-sky",
+                    "free of clouds", "zero clouds", "no clouds", "completely clear"
+                ]
+            )
+            if is_cloud_free_claim:
+                is_negated_cloud = any(neg in c_text_lower for neg in [
+                    "not cloud-free", "not cloud free", "not clear", "contains clouds",
+                    "partly cloudy", "cloud covered", "cloud obstruction"
+                ])
+                if not is_negated_cloud:
+                    q_data = evidence_package.quality_screening or {}
+                    opt_q = q_data.get("optical") if isinstance(q_data, dict) else None
+                    if not opt_q or not opt_q.get("screened"):
+                        msg = "Claim asserts cloud-free scene, but radiometric quality screening was not performed or SCL data is unavailable."
+                        failures.append(msg)
+                        contradictions.append(msg)
+                        c_status = "unsupported"
+                        c_reason = msg
+                    else:
+                        excl_px = int(opt_q.get("excluded_pixel_count", 0))
+                        cloud_px = int(opt_q.get("cloud_pixels", 0))
+                        clearance = float(opt_q.get("quality_clearance_fraction", 0.0))
+                        has_obstruction = bool(opt_q.get("has_cloud_obstruction", False))
+                        if excl_px > 0 or cloud_px > 0 or clearance < 1.0 or has_obstruction:
+                            msg = f"Claim asserts cloud-free scene, but radiometric quality screening detected {excl_px} excluded / cloud / shadow pixels (clearance: {round(clearance * 100, 1)}%)."
+                            failures.append(msg)
+                            contradictions.append(msg)
+                            c_status = "contradicted"
+                            c_reason = msg
+
+            # Check I: SAR Geometric Layover/Shadow-Free Claims
+            is_shadow_free_claim = any(
+                term in c_text_lower for term in [
+                    "terrain-shadow-free", "terrain shadow free", "free of terrain shadows",
+                    "no terrain layover", "shadow-free", "no radar shadow", "no layover or shadow",
+                    "free from terrain shadow"
+                ]
+            )
+            if is_shadow_free_claim:
+                is_negated_shadow = any(neg in c_text_lower for neg in [
+                    "not terrain-shadow-free", "terrain shadow cannot be ruled out",
+                    "shadow mask unavailable", "cannot claim terrain-shadow-free"
+                ])
+                if not is_negated_shadow:
+                    msg = "Claim asserts terrain-shadow-free scene, but SAR geometric layover/shadow masking is unavailable from the STAC provider."
+                    failures.append(msg)
+                    contradictions.append(msg)
+                    c_status = "unsupported"
+                    c_reason = msg
+
             evaluated_claims.append(ClaimVerificationItem(
                 claim_text=claim.claim_text,
                 claim_type=claim.claim_type,
@@ -514,12 +567,19 @@ class EvidencePackageBuilder:
         if not reg_info and opt_sar_meta.get("registration"):
             reg_info = opt_sar_meta["registration"]
 
-        # 5. Valid pixel count
+        # 5. Valid pixel count & Quality Screening
         valid_px = reg_info.get("valid_pixels") or meta.get("valid_pixel_count")
         total_px = reg_info.get("total_pixels") or meta.get("total_pixels")
         valid_pct = reg_info.get("valid_percentage")
         if valid_pct is None and valid_px and total_px:
             valid_pct = round((valid_px / total_px) * 100.0, 2)
+
+        # Quality screening provenance
+        q_screen = meta.get("quality_screening") or opt_sar_meta.get("quality_screening")
+        opt_screened = bool(q_screen and q_screen.get("optical", {}).get("screened"))
+        sar_screened = bool(q_screen and q_screen.get("sar", {}).get("screened"))
+        opt_mask_name = "joint_screened_quality_mask" if opt_screened else "joint_valid_mask"
+        sar_mask_name = "joint_screened_quality_mask" if sar_screened else "joint_valid_mask"
 
         # 6. Physical measurements
         physical_measurements = []
@@ -531,7 +591,7 @@ class EvidencePackageBuilder:
                 value=opt_mean_boa,
                 unit="unitless (surface reflectance BOA)",
                 statistic_type="mean",
-                mask_applied="joint_valid_mask",
+                mask_applied=opt_mask_name,
                 calibration_quantity="boa_surface_reflectance"
             ))
 
@@ -543,7 +603,7 @@ class EvidencePackageBuilder:
                 value=sar_lin,
                 unit="linear power (m^2/m^2)",
                 statistic_type="mean",
-                mask_applied="joint_valid_mask",
+                mask_applied=sar_mask_name,
                 calibration_quantity="gamma0"
             ))
 
@@ -682,6 +742,7 @@ class EvidencePackageBuilder:
             heuristic_indicators=heuristics,
             evidence_artifacts=evidence_artifacts,
             provider_info=prov_info,
+            quality_screening=q_screen,
             validation_warnings=warnings,
             known_limitations=limitations
         )

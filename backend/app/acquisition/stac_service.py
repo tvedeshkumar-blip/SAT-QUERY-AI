@@ -21,6 +21,8 @@ from app.schemas.acquisition import (
     STACValidateAssetResponse
 )
 from app.remote_sensing.geotiff import parse_geotiff_or_image
+from app.remote_sensing.quality import QualityScreener, QualityScreeningError
+from app.remote_sensing.preprocessing import convert_array_to_base64_png
 from app.acquisition.asset_validator import AssetValidator
 from app.acquisition.windowed_reader import SafeWindowedCOGReader, WindowedRetrievalError
 
@@ -435,6 +437,8 @@ class STACAcquisitionService:
         """
         Serializes an in-memory numpy array and georeferencing metadata into standard GeoTIFF bytes.
         """
+        if not meta.get("crs") or str(meta["crs"]).lower() in ("none", ""):
+            raise ValueError("Cannot serialize raster without valid Coordinate Reference System (CRS).")
         mem = MemoryFile()
         transform = rasterio.Affine(*meta["transform"][:6])
         count = 1 if arr.ndim == 2 else arr.shape[2]
@@ -470,31 +474,7 @@ class STACAcquisitionService:
             return self._retrieve_local_sample_window(req)
 
         cached = self._scene_cache.get(req.scene_id)
-        clean_url = None
-
-        if cached:
-            raw_assets = cached.get("raw_assets", {})
-            asset_info = raw_assets.get(req.asset_key)
-            if asset_info:
-                clean_url = self._format_accessible_href(asset_info.get("href", ""))
-            elif req.asset_url:
-                clean_url = self._format_accessible_href(req.asset_url)
-            else:
-                available_keys = ", ".join(raw_assets.keys()) if raw_assets else "none"
-                return STACRetrieveResponse(
-                    status="error",
-                    scene_id=req.scene_id,
-                    asset_key=req.asset_key,
-                    category="unsupported",
-                    filename="none",
-                    mime_type="none",
-                    size_bytes=0,
-                    data_base64="",
-                    error=f"Requested asset key '{req.asset_key}' is not available for scene '{req.scene_id}' (available assets: {available_keys})."
-                )
-        elif req.asset_url:
-            clean_url = self._format_accessible_href(req.asset_url)
-        else:
+        if not cached:
             return STACRetrieveResponse(
                 status="error",
                 scene_id=req.scene_id,
@@ -504,8 +484,26 @@ class STACAcquisitionService:
                 mime_type="none",
                 size_bytes=0,
                 data_base64="",
-                error=f"Scene '{req.scene_id}' not found in active STAC search session. Please execute a search first or provide asset_url."
+                error=f"Scene '{req.scene_id}' not found in active STAC search session. Please execute a search first."
             )
+
+        raw_assets = cached.get("raw_assets", {})
+        asset_info = raw_assets.get(req.asset_key)
+        if not asset_info:
+            available_keys = ", ".join(raw_assets.keys()) if raw_assets else "none"
+            return STACRetrieveResponse(
+                status="error",
+                scene_id=req.scene_id,
+                asset_key=req.asset_key,
+                category="unsupported",
+                filename="none",
+                mime_type="none",
+                size_bytes=0,
+                data_base64="",
+                error=f"Requested asset key '{req.asset_key}' is not available for scene '{req.scene_id}' (available assets: {available_keys})."
+            )
+
+        clean_url = self._format_accessible_href(asset_info.get("href", ""))
 
         # Handle Planetary Computer SAS token if needed
         if "blob.core.windows.net" in clean_url or "planetarycomputer.microsoft.com" in clean_url:
@@ -596,7 +594,8 @@ class STACAcquisitionService:
             "windowed_crop": True,
             "aoi_bbox": req.aoi_bbox,
             "target_role": req.target_role or "primary",
-            "retrieval_method": "http_range_windowed_cog"
+            "retrieval_method": "http_range_windowed_cog",
+            "transfer_telemetry": meta.get("transfer_telemetry", {})
         }
 
         # Physical Asset Validation: inspect actual binary on disk
@@ -608,8 +607,57 @@ class STACAcquisitionService:
 
         raw_cat = validation_report.get("asset_category", "scientific_raster")
         category = "scientific_raster" if raw_cat in ("scientific_raster", "rgb_visual_raster", "single_band_spectral", "multispectral_cube") else raw_cat
-        limitations = validation_report.get("scientific_limitations", [])
+        limitations = list(validation_report.get("scientific_limitations", []))
         raster_meta = validation_report.get("raster_metadata", {})
+
+        # Stage 10: Radiometric Quality Screening Evaluation
+        quality_screening_data = None
+        if getattr(req, "screen_quality", False):
+            is_sar = "vv" in req.asset_key.lower() or "vh" in req.asset_key.lower() or "rtc" in req.asset_key.lower()
+            if not is_sar:
+                scl_asset = raw_assets.get("scl")
+                if scl_asset:
+                    scl_url = self._format_accessible_href(scl_asset.get("href", ""))
+                    try:
+                        scl_arr, scl_m = SafeWindowedCOGReader.read_cog_window(
+                            url=scl_url,
+                            bbox_wgs84=req.aoi_bbox,
+                            max_bytes=req.max_bytes
+                        )
+                        aligned_scl, align_meta = QualityScreener.reproject_scl_to_target(scl_arr, scl_m, meta)
+                        scl_eval = QualityScreener.evaluate_scl(aligned_scl)
+                        scl_eval["alignment"] = align_meta
+                        scl_rgb = QualityScreener.generate_scl_rgb_preview(aligned_scl)
+                        scl_eval["scl_preview_base64"] = convert_array_to_base64_png(scl_rgb)
+                        quality_screening_data = scl_eval
+                        raster_meta["quality_screening"] = scl_eval
+                        raster_meta["scl_mask"] = scl_eval["clear_mask"]
+                    except Exception as scl_err:
+                        logger.warning(f"Companion SCL retrieval/screening failed safely: {scl_err}")
+                        quality_screening_data = {
+                            "is_evaluated": False,
+                            "status": "screening_failed",
+                            "error": str(scl_err),
+                            "scientific_limitations": [
+                                f"Companion SCL quality screening failed ({scl_err}). Primary raster preserved without atmospheric filtering."
+                            ]
+                        }
+                        limitations.append(f"SCL quality screening failed: {scl_err}")
+                else:
+                    quality_screening_data = {
+                        "is_evaluated": False,
+                        "status": "unavailable",
+                        "reason": "SCL asset not available in scene catalog",
+                        "scientific_limitations": [
+                            "Scene catalog does not provide an SCL asset; atmospheric cloud screening could not be performed."
+                        ]
+                    }
+                    limitations.append("SCL quality asset unavailable; unmasked optical reflectance.")
+            else:
+                sar_eval = QualityScreener.evaluate_sar_quality(arr, meta)
+                quality_screening_data = sar_eval
+                raster_meta["quality_screening"] = sar_eval
+                limitations.extend(sar_eval.get("scientific_limitations", []))
 
         return STACRetrieveResponse(
             status="success",
@@ -623,7 +671,8 @@ class STACAcquisitionService:
             metadata=raster_meta,
             scientific_limitations=limitations,
             validation=validation_report,
-            provenance=provenance_data
+            provenance=provenance_data,
+            quality_screening=quality_screening_data
         )
 
     def _retrieve_local_sample_window(self, req: STACWindowedRetrieveRequest) -> STACRetrieveResponse:
@@ -655,7 +704,26 @@ class STACAcquisitionService:
                 else:
                     target_bounds = req.aoi_bbox
 
-                raw_win = from_bounds(*target_bounds, transform=src.transform)
+                # Detect empty spatial intersection
+                inter_minx = max(src.bounds.left, target_bounds[0])
+                inter_maxx = min(src.bounds.right, target_bounds[2])
+                inter_miny = max(src.bounds.bottom, target_bounds[1])
+                inter_maxy = min(src.bounds.top, target_bounds[3])
+
+                if inter_minx >= inter_maxx or inter_miny >= inter_maxy:
+                    return STACRetrieveResponse(
+                        status="error",
+                        scene_id=req.scene_id,
+                        asset_key=req.asset_key,
+                        category="unsupported",
+                        filename=name_part,
+                        mime_type="image/tiff",
+                        size_bytes=0,
+                        data_base64="",
+                        error="Requested AOI bounding box does not intersect the asset extent (empty spatial intersection)."
+                    )
+
+                raw_win = from_bounds(inter_minx, inter_miny, inter_maxx, inter_maxy, transform=src.transform)
                 col_off = max(0, min(src.width - 1, int(np.floor(raw_win.col_off))))
                 row_off = max(0, min(src.height - 1, int(np.floor(raw_win.row_off))))
                 w_px = max(1, min(src.width - col_off, int(np.ceil(raw_win.width))))
@@ -694,7 +762,24 @@ class STACAcquisitionService:
                 "target_role": req.target_role or "primary",
                 "retrieval_method": "local_sample_windowed"
             }
-            validation_report = AssetValidator.validate_asset(local_path, filename=safe_name, provenance=prov_data)
+            quality_screening_data = None
+            if getattr(req, "screen_quality", False):
+                if "sar" in req.scene_id.lower() or "risat" in req.scene_id.lower():
+                    sar_eval = QualityScreener.evaluate_sar_quality(data, meta)
+                    quality_screening_data = sar_eval
+                    validation_report.setdefault("raster_metadata", {})["quality_screening"] = sar_eval
+                else:
+                    # Synthetic clear-sky SCL for local demonstration rasters
+                    h_val = meta.get("height", data.shape[0] if data.ndim == 2 else data.shape[0])
+                    w_val = meta.get("width", data.shape[1] if data.ndim == 2 else data.shape[1])
+                    synth_scl = np.full((h_val, w_val), 4, dtype=np.uint8)  # Class 4 = Vegetation
+                    scl_eval = QualityScreener.evaluate_scl(synth_scl)
+                    scl_rgb = QualityScreener.generate_scl_rgb_preview(synth_scl)
+                    scl_eval["scl_preview_base64"] = convert_array_to_base64_png(scl_rgb)
+                    quality_screening_data = scl_eval
+                    validation_report.setdefault("raster_metadata", {})["quality_screening"] = scl_eval
+                    validation_report.setdefault("raster_metadata", {})["scl_mask"] = scl_eval["clear_mask"]
+
             return STACRetrieveResponse(
                 status="success",
                 scene_id=req.scene_id,
@@ -707,7 +792,8 @@ class STACAcquisitionService:
                 metadata=validation_report.get("raster_metadata", {}),
                 scientific_limitations=validation_report.get("scientific_limitations", []),
                 validation=validation_report,
-                provenance=prov_data
+                provenance=prov_data,
+                quality_screening=quality_screening_data
             )
         except Exception as e:
             return STACRetrieveResponse(

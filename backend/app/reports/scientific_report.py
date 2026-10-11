@@ -123,6 +123,28 @@ class ScientificReportBuilder:
         if not registration_status:
             unavailable_fields.append("registration_status: multi-sensor co-registration unperformed or unrecorded")
 
+        # Quality screening extraction
+        quality_screening = None
+        if evidence_package and getattr(evidence_package, "quality_screening", None):
+            quality_screening = evidence_package.quality_screening
+        elif metadata.get("quality_screening"):
+            quality_screening = metadata["quality_screening"]
+        elif metadata.get("optical_sar_joint", {}).get("quality_screening"):
+            quality_screening = metadata["optical_sar_joint"]["quality_screening"]
+
+        observed_pixel_count = None
+        excluded_quality_pixel_count = None
+        quality_clearance_percentage = None
+
+        if quality_screening and isinstance(quality_screening, dict):
+            opt_q = quality_screening.get("optical", {})
+            if opt_q:
+                observed_pixel_count = opt_q.get("observed_pixel_count")
+                excluded_quality_pixel_count = opt_q.get("excluded_pixel_count")
+                clr_frac = opt_q.get("quality_clearance_fraction")
+                if clr_frac is not None:
+                    quality_clearance_percentage = round(float(clr_frac) * 100.0, 2)
+
         # Provider info
         provider_name = str(resp_data.get("primary_model") or resp_data.get("actual_model_used") or "SatQueryAgent")
         actual_model_used = resp_data.get("actual_model_used")
@@ -137,6 +159,19 @@ class ScientificReportBuilder:
             fallback_used = prov_info.fallback_used
             is_trained_model = prov_info.is_trained_model
             model_status = prov_info.model_status or model_status
+
+        # Check for SAR geometric layover/shadow mask availability
+        has_sar = any("sar" in str(s).lower() or "sentinel-1" in str(s).lower() for s in sensor_identities)
+        if not has_sar and evidence_package:
+            has_sar = any("sar" in pm.name.lower() for pm in evidence_package.physical_measurements)
+        if has_sar:
+            unavailable_fields.append("sar_terrain_layover_shadow_mask: unavailable from STAC provider (no geometric layover/shadow mask asset)")
+
+        has_optical = any("optical" in str(s).lower() or "sentinel-2" in str(s).lower() for s in sensor_identities)
+        if not has_optical and evidence_package:
+            has_optical = any("optical" in pm.name.lower() for pm in evidence_package.physical_measurements)
+        if has_optical and (not quality_screening or not quality_screening.get("optical", {}).get("screened")):
+            unavailable_fields.append("optical_radiometric_quality_screening: SCL asset not acquired or screening unperformed")
 
         provenance = ReportProvenanceSchema(
             analysis_id=analysis_id,
@@ -154,6 +189,10 @@ class ScientificReportBuilder:
             valid_pixel_count=valid_pixel_count,
             total_pixel_count=total_pixel_count,
             valid_pixel_percentage=valid_pixel_percentage,
+            quality_screening=quality_screening,
+            observed_pixel_count=observed_pixel_count,
+            excluded_quality_pixel_count=excluded_quality_pixel_count,
+            quality_clearance_percentage=quality_clearance_percentage,
             provider_name=provider_name,
             actual_model_used=actual_model_used,
             fallback_used=fallback_used,
@@ -272,6 +311,9 @@ class ScientificReportBuilder:
             elif hasattr(step, "step"):
                 pipeline_steps.append(str(step.step))
 
+        if quality_screening and "RADIOMETRIC_QUALITY_SCREENING_APPLIED" not in pipeline_steps:
+            pipeline_steps.append("RADIOMETRIC_QUALITY_SCREENING_APPLIED")
+
         reproducibility = ReportReproducibilitySchema(
             software_version="SatQuery-AI v1.0.0 (ISRO PS 26167 Stage 8 Scientific Reporting)",
             provider_config={
@@ -326,6 +368,8 @@ def generate_scientific_markdown(report: ScientificReportSchema) -> str:
     lines.append(f"| **Spatial Resolution** | `{prov.spatial_resolution_m or 'Uncalibrated'}` | **Raster Dimensions** | `{prov.dimensions or 'Not Specified'}` |")
     reg_val = "True (Verified)" if prov.registration_status.get("co_registered") else "False / Unperformed"
     lines.append(f"| **Co-Registration** | `{reg_val}` | **Valid Pixel Footprint** | `{prov.valid_pixel_percentage or 'N/A'}%` (`{prov.valid_pixel_count or 'N/A'}` px) |")
+    if prov.quality_screening:
+        lines.append(f"| **Quality Screening** | `Applied` | **Clear Quality Pixels** | `{prov.quality_clearance_percentage or 'N/A'}%` (Excluded: `{prov.excluded_quality_pixel_count or 0}` px) |")
     lines.append(f"| **Provider Engine** | `{prov.provider_name}` | **Model Status** | `{prov.model_status or 'baseline'}` (Fallback: `{prov.fallback_used}`) |")
     lines.append(f"| **Sensor Identities** | `{', '.join(prov.sensor_identities) or 'None'}` | **Acquisition Datetimes** | `{', '.join(prov.acquisition_timestamps) or 'None'}` |")
     lines.append("")

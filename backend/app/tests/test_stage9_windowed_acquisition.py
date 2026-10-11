@@ -169,10 +169,11 @@ def test_05_in_memory_geotiff_serialization_and_metadata_fidelity():
 
 def test_06_local_sample_windowed_retrieval():
     """Tests windowed retrieval for local demonstration sample rasters."""
+    # 1. Valid spatial intersection with cartosat footprint (80.374..80.380, 12.847..12.853)
     req = STACWindowedRetrieveRequest(
         scene_id="local_sample_cartosat_optical_bengaluru",
         asset_key="visual",
-        aoi_bbox=[77.58, 12.96, 77.60, 12.98]
+        aoi_bbox=[80.375, 12.848, 80.378, 12.852]
     )
 
     resp = stac_service.retrieve_window(req)
@@ -184,6 +185,16 @@ def test_06_local_sample_windowed_retrieval():
     assert resp.validation is not None
     assert resp.validation.status == "valid"
 
+    # 2. Empty spatial intersection rejection check (disjoint bounding box)
+    disjoint_req = STACWindowedRetrieveRequest(
+        scene_id="local_sample_cartosat_optical_bengaluru",
+        asset_key="visual",
+        aoi_bbox=[77.58, 12.96, 77.60, 12.98]
+    )
+    disjoint_resp = stac_service.retrieve_window(disjoint_req)
+    assert disjoint_resp.status == "error"
+    assert "empty spatial intersection" in disjoint_resp.error.lower()
+
 
 def test_07_api_endpoint_windowed_retrieval_success_and_error_handling():
     """Tests POST /api/v1/acquisition/retrieve-window HTTP interface."""
@@ -191,7 +202,7 @@ def test_07_api_endpoint_windowed_retrieval_success_and_error_handling():
     valid_payload = {
         "scene_id": "local_sample_cartosat_optical_bengaluru",
         "asset_key": "visual",
-        "aoi_bbox": [77.58, 12.96, 77.60, 12.98]
+        "aoi_bbox": [80.375, 12.848, 80.378, 12.852]
     }
     r = client.post("/api/v1/acquisition/retrieve-window", json=valid_payload)
     assert r.status_code == 200
@@ -207,7 +218,7 @@ def test_07_api_endpoint_windowed_retrieval_success_and_error_handling():
     invalid_bbox_payload = {
         "scene_id": "local_sample_cartosat_optical_bengaluru",
         "asset_key": "visual",
-        "aoi_bbox": [77.58, 14.00, 77.60, 12.00]  # min_lat > max_lat
+        "aoi_bbox": [80.375, 14.00, 80.378, 12.00]  # min_lat > max_lat
     }
     r_err = client.post("/api/v1/acquisition/retrieve-window", json=invalid_bbox_payload)
     assert r_err.status_code == 422
@@ -216,7 +227,7 @@ def test_07_api_endpoint_windowed_retrieval_success_and_error_handling():
     missing_scene_payload = {
         "scene_id": "non_existent_scene_xyz_999",
         "asset_key": "B04",
-        "aoi_bbox": [77.58, 12.96, 77.60, 12.98]
+        "aoi_bbox": [80.375, 12.848, 80.378, 12.852]
     }
     r_miss = client.post("/api/v1/acquisition/retrieve-window", json=missing_scene_payload)
     assert r_miss.status_code == 400
@@ -334,3 +345,196 @@ def test_08_end_to_end_windowed_acquisition_and_cross_sensor_analysis():
 
     # Verify Stage 8 report captures all 4 evidence artifacts
     assert len(response.reproducible_report.evidence_artifacts) == 4
+
+
+def test_09_redirect_to_untrusted_host_rejected():
+    """Security check: HTTP redirects pointing to untrusted hosts are intercepted and rejected."""
+    initial_url = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/valid_path.tif"
+    untrusted_redirect_url = "https://malicious-satellite-cache.example.com/exploit.tif"
+
+    mock_redirect_resp = MagicMock()
+    mock_redirect_resp.status_code = 302
+    mock_redirect_resp.headers = {"Location": untrusted_redirect_url}
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.head.return_value = mock_redirect_resp
+
+    with patch("httpx.Client", return_value=mock_client):
+        with pytest.raises(WindowedRetrievalError, match="not in the trusted satellite host allowlist"):
+            SafeWindowedCOGReader.read_cog_window(
+                url=initial_url,
+                bbox_wgs84=[77.58, 12.96, 77.60, 12.98]
+            )
+
+
+def test_10_redirect_to_insecure_http_protocol_rejected():
+    """Security check: HTTP redirects downgrading to unencrypted HTTP protocol are intercepted and rejected."""
+    initial_url = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/valid_path.tif"
+    insecure_redirect_url = "http://sentinel-cogs.s3.us-west-2.amazonaws.com/downgraded.tif"
+
+    mock_redirect_resp = MagicMock()
+    mock_redirect_resp.status_code = 301
+    mock_redirect_resp.headers = {"Location": insecure_redirect_url}
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.head.return_value = mock_redirect_resp
+
+    with patch("httpx.Client", return_value=mock_client):
+        with pytest.raises(WindowedRetrievalError, match="Insecure protocol"):
+            SafeWindowedCOGReader.read_cog_window(
+                url=initial_url,
+                bbox_wgs84=[77.58, 12.96, 77.60, 12.98]
+            )
+
+
+def test_11_cumulative_transfer_limit_enforced():
+    """Ensures cumulative transfer limit across probe and raster reading is strictly enforced."""
+    test_url = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/test.tif"
+
+    # 1. max_bytes validator rejects values exceeding 20 MB cap or non-positive
+    with pytest.raises(ValidationError):
+        STACWindowedRetrieveRequest(
+            scene_id="S2A_TEST_01",
+            asset_key="B04",
+            aoi_bbox=[77.58, 12.96, 77.60, 12.98],
+            max_bytes=25 * 1024 * 1024  # Exceeds 20 MB
+        )
+
+    with pytest.raises(ValidationError):
+        STACWindowedRetrieveRequest(
+            scene_id="S2A_TEST_01",
+            asset_key="B04",
+            aoi_bbox=[77.58, 12.96, 77.60, 12.98],
+            max_bytes=-100
+        )
+
+    # 2. SafeWindowedCOGReader rejects when transfer budget is exceeded during initial probe
+    mock_head = MagicMock()
+    mock_head.status_code = 200
+    mock_head.headers = {"content-length": "50000000", "accept-ranges": "bytes"}
+
+    mock_range = MagicMock()
+    mock_range.status_code = 206
+    mock_range.content = b"0" * 2048  # 2048 bytes
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.head.return_value = mock_head
+    mock_client.get.return_value = mock_range
+
+    with patch("httpx.Client", return_value=mock_client):
+        with pytest.raises(WindowedRetrievalError, match="Cumulative transfer limit of 1024 bytes exceeded"):
+            SafeWindowedCOGReader.read_cog_window(
+                url=test_url,
+                bbox_wgs84=[77.58, 12.96, 77.60, 12.98],
+                max_bytes=1024  # Budget smaller than probe payload
+            )
+
+
+def test_12_empty_spatial_intersection_remote_rejected():
+    """Verifies that an AOI completely disjoint from the remote raster extent is rejected immediately."""
+    test_url = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/test.tif"
+
+    mock_head = MagicMock()
+    mock_head.status_code = 200
+    mock_head.headers = {"content-length": "50000000", "accept-ranges": "bytes"}
+
+    mock_range = MagicMock()
+    mock_range.status_code = 206
+    mock_range.content = b"0" * 1024
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.head.return_value = mock_head
+    mock_client.get.return_value = mock_range
+
+    # Mock rasterio DatasetReader with bounds covering Bengaluru [77.5, 12.9, 77.7, 13.1]
+    mock_src = MagicMock()
+    mock_src.__enter__.return_value = mock_src
+    mock_src.crs = "EPSG:4326"
+    mock_src.width = 1000
+    mock_src.height = 1000
+    mock_src.count = 1
+    mock_src.dtypes = ["uint16"]
+    mock_src.bounds = MagicMock(left=77.5, bottom=12.9, right=77.7, top=13.1)
+    mock_src.transform = rasterio.Affine(0.0002, 0.0, 77.5, 0.0, -0.0002, 13.1)
+
+    with patch("httpx.Client", return_value=mock_client):
+        with patch("rasterio.open", return_value=mock_src):
+            with pytest.raises(WindowedRetrievalError, match="empty spatial intersection"):
+                SafeWindowedCOGReader.read_cog_window(
+                    url=test_url,
+                    bbox_wgs84=[-122.5, 37.7, -122.3, 37.9]  # San Francisco (0% intersection)
+                )
+
+
+def test_13_missing_or_identity_crs_rejected():
+    """Ensures missing CRS or uncalibrated identity transform is rejected as geospatial evidence."""
+    # 1. GeoTIFF serialization rejects missing CRS
+    with pytest.raises(ValueError, match="Cannot serialize raster without valid Coordinate Reference System"):
+        STACAcquisitionService._array_to_geotiff_bytes(
+            np.ones((16, 16), dtype=np.uint16),
+            {"crs": None, "transform": [1.0, 0.0, 0.0, 0.0, -1.0, 0.0]}
+        )
+
+    # 2. Windowed COG Reader rejects missing CRS
+    test_url = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/test.tif"
+    mock_head = MagicMock(status_code=200, headers={"content-length": "1000", "accept-ranges": "bytes"})
+    mock_range = MagicMock(status_code=206, content=b"0" * 1024)
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.head.return_value = mock_head
+    mock_client.get.return_value = mock_range
+
+    mock_src_nocrs = MagicMock()
+    mock_src_nocrs.__enter__.return_value = mock_src_nocrs
+    mock_src_nocrs.crs = None
+    mock_src_nocrs.transform = rasterio.Affine(0.0002, 0.0, 77.5, 0.0, -0.0002, 13.1)
+    with patch("httpx.Client", return_value=mock_client):
+        with patch("rasterio.open", return_value=mock_src_nocrs):
+            with pytest.raises(WindowedRetrievalError, match="Asset lacks a valid Coordinate Reference System"):
+                SafeWindowedCOGReader.read_cog_window(
+                    url=test_url,
+                    bbox_wgs84=[77.58, 12.96, 77.60, 12.98]
+                )
+
+    # 3. Windowed COG Reader rejects identity affine transform
+    mock_src_identity = MagicMock()
+    mock_src_identity.__enter__.return_value = mock_src_identity
+    mock_src_identity.crs = "EPSG:4326"
+    mock_src_identity.transform = rasterio.Affine.identity()
+    with patch("httpx.Client", return_value=mock_client):
+        with patch("rasterio.open", return_value=mock_src_identity):
+            with pytest.raises(WindowedRetrievalError, match="identity affine transform without geospatial calibration"):
+                SafeWindowedCOGReader.read_cog_window(
+                    url=test_url,
+                    bbox_wgs84=[77.58, 12.96, 77.60, 12.98]
+                )
+
+
+def test_14_existing_acquisition_endpoints_compatible():
+    """Confirms existing search and full retrieval endpoints remain fully backwards-compatible."""
+    # 1. Search endpoint
+    search_payload = {
+        "bbox": [77.5, 12.9, 77.7, 13.1],
+        "collection": "sentinel-2-l2a",
+        "limit": 2
+    }
+    r_search = client.post("/api/v1/acquisition/search", json=search_payload)
+    assert r_search.status_code == 200
+    search_data = r_search.json()
+    assert search_data["status"] in ("success", "zero_results")
+
+    # 2. Retrieve endpoint (for local sample)
+    retrieve_payload = {
+        "scene_id": "local_sample_cartosat_optical_bengaluru",
+        "asset_key": "visual"
+    }
+    r_ret = client.post("/api/v1/acquisition/retrieve", json=retrieve_payload)
+    assert r_ret.status_code == 200
+    ret_data = r_ret.json()
+    assert ret_data["status"] == "success"
+    assert ret_data["category"] == "scientific_raster"
+    assert "data_base64" in ret_data

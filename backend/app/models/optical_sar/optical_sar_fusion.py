@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 
 from app.models.base import BaseModel
 from app.remote_sensing.registration import align_image_pair
+from app.remote_sensing.quality import QualityScreener, QualityScreeningError
 from app.remote_sensing.preprocessing import (
     convert_array_to_base64_png, 
     normalize_to_uint8,
@@ -250,20 +251,110 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
                 ]
             }
 
-        # Step 3: Handle Valid-Data Mask and Empty Intersection Check
+        # Step 3: Stage 10 Radiometric Quality Screening & Valid-Data Masking
+        scl_eval = None
+        scl_aligned = None
+        if "scl" in meta_opt or "scl_arr" in meta_opt or "quality_screening" in meta_opt:
+            scl_input = meta_opt.get("scl") if meta_opt.get("scl") is not None else meta_opt.get("scl_arr")
+            if scl_input is not None:
+                scl_meta = meta_opt.get("scl_meta") or meta_opt
+                try:
+                    if scl_input.shape[:2] != (h, w) or scl_meta != meta_opt:
+                        scl_aligned, _ = QualityScreener.reproject_scl_to_target(scl_input, scl_meta, meta_opt)
+                    else:
+                        scl_aligned = scl_input
+                    scl_eval = QualityScreener.evaluate_scl(scl_aligned)
+                except Exception as scl_e:
+                    logger.warning(f"SCL screening evaluation error: {scl_e}")
+                    scl_eval = None
+            elif isinstance(meta_opt.get("quality_screening"), dict) and meta_opt["quality_screening"].get("is_evaluated"):
+                scl_eval = meta_opt["quality_screening"]
+
+        # Deterministic SAR backscatter screening
+        sar_eval = None
+        if isinstance(meta_sar.get("quality_screening"), dict) and meta_sar["quality_screening"].get("is_evaluated"):
+            sar_eval = meta_sar["quality_screening"]
+        else:
+            sar_eval = QualityScreener.evaluate_sar_quality(img_sar_aligned, meta_sar)
+
+        # Combine base registration valid_mask with optical SCL clear mask and SAR validity mask
         valid_mask = reg_info.get("valid_mask")
+        if valid_mask is None:
+            valid_mask = np.ones((h, w), dtype=bool)
+
+        if scl_eval is not None and "clear_mask" in scl_eval:
+            valid_mask = valid_mask & scl_eval["clear_mask"]
+        if sar_eval is not None and "valid_mask" in sar_eval:
+            valid_mask = valid_mask & sar_eval["valid_mask"]
+
         valid_pixel_count = int(np.count_nonzero(valid_mask)) if valid_mask is not None else 0
 
         if valid_pixel_count == 0:
-            answer = (
-                f"Optical + SAR Multimodal Joint Analysis unsupported: The valid-data intersection between Optical and SAR rasters "
-                f"is empty (0 valid intersecting pixels after excluding nodata, non-overlapping padding, and invalid values). "
-                f"Geospatial land-cover indicator percentages and classification masks cannot be computed."
+            is_cloud_blocked = bool(
+                scl_eval is not None and 
+                (scl_eval.get("pixel_counts", {}).get("cloud_pixels", 0) + 
+                 scl_eval.get("pixel_counts", {}).get("cloud_shadow_pixels", 0)) > 0
             )
+            analysis_status = "unsupported_cloud_obstruction" if is_cloud_blocked else "unsupported_empty_intersection"
+            if is_cloud_blocked:
+                cloud_total = scl_eval["pixel_counts"]["cloud_pixels"] + scl_eval["pixel_counts"]["cloud_shadow_pixels"]
+                answer = (
+                    f"Optical + SAR Multimodal Joint Analysis unsupported: Zero valid clear-sky pixels remain after radiometric quality screening "
+                    f"({cloud_total:,} pixels excluded due to cloud, cloud shadow, or atmospheric obstruction). "
+                    f"Geospatial land-cover indicator percentages and physical surface reflectance cannot be computed for fully obstructed scenes."
+                )
+            else:
+                answer = (
+                    f"Optical + SAR Multimodal Joint Analysis unsupported: The valid-data intersection between Optical and SAR rasters "
+                    f"is empty (0 valid intersecting pixels after excluding nodata, non-overlapping padding, and invalid values). "
+                    f"Geospatial land-cover indicator percentages and classification masks cannot be computed."
+                )
+
+            ev_list = [
+                {
+                    "id": "ev_optical_reflectance",
+                    "type": "original",
+                    "title": "Optical Scene",
+                    "description": "Optical raster.",
+                    "data_base64": opt_b64,
+                    "statistics": {"modality": "OPTICAL"}
+                },
+                {
+                    "id": "ev_sar_backscatter",
+                    "type": "processed",
+                    "title": "SAR Scene",
+                    "description": "SAR microwave raster.",
+                    "data_base64": sar_b64,
+                    "statistics": {"modality": "SAR"}
+                }
+            ]
+
+            if scl_aligned is not None:
+                scl_rgb = QualityScreener.generate_scl_rgb_preview(scl_aligned)
+                scl_b64 = convert_array_to_base64_png(scl_rgb)
+                ev_list.append({
+                    "id": "ev_optical_scl_mask",
+                    "type": "mask",
+                    "title": "Sentinel-2 Scene Classification Layer (SCL) Quality Screening Mask",
+                    "description": "Categorical atmospheric and surface quality screening map.",
+                    "data_base64": scl_b64,
+                    "statistics": {
+                        "mask_source": "Sentinel-2 L2A SCL (nearest-neighbor aligned)",
+                        "screened_valid_pixels": scl_eval["pixel_counts"]["clear_pixels"] if scl_eval else 0,
+                        "cloud_shadow_excluded_pixels": cloud_total if is_cloud_blocked else 0
+                    }
+                })
+
+            lims = [
+                "Valid-data footprint contains 0 valid clear-sky pixels across sensors (obstructed by clouds, cloud shadows, or nodata padding).",
+                "Heuristic coverage percentages were not calculated to avoid misleading statistics."
+            ]
+            if sar_eval:
+                lims.extend(sar_eval.get("scientific_limitations", []))
 
             return {
                 "status": "unsupported",
-                "analysis_status": "unsupported_empty_intersection",
+                "analysis_status": analysis_status,
                 "answer": answer,
                 "model_type": "joint_analysis_baseline",
                 "model_name": self.model_name,
@@ -271,37 +362,21 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
                 "actual_model_used": self.model_name,
                 "fallback_used": False,
                 "confidence": None,
-                "confidence_label": "Not available (Empty Valid-Data Intersection)",
+                "confidence_label": f"Not available ({analysis_status.replace('_', ' ').title()})",
                 "valid_pixel_count": 0,
                 "water_pct": None,
                 "urban_pct": None,
                 "veg_pct": None,
                 "registration_info": reg_info,
-                "evidence": [
-                    {
-                        "id": "ev_optical_reflectance",
-                        "type": "original",
-                        "title": "Optical Scene",
-                        "description": "Optical raster.",
-                        "data_base64": opt_b64,
-                        "statistics": {"modality": "OPTICAL"}
-                    },
-                    {
-                        "id": "ev_sar_backscatter",
-                        "type": "processed",
-                        "title": "SAR Scene",
-                        "description": "SAR microwave raster.",
-                        "data_base64": sar_b64,
-                        "statistics": {"modality": "SAR"}
-                    }
-                ],
+                "quality_screening": {
+                    "optical": scl_eval,
+                    "sar": sar_eval
+                },
+                "evidence": ev_list,
                 "optical_evidence": opt_b64,
                 "sar_evidence": sar_b64,
                 "fused_evidence": None,
-                "limitations": [
-                    "Valid-data footprint intersection contains 0 valid pixels across both sensors (overlapping pixels were nodata or unmapped padding).",
-                    "Heuristic coverage percentages were not calculated to avoid misleading statistics."
-                ]
+                "limitations": lims
             }
 
         # Step 4: Cross-modal false-color composite on valid pixels
@@ -456,6 +531,29 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
             }
         ]
 
+        if scl_aligned is not None and scl_eval is not None:
+            scl_rgb = QualityScreener.generate_scl_rgb_preview(scl_aligned)
+            scl_b64 = convert_array_to_base64_png(scl_rgb)
+            evidence.append({
+                "id": "ev_optical_scl_mask",
+                "type": "mask",
+                "title": "Sentinel-2 Scene Classification Layer (SCL) Quality Screening Mask",
+                "description": "Categorical atmospheric and surface quality screening map reprojected via nearest-neighbor to the optical grid.",
+                "data_base64": scl_b64,
+                "statistics": {
+                    "mask_source": "Sentinel-2 L2A SCL (nearest-neighbor aligned)",
+                    "total_pixels": scl_eval["pixel_counts"]["total_pixels"],
+                    "observed_pixels": scl_eval["pixel_counts"]["observed_pixels"],
+                    "clear_pixels": scl_eval["pixel_counts"]["clear_pixels"],
+                    "cloud_shadow_excluded_pixels": scl_eval["pixel_counts"]["cloud_pixels"] + scl_eval["pixel_counts"]["cloud_shadow_pixels"],
+                    "uncertain_pixels": scl_eval["pixel_counts"]["uncertain_pixels"],
+                    "quality_clearance_percentage": scl_eval["statistics"]["quality_clearance_percentage"],
+                    "classes_excluded": scl_eval["policy"]["excluded_classes"],
+                    "classes_retained": scl_eval["policy"]["retained_classes"],
+                    "classes_uncertain": scl_eval["policy"]["uncertain_classes"]
+                }
+            })
+
         limitations = [
             "Preliminary heuristic indicators: Thresholds applied to per-scene 8-bit percentile-stretched imagery are preliminary scene-normalized empirical proxies, not calibrated physical measurements or certified land-cover classifications.",
             "Heuristic indicator percentages are calculated strictly across valid intersecting pixels and must not be interpreted as authoritative physical coverage.",
@@ -464,6 +562,13 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
             f"Physical SAR calibration: {calib_text} in {calib_quantity} linear power, with logarithmic dB scaling applied separately for display and thresholding.",
             f"Terrain correction status: {terrain_text}."
         ]
+        if scl_eval is not None:
+            limitations.append(
+                f"Radiometric optical screening: Sentinel-2 SCL applied ({scl_eval['statistics']['quality_clearance_percentage']}% clear ground observations; "
+                f"{scl_eval['pixel_counts']['cloud_pixels'] + scl_eval['pixel_counts']['cloud_shadow_pixels']} cloud/shadow pixels excluded)."
+            )
+        if sar_eval is not None:
+            limitations.extend(sar_eval.get("scientific_limitations", []))
 
         return {
             "answer": answer,
@@ -483,6 +588,10 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
             "total_pixels": total_pixels,
             "models": [self.model_name],
             "registration_info": reg_info,
+            "quality_screening": {
+                "optical": scl_eval,
+                "sar": sar_eval
+            },
             "evidence": evidence,
             "optical_evidence": opt_b64,
             "sar_evidence": sar_b64,

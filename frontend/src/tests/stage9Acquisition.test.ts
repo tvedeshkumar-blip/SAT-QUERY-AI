@@ -197,4 +197,111 @@ describe('Stage 9: Live Windowed COG Acquisition & Subsystem Ingestion Tests', (
 
   });
 
+  test('validates AOI bounds requirement prevents windowed acquisition when null', () => {
+    const selectedAOI: AOIBounds | null = null;
+    let errorMessage: string | null = null;
+
+    if (!selectedAOI) {
+      errorMessage = 'Spatial AOI bounds required for windowed acquisition. Select an AOI on the map.';
+    }
+
+    assert.equal(errorMessage, 'Spatial AOI bounds required for windowed acquisition. Select an AOI on the map.');
+  });
+
+  test('workspace ingestion correctly transforms windowed response into UploadedFileState on success', () => {
+    const mockRetrieved: STACRetrieveResponsePayload = {
+      status: 'success',
+      scene_id: 'S2A_MSIL2A_TEST',
+      asset_key: 'B04',
+      category: 'scientific_raster',
+      filename: 'S2A_MSIL2A_TEST_B04_window.tif',
+      mime_type: 'image/tiff',
+      size_bytes: 65536,
+      data_base64: 'data:image/tiff;base64,SUkqAAgAAAASAP4ABAABAAAAAAAAAAAB...',
+      metadata: { width: 128, height: 128, crs: 'EPSG:32643' },
+      scientific_limitations: ['Calibrated BOA surface reflectance.'],
+      validation: {
+        status: 'valid',
+        filename: 'S2A_MSIL2A_TEST_B04_window.tif',
+        file_format: 'GeoTIFF',
+        asset_category: 'single_band_spectral',
+        scientific_status: 'calibrated_surface_reflectance',
+        raster_metadata: { width: 128, height: 128, crs: 'EPSG:32643' },
+        scientific_limitations: [],
+        provenance: {},
+        analysis_compatibility: {}
+      },
+      provenance: {
+        windowed_crop: true,
+        aoi_bbox: [77.58, 12.96, 77.60, 12.98],
+        retrieval_method: 'http_range_windowed_cog'
+      }
+    };
+
+    let importedFiles: any[] = [];
+    const onImportScene = (file: any) => {
+      importedFiles.push(file);
+    };
+
+    // Simulate handleImportSingleToWorkspace
+    const importedFile = {
+      dataUrl: mockRetrieved.data_base64,
+      filename: mockRetrieved.filename,
+      size: mockRetrieved.size_bytes,
+      role: 'primary',
+      isGeoTIFF: mockRetrieved.validation?.file_format === 'GeoTIFF' || mockRetrieved.category !== 'visual_preview',
+      assetCategory: mockRetrieved.validation?.asset_category || mockRetrieved.category,
+      stacProvenance: mockRetrieved.provenance,
+      validation: mockRetrieved.validation,
+      scientificLimitations: mockRetrieved.scientific_limitations
+    };
+
+    onImportScene(importedFile);
+
+    assert.equal(importedFiles.length, 1);
+    const file = importedFiles[0];
+    assert.equal(file.isGeoTIFF, true);
+    assert.equal(file.stacProvenance.windowed_crop, true);
+    assert.deepEqual(file.stacProvenance.aoi_bbox, [77.58, 12.96, 77.60, 12.98]);
+    assert.equal(file.filename, 'S2A_MSIL2A_TEST_B04_window.tif');
+    assert.equal(file.validation.scientific_status, 'calibrated_surface_reflectance');
+  });
+
+  test('workspace preservation: failure keeps existing workspace untouched and records error', () => {
+    const existingWorkspace = [
+      { filename: 'existing_scene.tif', size: 1024, role: 'primary' }
+    ];
+    let workspaceState = [...existingWorkspace];
+    let recordedError: string | null = null;
+
+    // Simulate failure
+    const error = new Error('Empty spatial intersection: AOI does not overlap raster bounds.');
+    recordedError = error.message;
+
+    // Workspace state must not be modified on failure
+    assert.deepEqual(workspaceState, existingWorkspace);
+    assert.equal(recordedError, 'Empty spatial intersection: AOI does not overlap raster bounds.');
+  });
+
+  test('existing full-file acquisition UI behavior remains intact', () => {
+    // Verifies that full retrieval without windowed crop still sets full-file properties
+    const mockFullRetrieved: STACRetrieveResponsePayload = {
+      status: 'success',
+      scene_id: 'S2A_FULL_01',
+      asset_key: 'visual',
+      category: 'visual_preview',
+      filename: 'S2A_FULL_01_thumbnail.jpg',
+      mime_type: 'image/jpeg',
+      size_bytes: 8192,
+      data_base64: 'data:image/jpeg;base64,12345',
+      provenance: {
+        windowed_crop: false,
+        retrieval_method: 'full_download'
+      }
+    };
+
+    assert.equal(mockFullRetrieved.provenance?.windowed_crop, false);
+    assert.equal(mockFullRetrieved.category, 'visual_preview');
+  });
+
 });

@@ -67,6 +67,7 @@ class EvidencePackageSchema(BaseModel):
     heuristic_indicators: List[HeuristicIndicatorItem] = Field(default_factory=list)
     evidence_artifacts: List[EvidenceArtifactItem] = Field(default_factory=list)
     provider_info: ProviderInfoItem = Field(default_factory=ProviderInfoItem)
+    quality_screening: Optional[Dict[str, Any]] = None
     validation_warnings: List[str] = Field(default_factory=list)
     known_limitations: List[str] = Field(default_factory=list)
 
