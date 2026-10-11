@@ -7,6 +7,7 @@ from app.schemas.acquisition import (
     STACSearchResponse, 
     STACRetrieveRequest, 
     STACRetrieveResponse,
+    STACWindowedRetrieveRequest,
     STACValidateAssetRequest,
     STACValidateAssetResponse,
     STACTemporalPairValidateRequest,
@@ -55,6 +56,26 @@ def retrieve_stac_asset(request: STACRetrieveRequest):
     except Exception as e:
         logger.error(f"Error retrieving STAC asset: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/acquisition/retrieve-window", response_model=STACRetrieveResponse)
+def retrieve_stac_windowed_asset(request: STACWindowedRetrieveRequest):
+    """
+    Stage 9: Safely retrieves a bounded spatial window (AOI crop) from a remote COG
+    satellite raster using HTTP 206 Range requests.
+    Enforces host allowlists, byte budgets, valid georeferencing, and returns
+    calibrated, georeferenced in-memory GeoTIFF data ready for scientific workspace ingestion.
+    """
+    try:
+        resp = stac_service.retrieve_window(request)
+        if resp.status == "error":
+            raise HTTPException(status_code=400, detail=resp.error or "Failed to retrieve windowed asset.")
+        return resp
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving windowed STAC asset: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.post("/acquisition/validate", response_model=STACValidateAssetResponse)
 def validate_asset_endpoint(request: STACValidateAssetRequest):

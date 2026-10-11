@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 class STACSearchRequest(BaseModel):
     bbox: List[float] = Field(
@@ -94,6 +94,35 @@ class STACRetrieveRequest(BaseModel):
     asset_key: str = Field(default="thumbnail", description="Asset key to fetch (e.g. thumbnail, visual)")
     collection: Optional[str] = Field(None, description="Collection name if known")
     target_role: Optional[str] = Field(default="primary", description="Workspace role: primary, secondary, optical, sar")
+
+class STACWindowedRetrieveRequest(BaseModel):
+    scene_id: str = Field(..., description="ID of the scene to retrieve")
+    asset_key: str = Field(..., description="Asset key to fetch (e.g. B04, vv, visual)")
+    aoi_bbox: List[float] = Field(
+        ...,
+        description="Bounding box in EPSG:4326 [min_lon, min_lat, max_lon, max_lat]",
+        min_length=4,
+        max_length=4
+    )
+    collection: Optional[str] = Field(None, description="Collection name if known")
+    target_role: Optional[str] = Field(default="primary", description="Workspace role: primary, secondary, optical, sar")
+    asset_url: Optional[str] = Field(None, description="Direct asset URL if already known from search")
+    max_bytes: Optional[int] = Field(None, description="Optional custom byte limit <= safety limit")
+
+    @field_validator("aoi_bbox")
+    @classmethod
+    def validate_aoi_bbox(cls, v: List[float]) -> List[float]:
+        if len(v) != 4:
+            raise ValueError("aoi_bbox must have exactly 4 coordinates [min_lon, min_lat, max_lon, max_lat]")
+        min_lon, min_lat, max_lon, max_lat = v
+        if min_lat > max_lat:
+            raise ValueError("Invalid AOI bbox: min_lat cannot be greater than max_lat.")
+        if not (-90.0 <= min_lat <= 90.0 and -90.0 <= max_lat <= 90.0):
+            raise ValueError("Latitude values must be between -90 and 90 degrees.")
+        if not (-180.0 <= min_lon <= 180.0 and -180.0 <= max_lon <= 180.0):
+            raise ValueError("Longitude values must be between -180 and 180 degrees.")
+        return v
+
 
 class STACRetrieveResponse(BaseModel):
     status: str = Field(..., description="Retrieval status: 'success' or 'error'")

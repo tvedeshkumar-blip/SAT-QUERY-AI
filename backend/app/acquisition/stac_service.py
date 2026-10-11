@@ -1,10 +1,14 @@
 import os
 import re
+import time
 import base64
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 import httpx
+import numpy as np
+import rasterio
+from rasterio.io import MemoryFile
 
 from app.schemas.acquisition import (
     STACSearchRequest,
@@ -13,10 +17,12 @@ from app.schemas.acquisition import (
     STACAssetSummary,
     STACRetrieveRequest,
     STACRetrieveResponse,
+    STACWindowedRetrieveRequest,
     STACValidateAssetResponse
 )
 from app.remote_sensing.geotiff import parse_geotiff_or_image
 from app.acquisition.asset_validator import AssetValidator
+from app.acquisition.windowed_reader import SafeWindowedCOGReader, WindowedRetrievalError
 
 logger = logging.getLogger("satquery.acquisition")
 
@@ -423,6 +429,299 @@ class STACAcquisitionService:
             validation=validation_report,
             provenance=provenance_data
         )
+
+    @staticmethod
+    def _array_to_geotiff_bytes(arr: np.ndarray, meta: Dict[str, Any]) -> bytes:
+        """
+        Serializes an in-memory numpy array and georeferencing metadata into standard GeoTIFF bytes.
+        """
+        mem = MemoryFile()
+        transform = rasterio.Affine(*meta["transform"][:6])
+        count = 1 if arr.ndim == 2 else arr.shape[2]
+        dtype = arr.dtype
+        h, w = arr.shape[:2]
+        with mem.open(
+            driver="GTiff",
+            height=h,
+            width=w,
+            count=count,
+            dtype=dtype,
+            crs=meta["crs"],
+            transform=transform,
+            nodata=meta.get("nodata")
+        ) as dst:
+            if count == 1:
+                dst.write(arr if arr.ndim == 2 else arr[:, :, 0], 1)
+            else:
+                for b in range(count):
+                    dst.write(arr[:, :, b], b + 1)
+            if "tags" in meta and meta["tags"]:
+                dst.update_tags(**meta["tags"])
+        return bytes(mem.getbuffer())
+
+    def retrieve_window(self, req: STACWindowedRetrieveRequest) -> STACRetrieveResponse:
+        """
+        Stage 9: Safely retrieves a bounded spatial window (AOI crop) from a remote COG
+        using HTTP 206 Range requests via SafeWindowedCOGReader.
+        Serializes the resulting array into an in-memory GeoTIFF and validates it.
+        """
+        # Directly handle local sample rasters
+        if req.scene_id.startswith("local_sample_"):
+            return self._retrieve_local_sample_window(req)
+
+        cached = self._scene_cache.get(req.scene_id)
+        clean_url = None
+
+        if cached:
+            raw_assets = cached.get("raw_assets", {})
+            asset_info = raw_assets.get(req.asset_key)
+            if asset_info:
+                clean_url = self._format_accessible_href(asset_info.get("href", ""))
+            elif req.asset_url:
+                clean_url = self._format_accessible_href(req.asset_url)
+            else:
+                available_keys = ", ".join(raw_assets.keys()) if raw_assets else "none"
+                return STACRetrieveResponse(
+                    status="error",
+                    scene_id=req.scene_id,
+                    asset_key=req.asset_key,
+                    category="unsupported",
+                    filename="none",
+                    mime_type="none",
+                    size_bytes=0,
+                    data_base64="",
+                    error=f"Requested asset key '{req.asset_key}' is not available for scene '{req.scene_id}' (available assets: {available_keys})."
+                )
+        elif req.asset_url:
+            clean_url = self._format_accessible_href(req.asset_url)
+        else:
+            return STACRetrieveResponse(
+                status="error",
+                scene_id=req.scene_id,
+                asset_key=req.asset_key,
+                category="unsupported",
+                filename="none",
+                mime_type="none",
+                size_bytes=0,
+                data_base64="",
+                error=f"Scene '{req.scene_id}' not found in active STAC search session. Please execute a search first or provide asset_url."
+            )
+
+        # Handle Planetary Computer SAS token if needed
+        if "blob.core.windows.net" in clean_url or "planetarycomputer.microsoft.com" in clean_url:
+            if "?" not in clean_url:
+                try:
+                    col = req.collection or (cached.get("collection") if cached else "sentinel-1-rtc")
+                    token_url = f"https://planetarycomputer.microsoft.com/api/sas/v1/token/{col}"
+                    with httpx.Client(timeout=10.0) as pc_client:
+                        token_resp = pc_client.get(token_url)
+                        if token_resp.status_code == 200:
+                            token = token_resp.json().get("token")
+                            if token:
+                                clean_url = f"{clean_url}?{token}"
+                except Exception as pc_err:
+                    logger.warning(f"Planetary Computer SAS signing attempt warning: {pc_err}")
+
+        # Execute safe windowed COG read
+        try:
+            arr, meta = SafeWindowedCOGReader.read_cog_window(
+                url=clean_url,
+                bbox_wgs84=req.aoi_bbox,
+                max_bytes=req.max_bytes
+            )
+        except WindowedRetrievalError as wre:
+            return STACRetrieveResponse(
+                status="error",
+                scene_id=req.scene_id,
+                asset_key=req.asset_key,
+                category="unsupported",
+                filename="none",
+                mime_type="image/tiff",
+                size_bytes=0,
+                data_base64="",
+                error=f"Windowed retrieval failed: {str(wre)}"
+            )
+        except Exception as err:
+            logger.error(f"Error during windowed COG read for {clean_url}: {err}")
+            return STACRetrieveResponse(
+                status="error",
+                scene_id=req.scene_id,
+                asset_key=req.asset_key,
+                category="unsupported",
+                filename="none",
+                mime_type="image/tiff",
+                size_bytes=0,
+                data_base64="",
+                error=f"Unexpected error during windowed retrieval: {str(err)}"
+            )
+
+        # Serialize cropped array to in-memory GeoTIFF
+        try:
+            raw_bytes = self._array_to_geotiff_bytes(arr, meta)
+        except Exception as ser_err:
+            return STACRetrieveResponse(
+                status="error",
+                scene_id=req.scene_id,
+                asset_key=req.asset_key,
+                category="unsupported",
+                filename="none",
+                mime_type="image/tiff",
+                size_bytes=0,
+                data_base64="",
+                error=f"Failed to serialize windowed array to GeoTIFF: {str(ser_err)}"
+            )
+
+        # Determine safe local filename and persist for validation & session reuse
+        safe_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', f"{req.scene_id}_{req.asset_key}_window_{int(time.time())}.tif")
+        local_path = os.path.join(self.retrieval_dir, safe_name)
+        with open(local_path, "wb") as f:
+            f.write(raw_bytes)
+
+        # Encode to Base64 data URI
+        b64_data = base64.b64encode(raw_bytes).decode("utf-8")
+        full_b64 = f"data:image/tiff;base64,{b64_data}"
+
+        # Build provenance
+        prov_summary = cached.get("summary") if cached else None
+        provenance_data = {
+            "provider": cached.get("provider", "Element84 Earth Search (AWS)") if cached else "STAC Provider",
+            "catalog_url": self.catalog_url,
+            "collection": req.collection or (cached.get("collection") if cached else "unknown"),
+            "scene_id": req.scene_id,
+            "datetime": getattr(prov_summary, "datetime", None) or (cached.get("datetime") if cached else None),
+            "sensor": getattr(prov_summary, "sensor", None) or (cached.get("sensor") if cached else meta.get("tags", {}).get("SENSOR")),
+            "modality": getattr(prov_summary, "modality", None) or (cached.get("modality") if cached else ("SAR" if "vv" in req.asset_key.lower() or "rtc" in req.asset_key.lower() else "OPTICAL")),
+            "asset_key": req.asset_key,
+            "asset_href": clean_url,
+            "windowed_crop": True,
+            "aoi_bbox": req.aoi_bbox,
+            "target_role": req.target_role or "primary",
+            "retrieval_method": "http_range_windowed_cog"
+        }
+
+        # Physical Asset Validation: inspect actual binary on disk
+        validation_report = AssetValidator.validate_asset(
+            local_path,
+            filename=safe_name,
+            provenance=provenance_data
+        )
+
+        raw_cat = validation_report.get("asset_category", "scientific_raster")
+        category = "scientific_raster" if raw_cat in ("scientific_raster", "rgb_visual_raster", "single_band_spectral", "multispectral_cube") else raw_cat
+        limitations = validation_report.get("scientific_limitations", [])
+        raster_meta = validation_report.get("raster_metadata", {})
+
+        return STACRetrieveResponse(
+            status="success",
+            scene_id=req.scene_id,
+            asset_key=req.asset_key,
+            category=category,
+            filename=safe_name,
+            mime_type="image/tiff",
+            size_bytes=len(raw_bytes),
+            data_base64=full_b64,
+            metadata=raster_meta,
+            scientific_limitations=limitations,
+            validation=validation_report,
+            provenance=provenance_data
+        )
+
+    def _retrieve_local_sample_window(self, req: STACWindowedRetrieveRequest) -> STACRetrieveResponse:
+        """
+        Handles local sample GeoTIFF window retrieval for offline testing.
+        """
+        name_part = req.scene_id.replace("local_sample_", "") + ".tif"
+        sample_path = os.path.join(self.samples_dir, name_part)
+        if not os.path.exists(sample_path):
+            return STACRetrieveResponse(
+                status="error",
+                scene_id=req.scene_id,
+                asset_key=req.asset_key,
+                category="unsupported",
+                filename=name_part,
+                mime_type="image/tiff",
+                size_bytes=0,
+                data_base64="",
+                error=f"Local sample raster '{name_part}' not found on disk."
+            )
+
+        from rasterio.windows import from_bounds
+        from rasterio.warp import transform_bounds
+
+        try:
+            with rasterio.open(sample_path) as src:
+                if str(src.crs) != "EPSG:4326":
+                    target_bounds = transform_bounds("EPSG:4326", src.crs, *req.aoi_bbox)
+                else:
+                    target_bounds = req.aoi_bbox
+
+                raw_win = from_bounds(*target_bounds, transform=src.transform)
+                col_off = max(0, min(src.width - 1, int(np.floor(raw_win.col_off))))
+                row_off = max(0, min(src.height - 1, int(np.floor(raw_win.row_off))))
+                w_px = max(1, min(src.width - col_off, int(np.ceil(raw_win.width))))
+                h_px = max(1, min(src.height - row_off, int(np.ceil(raw_win.height))))
+
+                clamped_win = rasterio.windows.Window(col_off, row_off, w_px, h_px)
+                data = src.read(window=clamped_win)
+                if src.count == 1:
+                    data = data[0]
+                else:
+                    data = np.transpose(data, (1, 2, 0))
+
+                win_transform = src.window_transform(clamped_win)
+                meta = {
+                    "crs": str(src.crs),
+                    "transform": list(win_transform)[:6],
+                    "nodata": src.nodata,
+                    "bands": src.count,
+                    "tags": dict(src.tags()) if hasattr(src, "tags") else {}
+                }
+
+            raw_bytes = self._array_to_geotiff_bytes(data, meta)
+            safe_name = f"{req.scene_id}_{req.asset_key}_window_{int(time.time())}.tif"
+            local_path = os.path.join(self.retrieval_dir, safe_name)
+            with open(local_path, "wb") as f:
+                f.write(raw_bytes)
+
+            full_b64 = "data:image/tiff;base64," + base64.b64encode(raw_bytes).decode("utf-8")
+            prov_data = {
+                "provider": "Local In-Repository GeoTIFF Catalog (Offline Fallback)",
+                "catalog_url": "local://data/samples",
+                "scene_id": req.scene_id,
+                "asset_key": req.asset_key,
+                "windowed_crop": True,
+                "aoi_bbox": req.aoi_bbox,
+                "target_role": req.target_role or "primary",
+                "retrieval_method": "local_sample_windowed"
+            }
+            validation_report = AssetValidator.validate_asset(local_path, filename=safe_name, provenance=prov_data)
+            return STACRetrieveResponse(
+                status="success",
+                scene_id=req.scene_id,
+                asset_key=req.asset_key,
+                category="scientific_raster",
+                filename=safe_name,
+                mime_type="image/tiff",
+                size_bytes=len(raw_bytes),
+                data_base64=full_b64,
+                metadata=validation_report.get("raster_metadata", {}),
+                scientific_limitations=validation_report.get("scientific_limitations", []),
+                validation=validation_report,
+                provenance=prov_data
+            )
+        except Exception as e:
+            return STACRetrieveResponse(
+                status="error",
+                scene_id=req.scene_id,
+                asset_key=req.asset_key,
+                category="unsupported",
+                filename=name_part,
+                mime_type="image/tiff",
+                size_bytes=0,
+                data_base64="",
+                error=f"Error reading local sample window: {str(e)}"
+            )
+
 
 
     def _fallback_local_search(
