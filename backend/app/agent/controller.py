@@ -71,7 +71,10 @@ class AgentController:
                 models_selected=trace_dict.get("models_selected", ["MultiStepOrchestrator"]),
                 steps=steps_list,
                 parameters=trace_dict.get("parameters", {}),
-                execution_time_ms=orch_res.get("execution_time_ms", 0.0)
+                execution_time_ms=orch_res.get("execution_time_ms", 0.0),
+                execution_steps=trace_dict.get("execution_steps"),
+                cumulative_transfer_bytes=trace_dict.get("cumulative_transfer_bytes"),
+                transfer_budget_bytes=trace_dict.get("transfer_budget_bytes")
             )
 
             return AnalysisResponseSchema(

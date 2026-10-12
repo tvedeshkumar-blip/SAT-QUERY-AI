@@ -296,103 +296,225 @@ class MultiStepOrchestrator:
                 if rem_budget <= 0:
                     trace.add_step(f"TOOL_{tool_name.upper()}", f"Cumulative transfer budget of {max_bytes} bytes exhausted.", status="failed")
                     analysis_metadata["budget_exhausted"] = True
+                    execution_steps.append({
+                        "step_number": step_count,
+                        "tool": tool_name,
+                        "status": "failed",
+                        "latency_ms": 0.0,
+                        "summary": step_desc,
+                        "error": f"Cumulative transfer budget of {max_bytes} bytes exceeded."
+                    })
                     break
                 tool_args["max_bytes"] = rem_budget
 
             # Wire outputs from prior retrieval steps into temporal analysis tools
             if tool_name == "temporal_optical_change" and not tool_args.get("t1_b04"):
-                if len(retrieved_scenes) >= 2:
-                    s1 = retrieved_scenes[0]
-                    s2 = retrieved_scenes[1]
-                    arr1 = s1.get("array")
-                    arr2 = s2.get("array")
-                    meta1 = s1.get("raster_metadata") or s1.get("metadata") or {}
-                    meta2 = s2.get("raster_metadata") or s2.get("metadata") or {}
-                    if arr1 is not None and arr2 is not None and arr1.ndim >= 2 and arr2.ndim >= 2:
-                        b04_1 = arr1[:, :, 0] if arr1.ndim == 3 else arr1
-                        b08_1 = arr1[:, :, 1] if arr1.ndim == 3 and arr1.shape[2] > 1 else arr1
-                        b04_2 = arr2[:, :, 0] if arr2.ndim == 3 else arr2
-                        b08_2 = arr2[:, :, 1] if arr2.ndim == 3 and arr2.shape[2] > 1 else arr2
-                        tool_args["t1_b04"] = b04_1
-                        tool_args["t1_b08"] = b08_1
-                        tool_args["t2_b04"] = b04_2
-                        tool_args["t2_b08"] = b08_2
-                        if arr1.ndim == 3 and arr1.shape[2] >= 3:
-                            tool_args["t1_scl"] = arr1[:, :, 2]
-                        if arr2.ndim == 3 and arr2.shape[2] >= 3:
-                            tool_args["t2_scl"] = arr2[:, :, 2]
-                        tool_args["t1_meta"] = meta1
-                        tool_args["t2_meta"] = meta2
-                        tool_args["t1_datetime"] = parsed.get("t1_date") or meta1.get("datetime") or "2023-01-01T10:00:00Z"
-                        tool_args["t2_datetime"] = parsed.get("t2_date") or meta2.get("datetime") or "2024-01-01T10:00:00Z"
-                    else:
-                        dummy = np.full((10, 10), 1000, dtype=np.float32)
-                        tool_args["t1_b04"] = dummy
-                        tool_args["t1_b08"] = dummy * 2
-                        tool_args["t2_b04"] = dummy
-                        tool_args["t2_b08"] = dummy * 1.5
-                else:
-                    dummy = np.full((10, 10), 1000, dtype=np.float32)
-                    tool_args["t1_b04"] = dummy
-                    tool_args["t1_b08"] = dummy * 2
-                    tool_args["t2_b04"] = dummy
-                    tool_args["t2_b08"] = dummy * 1.5
+                valid_optical = (
+                    len(retrieved_scenes) >= 2 and
+                    retrieved_scenes[0].get("status") in ("success", None) and
+                    retrieved_scenes[1].get("status") in ("success", None) and
+                    retrieved_scenes[0].get("array") is not None and
+                    retrieved_scenes[1].get("array") is not None
+                )
+                if not valid_optical:
+                    err_msg = "Upstream Sentinel-2 optical scene retrieval failed or returned incomplete rasters; bi-temporal optical change calculation blocked."
+                    trace.add_step(f"TOOL_{tool_name.upper()}", err_msg, status="blocked")
+                    execution_steps.append({
+                        "step_number": step_count,
+                        "tool": tool_name,
+                        "status": "blocked",
+                        "latency_ms": 0.0,
+                        "summary": step_desc,
+                        "error": err_msg
+                    })
+                    analysis_metadata["temporal_optical_change"] = {"status": "blocked", "error": err_msg}
+                    continue
+
+                s1 = retrieved_scenes[0]
+                s2 = retrieved_scenes[1]
+                arr1 = s1.get("array")
+                arr2 = s2.get("array")
+                meta1 = s1.get("raster_metadata") or s1.get("metadata") or {}
+                meta2 = s2.get("raster_metadata") or s2.get("metadata") or {}
+                b04_1 = arr1[:, :, 0] if arr1.ndim == 3 else arr1
+                b08_1 = arr1[:, :, 1] if arr1.ndim == 3 and arr1.shape[2] > 1 else arr1
+                b04_2 = arr2[:, :, 0] if arr2.ndim == 3 else arr2
+                b08_2 = arr2[:, :, 1] if arr2.ndim == 3 and arr2.shape[2] > 1 else arr2
+                tool_args["t1_b04"] = b04_1
+                tool_args["t1_b08"] = b08_1
+                tool_args["t2_b04"] = b04_2
+                tool_args["t2_b08"] = b08_2
+                if arr1.ndim == 3 and arr1.shape[2] >= 3:
+                    tool_args["t1_scl"] = arr1[:, :, 2]
+                if arr2.ndim == 3 and arr2.shape[2] >= 3:
+                    tool_args["t2_scl"] = arr2[:, :, 2]
+                tool_args["t1_meta"] = meta1
+                tool_args["t2_meta"] = meta2
+                tool_args["t1_datetime"] = parsed.get("t1_date") or meta1.get("datetime") or "2023-01-01T10:00:00Z"
+                tool_args["t2_datetime"] = parsed.get("t2_date") or meta2.get("datetime") or "2024-01-01T10:00:00Z"
 
             elif tool_name == "temporal_sar_change" and not tool_args.get("t1_vv"):
-                if len(retrieved_scenes) >= 2:
-                    s1 = retrieved_scenes[0]
-                    s2 = retrieved_scenes[1]
-                    arr1 = s1.get("array")
-                    arr2 = s2.get("array")
-                    meta1 = s1.get("raster_metadata") or s1.get("metadata") or {}
-                    meta2 = s2.get("raster_metadata") or s2.get("metadata") or {}
-                    if arr1 is not None and arr2 is not None and arr1.ndim >= 2 and arr2.ndim >= 2:
-                        vv_1 = arr1[:, :, 0] if arr1.ndim == 3 else arr1
-                        vh_1 = arr1[:, :, 1] if arr1.ndim == 3 and arr1.shape[2] > 1 else arr1 * 0.2
-                        vv_2 = arr2[:, :, 0] if arr2.ndim == 3 else arr2
-                        vh_2 = arr2[:, :, 1] if arr2.ndim == 3 and arr2.shape[2] > 1 else arr2 * 0.2
-                        tool_args["t1_vv"] = vv_1
-                        tool_args["t1_vh"] = vh_1
-                        tool_args["t2_vv"] = vv_2
-                        tool_args["t2_vh"] = vh_2
-                        tool_args["t1_meta"] = meta1
-                        tool_args["t2_meta"] = meta2
-                        tool_args["t1_datetime"] = parsed.get("t1_date") or meta1.get("datetime") or "2023-01-01T10:00:00Z"
-                        tool_args["t2_datetime"] = parsed.get("t2_date") or meta2.get("datetime") or "2024-01-01T10:00:00Z"
+                valid_sar = (
+                    len(retrieved_scenes) >= 2 and
+                    retrieved_scenes[0].get("status") in ("success", None) and
+                    retrieved_scenes[1].get("status") in ("success", None) and
+                    retrieved_scenes[0].get("array") is not None and
+                    retrieved_scenes[1].get("array") is not None
+                )
+                if not valid_sar:
+                    err_msg = "Upstream Sentinel-1 RTC SAR scene retrieval failed or returned incomplete rasters; bi-temporal SAR change calculation blocked."
+                    trace.add_step(f"TOOL_{tool_name.upper()}", err_msg, status="blocked")
+                    execution_steps.append({
+                        "step_number": step_count,
+                        "tool": tool_name,
+                        "status": "blocked",
+                        "latency_ms": 0.0,
+                        "summary": step_desc,
+                        "error": err_msg
+                    })
+                    analysis_metadata["temporal_sar_change"] = {"status": "blocked", "error": err_msg}
+                    continue
+
+                s1 = retrieved_scenes[0]
+                s2 = retrieved_scenes[1]
+                arr1 = s1.get("array")
+                arr2 = s2.get("array")
+                meta1 = s1.get("raster_metadata") or s1.get("metadata") or {}
+                meta2 = s2.get("raster_metadata") or s2.get("metadata") or {}
+                vv_1 = arr1[:, :, 0] if arr1.ndim == 3 else arr1
+                vh_1 = arr1[:, :, 1] if arr1.ndim == 3 and arr1.shape[2] > 1 else arr1 * 0.2
+                vv_2 = arr2[:, :, 0] if arr2.ndim == 3 else arr2
+                vh_2 = arr2[:, :, 1] if arr2.ndim == 3 and arr2.shape[2] > 1 else arr2 * 0.2
+                tool_args["t1_vv"] = vv_1
+                tool_args["t1_vh"] = vh_1
+                tool_args["t2_vv"] = vv_2
+                tool_args["t2_vh"] = vh_2
+                tool_args["t1_meta"] = meta1
+                tool_args["t2_meta"] = meta2
+                tool_args["t1_datetime"] = parsed.get("t1_date") or meta1.get("datetime") or "2023-01-01T10:00:00Z"
+                tool_args["t2_datetime"] = parsed.get("t2_date") or meta2.get("datetime") or "2024-01-01T10:00:00Z"
+
+            elif tool_name == "optical_sar_fusion" and not tool_args.get("images"):
+                opt_scene = None
+                sar_scene = None
+                for s in retrieved_scenes:
+                    coll = str(s.get("collection", "")).lower()
+                    if ("sentinel-2" in coll or "optical" in coll or s.get("ndvi_result")) and opt_scene is None:
+                        opt_scene = s
+                    elif ("sentinel-1" in coll or "rtc" in coll or "sar" in coll or s.get("dprvi_result")) and sar_scene is None:
+                        sar_scene = s
+
+                if opt_scene is None and len(retrieved_scenes) >= 1:
+                    opt_scene = retrieved_scenes[0]
+                if sar_scene is None and len(retrieved_scenes) >= 2:
+                    sar_scene = retrieved_scenes[1]
+
+                valid_fusion = (
+                    opt_scene is not None and
+                    sar_scene is not None and
+                    opt_scene.get("status") in ("success", None) and
+                    sar_scene.get("status") in ("success", None) and
+                    opt_scene.get("array") is not None and
+                    sar_scene.get("array") is not None
+                )
+                if not valid_fusion:
+                    err_msg = "Upstream optical or SAR scene retrieval failed or returned incomplete rasters; cross-sensor optical-SAR fusion blocked."
+                    trace.add_step(f"TOOL_{tool_name.upper()}", err_msg, status="blocked")
+                    execution_steps.append({
+                        "step_number": step_count,
+                        "tool": tool_name,
+                        "status": "blocked",
+                        "latency_ms": 0.0,
+                        "summary": step_desc,
+                        "error": err_msg
+                    })
+                    analysis_metadata["optical_sar_fusion"] = {"status": "blocked", "error": err_msg}
+                    continue
+
+                tool_args["images"] = [opt_scene["array"], sar_scene["array"]]
+                tool_args["metadata"] = {
+                    "optical": opt_scene.get("raster_metadata") or opt_scene.get("metadata") or {},
+                    "sar": sar_scene.get("raster_metadata") or sar_scene.get("metadata") or {}
+                }
+                tool_args["query"] = query
+
+            # Execute tool with bounded retries (MAX_TOOL_RETRIES)
+            tool_out = None
+            step_status = "failed"
+            step_error = None
+            t_latency = 0.0
+
+            for attempt in range(1, MAX_TOOL_RETRIES + 1):
+                t_start = time.time()
+                try:
+                    tool_out = tool.run(**tool_args)
+                    t_latency = round((time.time() - t_start) * 1000, 2)
+
+                    if tool_out.get("status") in ("success", None):
+                        step_status = "completed"
+                        step_error = None
+                        if attempt > 1:
+                            trace.add_step(
+                                f"TOOL_{tool_name.upper()}_RETRY",
+                                f"Tool '{tool_name}' succeeded on retry attempt {attempt}/{MAX_TOOL_RETRIES} ({t_latency} ms)"
+                            )
+                        break
                     else:
-                        dummy = np.full((10, 10), 0.05, dtype=np.float32)
-                        tool_args["t1_vv"] = dummy
-                        tool_args["t1_vh"] = dummy * 0.25
-                        tool_args["t2_vv"] = dummy
-                        tool_args["t2_vh"] = dummy * 0.20
-                else:
-                    dummy = np.full((10, 10), 0.05, dtype=np.float32)
-                    tool_args["t1_vv"] = dummy
-                    tool_args["t1_vh"] = dummy * 0.25
-                    tool_args["t2_vv"] = dummy
-                    tool_args["t2_vh"] = dummy * 0.20
+                        step_error = tool_out.get("error") or f"Tool returned failure status '{tool_out.get('status')}'"
+                        is_non_retryable = any(kw in step_error.lower() for kw in [
+                            "validation", "degenerate", "identical", "unsupported", "invalid bbox", "crs mismatch"
+                        ])
+                        if is_non_retryable or attempt >= MAX_TOOL_RETRIES:
+                            step_status = "failed"
+                            break
+                        trace.add_step(
+                            f"TOOL_{tool_name.upper()}",
+                            f"Attempt {attempt}/{MAX_TOOL_RETRIES} failed: {step_error}. Retrying...",
+                            status="retrying"
+                        )
+                        time.sleep(0.05 * attempt)
+                except Exception as tool_err:
+                    t_latency = round((time.time() - t_start) * 1000, 2)
+                    step_error = str(tool_err)
+                    is_non_retryable = any(kw in step_error.lower() for kw in [
+                        "validation", "degenerate", "identical", "unsupported", "invalid bbox", "crs mismatch"
+                    ])
+                    if is_non_retryable or attempt >= MAX_TOOL_RETRIES:
+                        step_status = "failed"
+                        logger.error(f"Error executing tool '{tool_name}' after {attempt} attempt(s): {tool_err}")
+                        break
+                    trace.add_step(
+                        f"TOOL_{tool_name.upper()}",
+                        f"Attempt {attempt}/{MAX_TOOL_RETRIES} encountered error: {step_error}. Retrying...",
+                        status="retrying"
+                    )
+                    time.sleep(0.05 * attempt)
 
-            # Execute tool safely
-            try:
-                tool_out = tool.run(**tool_args)
-                t_latency = round((time.time() - t_start) * 1000, 2)
-                step_status = "completed" if tool_out.get("status") in ("success", None) else "failed"
+            # Record step in DAG execution steps
+            step_record = {
+                "step_number": step_count,
+                "tool": tool_name,
+                "status": step_status,
+                "latency_ms": t_latency,
+                "summary": step_desc
+            }
+            if step_error:
+                step_record["error"] = step_error
+            execution_steps.append(step_record)
 
+            trace.add_step(
+                f"TOOL_{tool_name.upper()}",
+                f"{step_desc} -> {step_status} ({t_latency} ms)" + (f": {step_error}" if step_error else ""),
+                status=step_status
+            )
+
+            if tool_out:
                 # Update transfer telemetry
                 if "size_bytes" in tool_out:
                     cumulative_transfer_bytes += tool_out.get("size_bytes", 0)
 
                 if tool_name == "stac_composite_retrieve":
                     retrieved_scenes.append(tool_out)
-
-                execution_steps.append({
-                    "step_number": step_count,
-                    "tool": tool_name,
-                    "status": step_status,
-                    "latency_ms": t_latency,
-                    "summary": step_desc
-                })
-                trace.add_step(f"TOOL_{tool_name.upper()}", f"{step_desc} -> {step_status} ({t_latency} ms)")
 
                 # Integrate tool outputs into orchestration state
                 if "ndvi_result" in tool_out and tool_out["ndvi_result"]:
@@ -431,24 +553,24 @@ class MultiStepOrchestrator:
                                 "delta_vv_db": tool_out.get("delta_vv_db")
                             }
                         })
+                if tool_name == "optical_sar_fusion" and step_status == "completed":
+                    analysis_metadata["optical_sar_fusion"] = tool_out
+                    fused_b64 = tool_out.get("fused_preview_base64") or tool_out.get("colorized_preview_base64") or tool_out.get("preview_base64")
+                    if fused_b64:
+                        evidence_items.append({
+                            "id": "ev_optical_sar_fused_composite",
+                            "type": "fused",
+                            "title": "Sentinel-2 & Sentinel-1 RTC Optical-SAR Cross-Sensor Composite",
+                            "description": "Co-registered multimodal optical surface reflectance and calibrated RTC SAR backscatter",
+                            "data_base64": fused_b64,
+                            "statistics": tool_out.get("statistics") or {}
+                        })
                 if "quality_screening" in tool_out:
                     analysis_metadata["quality_screening"] = tool_out["quality_screening"]
                 if "provenance" in tool_out:
                     analysis_metadata["provenance"] = tool_out["provenance"]
 
                 analysis_result = tool_out
-
-            except Exception as tool_err:
-                t_latency = round((time.time() - t_start) * 1000, 2)
-                logger.error(f"Error executing tool '{tool_name}': {tool_err}")
-                execution_steps.append({
-                    "step_number": step_count,
-                    "tool": tool_name,
-                    "status": "failed",
-                    "latency_ms": t_latency,
-                    "error": str(tool_err)
-                })
-                trace.add_step(f"TOOL_{tool_name.upper()}", f"Tool failure: {tool_err}", status="failed")
 
         analysis_metadata["retrieved_scenes"] = [
             {
@@ -461,10 +583,31 @@ class MultiStepOrchestrator:
 
         # Step 4: Synthesize Answer Text & Formulate Claims
         candidate_claims = []
-        if task == "temporal_optical_change":
+        is_budget_exhausted = analysis_metadata.get("budget_exhausted", False)
+        overall_status = "success"
+        confidence = 0.95
+        confidence_label = "Deterministic Verified"
+
+        if is_budget_exhausted:
+            overall_status = "budget_exhausted"
+            answer = f"Analysis halted: Cumulative STAC transfer budget of {max_bytes} bytes was exhausted before all required satellite assets could be retrieved."
+            confidence = None
+            confidence_label = "Budget Exhausted"
+
+        elif task == "temporal_optical_change":
             chg = analysis_metadata.get("temporal_optical_change", {})
-            if chg.get("status") == "unsupported_zero_valid_pixels":
+            chg_status = chg.get("status")
+            if chg_status in ("blocked", "failed", "error") or not chg:
+                overall_status = "failed"
+                err_detail = chg.get("error", "Upstream Sentinel-2 optical scenes could not be retrieved.")
+                answer = f"Temporal Sentinel-2 optical change analysis failed: {err_detail}"
+                confidence = None
+                confidence_label = "Acquisition Failed"
+            elif chg_status == "unsupported_zero_valid_pixels":
+                overall_status = "unsupported"
                 answer = chg.get("summary")
+                confidence = None
+                confidence_label = "Zero Valid Pixels"
             else:
                 d_mean = chg.get("delta_ndvi_mean", 0.0)
                 v_loss = chg.get("vegetation_loss_pct", 0.0)
@@ -479,10 +622,21 @@ class MultiStepOrchestrator:
                     claim_type="measurement",
                     status="supported"
                 ))
+
         elif task == "temporal_sar_change":
             chg = analysis_metadata.get("temporal_sar_change", {})
-            if chg.get("status") == "unsupported_zero_valid_pixels":
+            chg_status = chg.get("status")
+            if chg_status in ("blocked", "failed", "error") or not chg:
+                overall_status = "failed"
+                err_detail = chg.get("error", "Upstream Sentinel-1 RTC SAR scenes could not be retrieved.")
+                answer = f"Temporal Sentinel-1 RTC SAR change analysis failed: {err_detail}"
+                confidence = None
+                confidence_label = "Acquisition Failed"
+            elif chg_status == "unsupported_zero_valid_pixels":
+                overall_status = "unsupported"
                 answer = chg.get("summary")
+                confidence = None
+                confidence_label = "Zero Valid Pixels"
             else:
                 d_mean = chg.get("delta_dprvi_mean", 0.0)
                 c_loss = chg.get("radar_canopy_loss_pct", 0.0)
@@ -497,6 +651,25 @@ class MultiStepOrchestrator:
                     claim_type="measurement",
                     status="supported"
                 ))
+
+        elif task == "optical_sar":
+            fusion = analysis_metadata.get("optical_sar_fusion", {})
+            f_status = fusion.get("status")
+            if f_status in ("blocked", "failed", "error") or not fusion:
+                overall_status = "failed"
+                err_detail = fusion.get("error", "Upstream optical or SAR scene could not be retrieved.")
+                answer = f"Optical-SAR cross-sensor fusion analysis failed: {err_detail}"
+                confidence = None
+                confidence_label = "Acquisition Failed"
+            else:
+                ans_text = fusion.get("answer") or fusion.get("summary") or "Optical and SAR multimodal cross-sensor analysis completed successfully."
+                answer = ans_text
+                candidate_claims.append(ClaimVerificationItem(
+                    claim_text="Multimodal optical and SAR cross-sensor alignment and fusion analysis completed successfully.",
+                    claim_type="general",
+                    status="supported"
+                ))
+
         elif task == "sentinel1_rtc_dprvi":
             dprvi = analysis_metadata.get("dprvi_result", {})
             d_val = dprvi.get("dprvi_mean")
@@ -512,7 +685,14 @@ class MultiStepOrchestrator:
                     status="supported"
                 ))
             else:
-                answer = dprvi.get("summary", "SAR analysis complete.")
+                if dprvi.get("status") in ("blocked", "failed", "error"):
+                    overall_status = "failed"
+                    answer = f"Sentinel-1 RTC dual-polarization analysis failed: {dprvi.get('error', 'Radar imagery unavailable.')}"
+                    confidence = None
+                    confidence_label = "Acquisition Failed"
+                else:
+                    answer = dprvi.get("summary", "SAR analysis complete.")
+
         elif task == "sentinel2_ndvi":
             ndvi = analysis_metadata.get("ndvi_result", {})
             n_val = ndvi.get("ndvi_mean")
@@ -524,7 +704,13 @@ class MultiStepOrchestrator:
                     status="supported"
                 ))
             else:
-                answer = ndvi.get("summary", "Optical NDVI analysis complete.")
+                if ndvi.get("status") in ("blocked", "failed", "error"):
+                    overall_status = "failed"
+                    answer = f"Sentinel-2 NDVI analysis failed: {ndvi.get('error', 'Optical imagery unavailable.')}"
+                    confidence = None
+                    confidence_label = "Acquisition Failed"
+                else:
+                    answer = ndvi.get("summary", "Optical NDVI analysis complete.")
         else:
             answer = (analysis_result or {}).get("answer", f"Multi-step analysis for '{task}' completed successfully.")
 
@@ -539,11 +725,32 @@ class MultiStepOrchestrator:
         pkg = EvidencePackageBuilder.from_analysis_response(analysis_dict)
         trace.add_step("EVIDENCE_ASSEMBLED", f"Extracted {len(pkg.physical_measurements)} physical measurement(s) and {len(pkg.evidence_artifacts)} artifact(s)")
 
-        # Execute Deterministic Verifier (Checks A-L)
-        verifier_tool = self.tool_registry.get("deterministic_verifier")
-        v_out = verifier_tool.run(evidence_package=pkg, candidate_claims=candidate_claims, answer_text=answer)
-        det_passed = v_out["passed"]
-        trace.add_step("DETERMINISTIC_VERIFIED", f"Checks A-L: {'PASSED' if det_passed else 'VIOLATIONS DETECTED'} ({len(v_out['failures'])} violation(s))")
+        if overall_status == "success" and candidate_claims:
+            verifier_tool = self.tool_registry.get("deterministic_verifier")
+            v_out = verifier_tool.run(evidence_package=pkg, candidate_claims=candidate_claims, answer_text=answer)
+            det_passed = v_out["passed"]
+            confidence = 0.95 if det_passed else 0.40
+            confidence_label = "Deterministic Verified" if det_passed else "Verification Flagged"
+            trace.add_step("DETERMINISTIC_VERIFIED", f"Checks A-L: {'PASSED' if det_passed else 'VIOLATIONS DETECTED'} ({len(v_out['failures'])} violation(s))")
+        else:
+            v_out = {
+                "passed": False,
+                "deterministic_passed": False,
+                "verification_status": "unsupported",
+                "failures": [answer] if overall_status != "success" else [],
+                "deterministic_failures": [answer] if overall_status != "success" else [],
+                "claims": [],
+                "contradictions": [],
+                "unsupported_claims": [],
+                "summary_explanation": f"Workflow ended with status '{overall_status}'. Quantitative verification not run.",
+                "missing_evidence": [],
+                "scientific_limitations": getattr(pkg, "known_limitations", []) or [],
+                "recommended_checks": []
+            }
+            if overall_status == "success":
+                confidence = 0.95
+                confidence_label = "Deterministic Verified"
+            trace.add_step("VERIFICATION_SKIPPED", f"Verification skipped for status '{overall_status}'", status="completed")
 
         # Step 6: Scientific Report Generation
         report = ScientificReportBuilder.build_report(analysis_dict, evidence_package=pkg)
@@ -557,13 +764,13 @@ class MultiStepOrchestrator:
 
         final_res = {
             "id": trace_id,
-            "status": "success",
+            "status": overall_status,
             "task": task,
             "mode": "orchestration",
             "answer": answer,
             "is_clarification_required": False,
-            "confidence": 0.95 if det_passed else 0.40,
-            "confidence_label": "Deterministic Verified" if det_passed else "Verification Flagged",
+            "confidence": confidence,
+            "confidence_label": confidence_label,
             "models": trace.models_selected,
             "evidence": evidence_items,
             "trace": trace_data,
@@ -655,6 +862,35 @@ class MultiStepOrchestrator:
                 "tool": "temporal_sar_change",
                 "args": {},
                 "description": "Compute bi-temporal Sentinel-1 RTC SAR backscatter and DpRVI change"
+            })
+        elif task == "optical_sar":
+            steps.append({
+                "tool": "stac_composite_retrieve",
+                "args": {
+                    "scene_id": "local_sample_cartosat_optical_bengaluru" if not has_images else "workspace_img_1",
+                    "aoi_bbox": bbox,
+                    "collection": "sentinel-2-l2a",
+                    "bands": ["b04", "b08", "scl"],
+                    "include_scl": True,
+                    "compute_ndvi": True
+                },
+                "description": "Acquire Sentinel-2 L2A optical composite for cross-sensor fusion"
+            })
+            steps.append({
+                "tool": "stac_composite_retrieve",
+                "args": {
+                    "scene_id": "local_sample_risat_sar_mumbai" if not has_images else "workspace_img_2",
+                    "aoi_bbox": bbox,
+                    "collection": "sentinel-1-rtc",
+                    "bands": ["vv", "vh"],
+                    "compute_dprvi": True
+                },
+                "description": "Acquire Sentinel-1 RTC dual-pol composite for cross-sensor fusion"
+            })
+            steps.append({
+                "tool": "optical_sar_fusion",
+                "args": {},
+                "description": "Execute calibrated Optical and SAR cross-sensor alignment and fusion"
             })
         elif task == "sentinel1_rtc_dprvi":
             steps.append({

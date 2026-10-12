@@ -68,9 +68,11 @@ export interface VisualEvidence {
 export interface ExecutionTraceStep {
   step_number: number;
   tool: string;
-  status: 'completed' | 'failed' | 'retrying';
+  status: 'completed' | 'failed' | 'retrying' | 'blocked' | 'success';
   latency_ms: number;
   summary?: string;
+  description?: string;
+  execution_time_ms?: number;
   error?: string;
 }
 

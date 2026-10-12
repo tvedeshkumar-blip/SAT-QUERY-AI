@@ -236,4 +236,77 @@ describe('Stage 14: Dynamic Multi-Step Agent Orchestration and Multimodal Tempor
     assert.equal(prov.temporal_sar_provenance?.polarization, 'DUAL_VV_VH');
   });
 
+  test('validates blocked, retrying, and failed execution trace step statuses', () => {
+    const steps: ExecutionTraceStep[] = [
+      {
+        step_number: 1,
+        tool: 'stac_composite_retrieve',
+        status: 'retrying',
+        latency_ms: 50.0,
+        summary: 'Retrying transient connection failure'
+      },
+      {
+        step_number: 2,
+        tool: 'temporal_optical_change',
+        status: 'blocked',
+        latency_ms: 0.0,
+        summary: 'Blocked due to upstream retrieval failure',
+        error: 'Missing upstream rasters'
+      },
+      {
+        step_number: 3,
+        tool: 'deterministic_verifier',
+        status: 'failed',
+        latency_ms: 12.0,
+        summary: 'Verification failed'
+      }
+    ];
+
+    assert.equal(steps[0].status, 'retrying');
+    assert.equal(steps[1].status, 'blocked');
+    assert.equal(steps[2].status, 'failed');
+    assert.equal(steps[1].error, 'Missing upstream rasters');
+  });
+
+  test('validates optical-SAR cross-sensor fusion response structure', () => {
+    const fusionResp: AnalysisResponse = {
+      id: 'fusion_test_001',
+      task: 'optical_sar',
+      mode: 'orchestration',
+      answer: 'Multimodal optical and SAR cross-sensor alignment and fusion completed successfully.',
+      confidence: 0.95,
+      confidence_label: 'Deterministic Verified',
+      models: ['MultiStepOrchestrator', 'optical_sar_fusion'],
+      evidence: [
+        {
+          id: 'ev_optical_sar_fused_composite',
+          type: 'fused',
+          title: 'Sentinel-2 & Sentinel-1 RTC Optical-SAR Cross-Sensor Composite',
+          description: 'Co-registered multimodal optical surface reflectance and calibrated RTC SAR backscatter',
+          data_base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+        }
+      ],
+      execution_time_ms: 120.0,
+      created_at: '2026-10-12T12:00:00Z',
+      trace: {
+        task: 'optical_sar',
+        models_selected: ['stac_composite_retrieve', 'optical_sar_fusion'],
+        steps: [],
+        parameters: {},
+        execution_time_ms: 120.0,
+        execution_steps: [
+          { step_number: 1, tool: 'stac_composite_retrieve', status: 'completed', latency_ms: 40.0, summary: 'Acquire Optical' },
+          { step_number: 2, tool: 'stac_composite_retrieve', status: 'completed', latency_ms: 45.0, summary: 'Acquire SAR' },
+          { step_number: 3, tool: 'optical_sar_fusion', status: 'completed', latency_ms: 35.0, summary: 'Execute Fusion' }
+        ],
+        cumulative_transfer_bytes: 8192000,
+        transfer_budget_bytes: 20971520
+      }
+    };
+
+    assert.equal(fusionResp.task, 'optical_sar');
+    assert.equal(fusionResp.trace.execution_steps?.length, 3);
+    assert.equal(fusionResp.evidence[0].type, 'fused');
+  });
+
 });

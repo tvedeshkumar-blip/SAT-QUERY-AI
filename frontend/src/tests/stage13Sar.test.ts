@@ -144,6 +144,9 @@ describe('Stage 13: Sentinel-1 RTC Dual-Polarization & DpRVI Frontend Telemetry 
       id: 'resp_sar_dprvi_test',
       query: 'Radar crop analysis',
       task: 'optical_sar',
+      mode: 'optical_sar',
+      confidence: 0.95,
+      confidence_label: 'Calibrated',
       primary_model: 'SatQueryEngine',
       models: ['SatQueryEngine'],
       actual_model_used: 'SatQueryEngine',
@@ -151,6 +154,16 @@ describe('Stage 13: Sentinel-1 RTC Dual-Polarization & DpRVI Frontend Telemetry 
       model_status: 'active',
       implementation_status: 'baseline',
       answer: 'Analysis shows calibrated Sentinel-1 RTC DpRVI of 0.5200 and cross-pol ratio of -6.02 dB.',
+      evidence: [],
+      trace: {
+        task: 'optical_sar',
+        models_selected: ['SatQueryEngine'],
+        steps: [],
+        parameters: {},
+        execution_time_ms: 50.0
+      },
+      execution_time_ms: 50.0,
+      created_at: '2026-10-12T00:00:00Z',
       structured_evidence: null,
       verification: {
         verification_status: 'supported',

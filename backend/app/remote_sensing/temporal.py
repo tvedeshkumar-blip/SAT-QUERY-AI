@@ -481,8 +481,8 @@ def compute_temporal_sar_change(
         delta_dprvi_p90 = round(float(np.percentile(delta_dprvi, 90)), 4)
         delta_dprvi_std = round(float(np.std(delta_dprvi)), 4)
 
-        dprvi_t1_mean = t1_sar.get("dprvi_mean")
-        dprvi_t2_mean = t2_sar.get("dprvi_mean")
+        dprvi_t1_mean = round(float(np.mean(dprvi_1)), 4)
+        dprvi_t2_mean = round(float(np.mean(dprvi_2)), 4)
 
         # Backscatter differences (dB)
         if t1_sar.get("vv_mean_db") is not None and t2_sar.get("vv_mean_db") is not None:

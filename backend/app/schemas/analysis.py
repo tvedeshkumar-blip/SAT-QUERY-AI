@@ -57,6 +57,9 @@ class ExecutionTraceSchema(BaseModel):
     steps: List[TraceStepSchema]
     parameters: Dict[str, Any]
     execution_time_ms: float
+    execution_steps: Optional[List[Dict[str, Any]]] = None
+    cumulative_transfer_bytes: Optional[int] = None
+    transfer_budget_bytes: Optional[int] = None
 
 class ConfidenceBreakdownSchema(BaseModel):
     model_confidence: Optional[float] = Field(default=None, description="Direct model prediction confidence / logit probability")

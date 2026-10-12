@@ -108,25 +108,38 @@ export const ExecutionTracePanel: React.FC<ExecutionTracePanelProps> = ({ trace 
                 )}
               </div>
               <div className="space-y-1.5">
-                {((trace as any).execution_steps as any[]).map((st, idx) => (
-                  <div key={idx} className="p-2 rounded bg-slate-950 border border-slate-800 flex items-center justify-between text-[11px]">
-                    <div className="flex items-center gap-2">
-                      <span className="px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 font-bold text-[10px]">
-                        Step {st.step_number || idx + 1}
-                      </span>
-                      <span className="font-semibold text-slate-200">{st.tool}</span>
-                      <span className="text-slate-400 text-[10px] truncate max-w-xs">{st.description}</span>
+                {((trace as any).execution_steps as any[]).map((st, idx) => {
+                  const isSuccess = st.status === 'success' || st.status === 'completed';
+                  const isBlocked = st.status === 'blocked';
+                  const isRetrying = st.status === 'retrying';
+                  const statusClass = isSuccess
+                    ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                    : isBlocked
+                    ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                    : isRetrying
+                    ? 'bg-cyan-950 text-cyan-300 border border-cyan-800'
+                    : 'bg-rose-950 text-rose-300 border border-rose-800';
+                  const latency = st.latency_ms ?? st.execution_time_ms ?? 0;
+                  const stepText = st.summary || st.description || st.tool;
+
+                  return (
+                    <div key={idx} className="p-2 rounded bg-slate-950 border border-slate-800 flex items-center justify-between text-[11px]">
+                      <div className="flex items-center gap-2">
+                        <span className="px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 font-bold text-[10px]">
+                          Step {st.step_number || idx + 1}
+                        </span>
+                        <span className="font-semibold text-slate-200">{st.tool}</span>
+                        <span className="text-slate-400 text-[10px] truncate max-w-xs">{stepText}</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="text-slate-400 text-[10px]">{latency} ms</span>
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${statusClass}`}>
+                          {st.status.toUpperCase()}
+                        </span>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-3">
-                      <span className="text-slate-400 text-[10px]">{st.execution_time_ms} ms</span>
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                        st.status === 'success' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-rose-950 text-rose-300 border border-rose-800'
-                      }`}>
-                        {st.status.toUpperCase()}
-                      </span>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
