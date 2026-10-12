@@ -230,7 +230,8 @@ class STACAcquisitionService:
             self._scene_cache[scene_id] = {
                 "summary": scene_summary,
                 "raw_assets": raw_assets,
-                "properties": props
+                "properties": props,
+                "search_bbox": req.bbox
             }
             scenes.append(scene_summary)
 
@@ -306,6 +307,29 @@ class STACAcquisitionService:
         if reported_size and reported_size > self.MAX_DOWNLOAD_BYTES:
             max_mb = self.MAX_DOWNLOAD_BYTES / (1024 * 1024)
             size_mb = reported_size / (1024 * 1024)
+
+            # Check if AOI is available to safely transition to existing windowed COG retrieval workflow
+            aoi_to_use = getattr(req, "aoi_bbox", None) or (cached.get("search_bbox") if cached else None)
+            is_cog_candidate = (
+                "image/tiff" in mime_type
+                or "geotiff" in mime_type
+                or clean_url.endswith((".tif", ".tiff"))
+                or req.asset_key.lower() in ("visual", "b01", "b02", "b03", "b04", "b05", "b06", "b07", "b08", "b8a", "b09", "b11", "b12", "scl", "vv", "vh")
+            )
+            if aoi_to_use and is_cog_candidate:
+                logger.info(
+                    f"Asset '{req.asset_key}' size ({size_mb:.1f}MB) exceeds full download cap ({max_mb:.0f}MB). "
+                    f"Delegating to existing AOI windowed COG retrieval workflow."
+                )
+                req_win = STACWindowedRetrieveRequest(
+                    scene_id=req.scene_id,
+                    asset_key=req.asset_key,
+                    aoi_bbox=aoi_to_use,
+                    collection=req.collection or (cached.get("collection") if cached else None),
+                    target_role=req.target_role or "primary"
+                )
+                return self.retrieve_window(req_win)
+
             return STACRetrieveResponse(
                 status="error",
                 scene_id=req.scene_id,
@@ -355,6 +379,55 @@ class STACAcquisitionService:
                             error=f"Failed to download asset: HTTP {stream_resp.status_code}"
                         )
 
+                    # Inspect server Content-Length upfront if available
+                    expected_content_length = None
+                    cl_header = stream_resp.headers.get("content-length")
+                    if cl_header:
+                        try:
+                            expected_content_length = int(cl_header)
+                        except (ValueError, TypeError):
+                            expected_content_length = None
+
+                    if expected_content_length is not None and expected_content_length > self.MAX_DOWNLOAD_BYTES:
+                        max_mb = self.MAX_DOWNLOAD_BYTES / (1024 * 1024)
+                        size_mb = expected_content_length / (1024 * 1024)
+                        aoi_to_use = getattr(req, "aoi_bbox", None) or (cached.get("search_bbox") if cached else None)
+                        is_cog_candidate = (
+                            "image/tiff" in mime_type
+                            or "geotiff" in mime_type
+                            or clean_url.endswith((".tif", ".tiff"))
+                            or req.asset_key.lower() in ("visual", "b01", "b02", "b03", "b04", "b05", "b06", "b07", "b08", "b8a", "b09", "b11", "b12", "scl", "vv", "vh")
+                        )
+                        if aoi_to_use and is_cog_candidate:
+                            logger.info(
+                                f"Server content-length ({size_mb:.1f}MB) exceeds full download cap ({max_mb:.0f}MB). "
+                                f"Delegating to existing AOI windowed COG retrieval workflow."
+                            )
+                            req_win = STACWindowedRetrieveRequest(
+                                scene_id=req.scene_id,
+                                asset_key=req.asset_key,
+                                aoi_bbox=aoi_to_use,
+                                collection=req.collection or (cached.get("collection") if cached else None),
+                                target_role=req.target_role or "primary"
+                            )
+                            return self.retrieve_window(req_win)
+
+                        return STACRetrieveResponse(
+                            status="error",
+                            scene_id=req.scene_id,
+                            asset_key=req.asset_key,
+                            category="unsupported",
+                            filename="none",
+                            mime_type=mime_type,
+                            size_bytes=expected_content_length,
+                            data_base64="",
+                            provenance=provenance_data,
+                            error=(
+                                f"Asset size ({size_mb:.1f}MB) exceeds the configured retrieval safety limit of {max_mb:.0f}MB. "
+                                "Full-tile Sentinel COG rasters require bounded sub-windowing or increasing MAX_RETRIEVAL_BYTES."
+                            )
+                        )
+
                     content_chunks = []
                     total_bytes = 0
                     for chunk in stream_resp.iter_bytes(chunk_size=65536):
@@ -376,6 +449,35 @@ class STACAcquisitionService:
                         content_chunks.append(chunk)
 
             raw_bytes = b"".join(content_chunks)
+
+            # Check for empty or truncated download payloads
+            if total_bytes == 0:
+                return STACRetrieveResponse(
+                    status="error",
+                    scene_id=req.scene_id,
+                    asset_key=req.asset_key,
+                    category="unsupported",
+                    filename="none",
+                    mime_type=mime_type,
+                    size_bytes=0,
+                    data_base64="",
+                    provenance=provenance_data,
+                    error="Asset download returned empty payload (0 bytes received)."
+                )
+
+            if expected_content_length is not None and total_bytes < expected_content_length:
+                return STACRetrieveResponse(
+                    status="error",
+                    scene_id=req.scene_id,
+                    asset_key=req.asset_key,
+                    category="unsupported",
+                    filename="none",
+                    mime_type=mime_type,
+                    size_bytes=total_bytes,
+                    data_base64="",
+                    provenance=provenance_data,
+                    error=f"Asset download truncated: received {total_bytes} bytes out of expected {expected_content_length} bytes."
+                )
 
         except Exception as dl_err:
             logger.error(f"Error downloading asset from {clean_url}: {dl_err}")
@@ -423,12 +525,30 @@ class STACAcquisitionService:
         limitations = validation_report["scientific_limitations"]
         raster_meta = validation_report["raster_metadata"]
 
+        # Distinguish failed or invalid raster payloads from successful retrieval
+        if validation_report.get("status") == "invalid":
+            val_err = validation_report.get("error") or "Physical raster validation failed: invalid or unreadable file format."
+            return STACRetrieveResponse(
+                status="error",
+                scene_id=req.scene_id,
+                asset_key=req.asset_key,
+                category="unsupported",
+                filename=safe_name,
+                mime_type=mime_type,
+                size_bytes=len(raw_bytes),
+                data_base64="",
+                metadata=raster_meta,
+                scientific_limitations=limitations,
+                validation=validation_report,
+                provenance=provenance_data,
+                error=f"Retrieved asset payload validation failed: {val_err}"
+            )
+
         return STACRetrieveResponse(
             status="success",
             scene_id=req.scene_id,
             asset_key=req.asset_key,
             category=category,
-
             filename=safe_name,
             mime_type=mime_type,
             size_bytes=len(raw_bytes),
@@ -665,6 +785,26 @@ class STACAcquisitionService:
                 quality_screening_data = sar_eval
                 raster_meta["quality_screening"] = sar_eval
                 limitations.extend(sar_eval.get("scientific_limitations", []))
+
+        # Distinguish failed or invalid windowed raster payloads from successful retrieval
+        if validation_report.get("status") == "invalid":
+            val_err = validation_report.get("error") or "Windowed raster validation failed: invalid or unreadable GeoTIFF."
+            return STACRetrieveResponse(
+                status="error",
+                scene_id=req.scene_id,
+                asset_key=req.asset_key,
+                category="unsupported",
+                filename=safe_name,
+                mime_type="image/tiff",
+                size_bytes=len(raw_bytes),
+                data_base64="",
+                metadata=raster_meta,
+                scientific_limitations=limitations,
+                validation=validation_report,
+                provenance=provenance_data,
+                quality_screening=quality_screening_data,
+                error=f"Windowed retrieval validation failed: {val_err}"
+            )
 
         return STACRetrieveResponse(
             status="success",
@@ -970,6 +1110,27 @@ class STACAcquisitionService:
             all_limitations = limitations + list(validation_report.get("scientific_limitations", []))
             if dprvi_result_data:
                 all_limitations += list(dprvi_result_data.get("scientific_limitations", []))
+
+            if validation_report.get("status") == "invalid":
+                val_err = validation_report.get("error") or "Dual-pol SAR raster validation failed: invalid GeoTIFF."
+                return STACCompositeRetrieveResponse(
+                    status="error",
+                    scene_id=req.scene_id,
+                    collection=req.collection or "sentinel-1-rtc",
+                    category="unsupported",
+                    filename=safe_name,
+                    mime_type="image/tiff",
+                    size_bytes=len(raw_bytes),
+                    data_base64="",
+                    metadata=raster_meta,
+                    scientific_limitations=list(dict.fromkeys(all_limitations)),
+                    provenance=provenance_data,
+                    bands_retrieved=["VV", "VH"],
+                    dprvi_result=dprvi_result_data,
+                    sar_quality_screening=sar_screening_data,
+                    validation=validation_report,
+                    error=f"Dual-pol composite validation failed: {val_err}"
+                )
 
             return STACCompositeRetrieveResponse(
                 status="success",
@@ -1303,6 +1464,27 @@ class STACAcquisitionService:
             raster_meta["ndvi_result"] = ndvi_result_data
         if scl_screening_data:
             raster_meta["quality_screening"] = scl_screening_data
+
+        if validation_report.get("status") == "invalid":
+            val_err = validation_report.get("error") or "Multispectral optical raster validation failed: invalid GeoTIFF."
+            return STACCompositeRetrieveResponse(
+                status="error",
+                scene_id=req.scene_id,
+                collection=req.collection or "sentinel-2-l2a",
+                category="unsupported",
+                filename=safe_name,
+                mime_type="image/tiff",
+                size_bytes=len(raw_bytes),
+                data_base64="",
+                metadata=raster_meta,
+                scientific_limitations=limitations + list(validation_report.get("scientific_limitations", [])),
+                provenance=provenance_data,
+                bands_retrieved=["B04", "B08"] + (["SCL"] if aligned_scl is not None else []),
+                ndvi_result=ndvi_result_data,
+                quality_screening=scl_screening_data,
+                validation=validation_report,
+                error=f"Optical composite validation failed: {val_err}"
+            )
 
         return STACCompositeRetrieveResponse(
             status="success",

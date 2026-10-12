@@ -145,13 +145,63 @@ class SafeWindowedCOGReader:
                     current_url = next_url
                     test_range = client.get(current_url, headers={"Range": "bytes=0-1023"})
 
-            if test_range.status_code != 206:
+            if test_range.status_code == 200:
+                raise WindowedRetrievalError(
+                    f"Server returned HTTP 200 instead of 206 Partial Content during range probe. "
+                    "Aborting to prevent unintentional full-file download."
+                )
+            elif test_range.status_code == 416:
+                raise WindowedRetrievalError(
+                    "Server returned HTTP 416 (Range Not Satisfiable). Range request is unsupported or byte range is invalid."
+                )
+            elif test_range.status_code in (500, 501, 502, 503):
+                raise WindowedRetrievalError(
+                    f"Server failed to fulfill range probe request (HTTP {test_range.status_code}). Range requests may be unsupported."
+                )
+            elif test_range.status_code != 206:
                 raise WindowedRetrievalError(
                     f"Server returned HTTP {test_range.status_code} instead of 206 Partial Content during range probe. "
                     "Aborting to prevent unintentional full-file download."
                 )
 
+            # Verify Content-Range header when headers are provided (RFC 7233 compliance)
+            cr_header = None
+            if hasattr(test_range, "headers") and test_range.headers is not None:
+                cr_header = test_range.headers.get("content-range")
+
+            if isinstance(test_range.headers, (dict, httpx.Headers)) or isinstance(cr_header, str):
+                if not cr_header or not isinstance(cr_header, str):
+                    raise WindowedRetrievalError(
+                        "Server returned HTTP 206 Partial Content but omitted mandatory 'Content-Range' response header."
+                    )
+                import re
+                cr_clean = cr_header.strip()
+                cr_match = re.match(r"^bytes\s+(\d+)-(\d+)/(\d+|\*)$", cr_clean, re.IGNORECASE)
+                if not cr_match:
+                    raise WindowedRetrievalError(
+                        f"Server returned invalid 'Content-Range' header format ('{cr_clean}'). Expected 'bytes START-END/TOTAL'."
+                    )
+                range_start = int(cr_match.group(1))
+                range_end = int(cr_match.group(2))
+                total_from_cr = cr_match.group(3)
+
+                if range_start != 0:
+                    raise WindowedRetrievalError(
+                        f"Content-Range start offset mismatch: requested 0, received {range_start}."
+                    )
+                if range_end < range_start:
+                    raise WindowedRetrievalError(
+                        f"Content-Range end offset ({range_end}) is less than start offset ({range_start})."
+                    )
+                if total_from_cr != "*" and total_file_size == 0:
+                    total_file_size = int(total_from_cr)
+
             probe_bytes = len(test_range.content) if hasattr(test_range, "content") and test_range.content else 1024
+            if hasattr(test_range, "content") and test_range.content and len(test_range.content) > 65536:
+                raise WindowedRetrievalError(
+                    f"Server returned excessively large payload ({len(test_range.content)} bytes) for range probe (bytes=0-1023)."
+                )
+
             cumulative_bytes += probe_bytes
             if cumulative_bytes > budget:
                 raise WindowedRetrievalError(

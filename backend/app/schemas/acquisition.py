@@ -94,6 +94,28 @@ class STACRetrieveRequest(BaseModel):
     asset_key: str = Field(default="thumbnail", description="Asset key to fetch (e.g. thumbnail, visual)")
     collection: Optional[str] = Field(None, description="Collection name if known")
     target_role: Optional[str] = Field(default="primary", description="Workspace role: primary, secondary, optical, sar")
+    aoi_bbox: Optional[List[float]] = Field(
+        default=None,
+        description="Optional bounding box in EPSG:4326 [min_lon, min_lat, max_lon, max_lat] for windowed retrieval when asset exceeds full download cap"
+    )
+
+    @field_validator("aoi_bbox")
+    @classmethod
+    def validate_aoi_bbox(cls, v: Optional[List[float]]) -> Optional[List[float]]:
+        if v is None:
+            return None
+        if len(v) != 4:
+            raise ValueError("aoi_bbox must have exactly 4 coordinates [min_lon, min_lat, max_lon, max_lat]")
+        min_lon, min_lat, max_lon, max_lat = v
+        if min_lat >= max_lat:
+            raise ValueError("Invalid AOI bbox: min_lat cannot be greater than or equal to max_lat.")
+        if min_lon >= max_lon and not (min_lon > 0 and max_lon < 0):
+            raise ValueError("Invalid AOI bbox: min_lon cannot be greater than or equal to max_lon for standard bounding boxes.")
+        if not (-90.0 <= min_lat <= 90.0 and -90.0 <= max_lat <= 90.0):
+            raise ValueError("Latitude values must be between -90 and 90 degrees.")
+        if not (-180.0 <= min_lon <= 180.0 and -180.0 <= max_lon <= 180.0):
+            raise ValueError("Longitude values must be between -180 and 180 degrees.")
+        return v
 
 class STACWindowedRetrieveRequest(BaseModel):
     scene_id: str = Field(..., description="ID of the scene to retrieve")
