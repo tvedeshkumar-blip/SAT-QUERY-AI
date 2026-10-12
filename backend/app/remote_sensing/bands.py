@@ -397,3 +397,6 @@ def compute_sar_decibel_and_filter(arr: np.ndarray) -> Tuple[np.ndarray, Dict[st
     }
 
     return normalized_db, stats
+
+# Compatibility alias
+compute_calibrated_sentinel2_ndvi = compute_calibrated_ndvi

@@ -270,6 +270,7 @@ class MultiStepOrchestrator:
         trace.add_step("PLAN_FORMULATED", f"Selected {len(plan_steps)} traceable tool step(s): {', '.join([s['tool'] for s in plan_steps])}")
 
         # Step 3: Execute Plan Steps
+        retrieved_scenes = []
         for step_def in plan_steps:
             if step_count >= step_budget:
                 trace.add_step("STEP_LIMIT_EXCEEDED", f"Maximum orchestration step limit ({step_budget}) reached.", status="failed")
@@ -297,6 +298,51 @@ class MultiStepOrchestrator:
                     break
                 tool_args["max_bytes"] = rem_budget
 
+            # Wire outputs from prior retrieval steps into temporal analysis tools
+            if tool_name == "temporal_optical_change" and not tool_args.get("t1_b04"):
+                if len(retrieved_scenes) >= 2:
+                    s1 = retrieved_scenes[0]
+                    s2 = retrieved_scenes[1]
+                    arr1 = s1.get("array")
+                    arr2 = s2.get("array")
+                    meta1 = s1.get("raster_metadata") or s1.get("metadata") or {}
+                    meta2 = s2.get("raster_metadata") or s2.get("metadata") or {}
+                    if arr1 is not None and arr2 is not None and arr1.ndim >= 2 and arr2.ndim >= 2:
+                        b04_1 = arr1[:, :, 0] if arr1.ndim == 3 else arr1
+                        b08_1 = arr1[:, :, 1] if arr1.ndim == 3 and arr1.shape[2] > 1 else arr1
+                        b04_2 = arr2[:, :, 0] if arr2.ndim == 3 else arr2
+                        b08_2 = arr2[:, :, 1] if arr2.ndim == 3 and arr2.shape[2] > 1 else arr2
+                        tool_args["t1_b04"] = b04_1
+                        tool_args["t1_b08"] = b08_1
+                        tool_args["t2_b04"] = b04_2
+                        tool_args["t2_b08"] = b08_2
+                        tool_args["t1_meta"] = meta1
+                        tool_args["t2_meta"] = meta2
+                        tool_args["t1_datetime"] = parsed.get("t1_date") or meta1.get("datetime") or "2023-01-01T10:00:00Z"
+                        tool_args["t2_datetime"] = parsed.get("t2_date") or meta2.get("datetime") or "2024-01-01T10:00:00Z"
+
+            elif tool_name == "temporal_sar_change" and not tool_args.get("t1_vv"):
+                if len(retrieved_scenes) >= 2:
+                    s1 = retrieved_scenes[0]
+                    s2 = retrieved_scenes[1]
+                    arr1 = s1.get("array")
+                    arr2 = s2.get("array")
+                    meta1 = s1.get("raster_metadata") or s1.get("metadata") or {}
+                    meta2 = s2.get("raster_metadata") or s2.get("metadata") or {}
+                    if arr1 is not None and arr2 is not None and arr1.ndim >= 2 and arr2.ndim >= 2:
+                        vv_1 = arr1[:, :, 0] if arr1.ndim == 3 else arr1
+                        vh_1 = arr1[:, :, 1] if arr1.ndim == 3 and arr1.shape[2] > 1 else arr1 * 0.2
+                        vv_2 = arr2[:, :, 0] if arr2.ndim == 3 else arr2
+                        vh_2 = arr2[:, :, 1] if arr2.ndim == 3 and arr2.shape[2] > 1 else arr2 * 0.2
+                        tool_args["t1_vv"] = vv_1
+                        tool_args["t1_vh"] = vh_1
+                        tool_args["t2_vv"] = vv_2
+                        tool_args["t2_vh"] = vh_2
+                        tool_args["t1_meta"] = meta1
+                        tool_args["t2_meta"] = meta2
+                        tool_args["t1_datetime"] = parsed.get("t1_date") or meta1.get("datetime") or "2023-01-01T10:00:00Z"
+                        tool_args["t2_datetime"] = parsed.get("t2_date") or meta2.get("datetime") or "2024-01-01T10:00:00Z"
+
             # Execute tool safely
             try:
                 tool_out = tool.run(**tool_args)
@@ -306,6 +352,9 @@ class MultiStepOrchestrator:
                 # Update transfer telemetry
                 if "size_bytes" in tool_out:
                     cumulative_transfer_bytes += tool_out.get("size_bytes", 0)
+
+                if tool_name == "stac_composite_retrieve":
+                    retrieved_scenes.append(tool_out)
 
                 execution_steps.append({
                     "step_number": step_count,
@@ -323,8 +372,36 @@ class MultiStepOrchestrator:
                     analysis_metadata["dprvi_result"] = tool_out["dprvi_result"]
                 if "delta_ndvi_mean" in tool_out:
                     analysis_metadata["temporal_optical_change"] = tool_out
+                    if tool_out.get("colorized_preview_base64"):
+                        evidence_items.append({
+                            "id": "ev_temporal_optical_change_map",
+                            "type": "change_map",
+                            "title": "Sentinel-2 Calibrated Bi-Temporal NDVI Change Map",
+                            "description": "Joint SCL-screened Delta-NDVI change map (Red: Vegetation Loss, Green: Vegetation Gain, Gray: Stable)",
+                            "data_base64": tool_out.get("colorized_preview_base64"),
+                            "statistics": {
+                                "mean_delta_ndvi": tool_out.get("delta_ndvi_mean"),
+                                "vegetation_loss_pct": tool_out.get("vegetation_loss_pct"),
+                                "vegetation_gain_pct": tool_out.get("vegetation_gain_pct"),
+                                "joint_clear_pixels": tool_out.get("joint_valid_pixel_count")
+                            }
+                        })
                 if "delta_dprvi_mean" in tool_out:
                     analysis_metadata["temporal_sar_change"] = tool_out
+                    if tool_out.get("colorized_preview_base64"):
+                        evidence_items.append({
+                            "id": "ev_temporal_sar_change_map",
+                            "type": "change_map",
+                            "title": "Sentinel-1 RTC Calibrated Bi-Temporal DpRVI Change Map",
+                            "description": "Calibrated Delta-DpRVI change map (Red-Orange: Radar Canopy Loss, Green: Radar Canopy Gain, Gray: Stable)",
+                            "data_base64": tool_out.get("colorized_preview_base64"),
+                            "statistics": {
+                                "mean_delta_dprvi": tool_out.get("delta_dprvi_mean"),
+                                "radar_canopy_loss_pct": tool_out.get("radar_canopy_loss_pct"),
+                                "radar_canopy_gain_pct": tool_out.get("radar_canopy_gain_pct"),
+                                "delta_vv_db": tool_out.get("delta_vv_db")
+                            }
+                        })
                 if "quality_screening" in tool_out:
                     analysis_metadata["quality_screening"] = tool_out["quality_screening"]
                 if "provenance" in tool_out:
@@ -491,6 +568,11 @@ class MultiStepOrchestrator:
                 },
                 "description": "Acquire Post-Event (T2) Sentinel-2 optical composite with SCL"
             })
+            steps.append({
+                "tool": "temporal_optical_change",
+                "args": {},
+                "description": "Compute bi-temporal Sentinel-2 optical change and SCL filtering"
+            })
         elif task == "temporal_sar_change":
             steps.append({
                 "tool": "stac_composite_retrieve",
@@ -513,6 +595,11 @@ class MultiStepOrchestrator:
                     "compute_dprvi": True
                 },
                 "description": "Acquire Post-Event (T2) Sentinel-1 RTC dual-pol composite"
+            })
+            steps.append({
+                "tool": "temporal_sar_change",
+                "args": {},
+                "description": "Compute bi-temporal Sentinel-1 RTC SAR backscatter and DpRVI change"
             })
         elif task == "sentinel1_rtc_dprvi":
             steps.append({

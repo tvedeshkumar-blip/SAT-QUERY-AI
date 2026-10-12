@@ -124,6 +124,16 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
      (response.reproducible_report?.provenance as any)?.dprvi_status ?
       response.reproducible_report?.provenance : null);
 
+  const temporalOpticalResult = response.metadata?.temporal_optical_change ||
+    ((response.reproducible_report?.provenance as any)?.delta_ndvi_mean !== undefined ||
+     (response.reproducible_report?.provenance as any)?.vegetation_loss_pct !== undefined ?
+      response.reproducible_report?.provenance : null);
+
+  const temporalSarResult = response.metadata?.temporal_sar_change ||
+    ((response.reproducible_report?.provenance as any)?.delta_dprvi_mean !== undefined ||
+     (response.reproducible_report?.provenance as any)?.radar_canopy_loss_pct !== undefined ?
+      response.reproducible_report?.provenance : null);
+
   return (
     <div className="glass-panel rounded-2xl p-6 border border-slate-800 bg-slate-900/60 shadow-xl space-y-4">
       
@@ -183,6 +193,42 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
             <span className="font-mono text-slate-400 font-semibold uppercase tracking-wider">User Query: </span>
             <span className="text-slate-200 font-medium font-sans">"{response.query}"</span>
           </div>
+        </div>
+      )}
+
+      {/* Ambiguity Clarification Request Banner */}
+      {response.is_clarification_required && (
+        <div className="p-4 rounded-xl bg-amber-950/70 border border-amber-600/80 space-y-3 text-xs font-mono">
+          <div className="flex items-center gap-2 text-amber-300 font-bold uppercase tracking-wider">
+            <AlertCircle className="w-4 h-4 text-amber-400" />
+            INPUT CLARIFICATION REQUIRED (DATA INTEGRITY GATE)
+          </div>
+          <p className="text-amber-100/90 text-sm font-sans leading-relaxed">
+            {response.answer}
+          </p>
+          {response.missing_parameters && response.missing_parameters.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <span className="text-amber-400/80 text-[11px]">Unresolved Parameters:</span>
+              {response.missing_parameters.map((p, idx) => (
+                <span key={idx} className="px-2 py-0.5 rounded bg-amber-900/60 border border-amber-700 text-amber-200 text-[10px]">
+                  {p}
+                </span>
+              ))}
+            </div>
+          )}
+          {response.suggested_examples && response.suggested_examples.length > 0 && (
+            <div className="pt-2 border-t border-amber-800/40">
+              <span className="text-slate-400 block text-[10px] mb-1">SUGGESTED QUERY TEMPLATES:</span>
+              <ul className="space-y-1 text-slate-300 text-[11px]">
+                {response.suggested_examples.map((ex, idx) => (
+                  <li key={idx} className="flex items-center gap-1.5">
+                    <span className="text-amber-400">•</span>
+                    <code>{ex}</code>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 
@@ -694,6 +740,126 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
               />
             </div>
           )}
+        </div>
+      )}
+
+      {/* Sentinel-2 Bi-Temporal Optical Change Telemetry Banner */}
+      {temporalOpticalResult && (
+        <div className="p-4 rounded-xl bg-slate-950/90 border border-emerald-800/80 space-y-3 text-xs font-mono">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
+            <span className="text-emerald-400 font-bold flex items-center gap-1.5 uppercase tracking-wider">
+              <Sprout className="w-4 h-4 text-emerald-400" />
+              SENTINEL-2 BI-TEMPORAL OPTICAL CHANGE & SCL SCREENING
+            </span>
+            <span className="px-2 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-[10px]">
+              {temporalOpticalResult.status || 'calibrated_optical_change'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+            <div className="bg-slate-900/80 p-2 rounded border border-slate-800">
+              <span className="text-slate-400 block text-[9px]">MEAN ΔNDVI</span>
+              <span className="text-base font-bold text-emerald-300">
+                {temporalOpticalResult.delta_ndvi_mean !== null && temporalOpticalResult.delta_ndvi_mean !== undefined
+                  ? Number(temporalOpticalResult.delta_ndvi_mean).toFixed(4)
+                  : 'N/A'}
+              </span>
+            </div>
+            <div className="bg-slate-900/80 p-2 rounded border border-slate-800">
+              <span className="text-slate-400 block text-[9px]">VEGETATION LOSS</span>
+              <span className="text-base font-bold text-rose-400">
+                {temporalOpticalResult.vegetation_loss_pct !== null && temporalOpticalResult.vegetation_loss_pct !== undefined
+                  ? `${Number(temporalOpticalResult.vegetation_loss_pct).toFixed(1)}%`
+                  : 'N/A'}
+              </span>
+            </div>
+            <div className="bg-slate-900/80 p-2 rounded border border-slate-800">
+              <span className="text-slate-400 block text-[9px]">VEGETATION GAIN</span>
+              <span className="text-base font-bold text-emerald-400">
+                {temporalOpticalResult.vegetation_gain_pct !== null && temporalOpticalResult.vegetation_gain_pct !== undefined
+                  ? `${Number(temporalOpticalResult.vegetation_gain_pct).toFixed(1)}%`
+                  : 'N/A'}
+              </span>
+            </div>
+            <div className="bg-slate-900/80 p-2 rounded border border-slate-800">
+              <span className="text-slate-400 block text-[9px]">JOINT CLEAR PIXELS</span>
+              <span className="text-base font-bold text-cyan-300">
+                {temporalOpticalResult.joint_valid_pixel_count !== null && temporalOpticalResult.joint_valid_pixel_count !== undefined
+                  ? Number(temporalOpticalResult.joint_valid_pixel_count).toLocaleString()
+                  : 'N/A'} px
+              </span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between text-[10px] text-slate-400 pt-1 border-t border-slate-800/60">
+            <span>T1: {temporalOpticalResult.t1_datetime || temporalOpticalResult.temporal_t1_datetime || 'Baseline'}</span>
+            <span>T2: {temporalOpticalResult.t2_datetime || temporalOpticalResult.temporal_t2_datetime || 'Comparison'}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Sentinel-1 RTC Bi-Temporal SAR Change Telemetry Banner */}
+      {temporalSarResult && (
+        <div className="p-4 rounded-xl bg-slate-950/90 border border-violet-800/80 space-y-3 text-xs font-mono">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
+            <span className="text-violet-400 font-bold flex items-center gap-1.5 uppercase tracking-wider">
+              <Radio className="w-4 h-4 text-violet-400" />
+              SENTINEL-1 RTC BI-TEMPORAL SAR CHANGE & DpRVI
+            </span>
+            <span className="px-2 py-0.5 rounded bg-violet-950 text-violet-300 border border-violet-800 text-[10px]">
+              {temporalSarResult.status || 'calibrated_sar_change'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+            <div className="bg-slate-900/80 p-2 rounded border border-slate-800">
+              <span className="text-slate-400 block text-[9px]">MEAN ΔDpRVI</span>
+              <span className="text-base font-bold text-violet-300">
+                {temporalSarResult.delta_dprvi_mean !== null && temporalSarResult.delta_dprvi_mean !== undefined
+                  ? Number(temporalSarResult.delta_dprvi_mean).toFixed(4)
+                  : 'N/A'}
+              </span>
+            </div>
+            <div className="bg-slate-900/80 p-2 rounded border border-slate-800">
+              <span className="text-slate-400 block text-[9px]">RADAR CANOPY LOSS</span>
+              <span className="text-base font-bold text-amber-400">
+                {temporalSarResult.radar_canopy_loss_pct !== null && temporalSarResult.radar_canopy_loss_pct !== undefined
+                  ? `${Number(temporalSarResult.radar_canopy_loss_pct).toFixed(1)}%`
+                  : 'N/A'}
+              </span>
+            </div>
+            <div className="bg-slate-900/80 p-2 rounded border border-slate-800">
+              <span className="text-slate-400 block text-[9px]">RADAR CANOPY GAIN</span>
+              <span className="text-base font-bold text-emerald-400">
+                {temporalSarResult.radar_canopy_gain_pct !== null && temporalSarResult.radar_canopy_gain_pct !== undefined
+                  ? `${Number(temporalSarResult.radar_canopy_gain_pct).toFixed(1)}%`
+                  : 'N/A'}
+              </span>
+            </div>
+            <div className="bg-slate-900/80 p-2 rounded border border-slate-800">
+              <span className="text-slate-400 block text-[9px]">BACKSCATTER SHIFT</span>
+              <span className="text-base font-bold text-cyan-300">
+                {temporalSarResult.delta_vv_db !== null && temporalSarResult.delta_vv_db !== undefined
+                  ? `VV: ${Number(temporalSarResult.delta_vv_db).toFixed(1)} dB`
+                  : 'N/A'}
+              </span>
+            </div>
+          </div>
+
+          {/* DpRVI Assumption Violation Notice */}
+          {((temporalSarResult.dprvi_assumption_violations?.total_count || temporalSarResult.dprvi_assumption_violations_count || 0) > 0) && (
+            <div className="flex items-center gap-1.5 text-amber-300 text-[10px] bg-amber-950/40 p-2 rounded border border-amber-800/60">
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
+              <span>
+                DpRVI assumption violations (q = VH/VV &gt; 1.0): {temporalSarResult.dprvi_assumption_violations?.total_count || temporalSarResult.dprvi_assumption_violations_count} observations violate Mandal et al. (2020) and are uncertified approximations.
+              </span>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center justify-between text-[10px] text-slate-400 pt-1 border-t border-slate-800/60">
+            <span>Terrain Mask: Unavailable from STAC provider (relief shadows unmasked)</span>
+            <span>Mode: DUAL_VV_VH</span>
+          </div>
         </div>
       )}
 

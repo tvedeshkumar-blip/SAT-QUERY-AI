@@ -93,6 +93,43 @@ export const ExecutionTracePanel: React.FC<ExecutionTracePanelProps> = ({ trace 
             </div>
           </div>
 
+          {/* Dynamic Multi-Step Tool Execution DAG (Stage 14) */}
+          {(trace as any).execution_steps && (trace as any).execution_steps.length > 0 && (
+            <div className="space-y-2 pt-2 border-t border-slate-800">
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] text-cyan-400 uppercase tracking-wider font-semibold">
+                  ORCHESTRATED TOOL EXECUTION DAG
+                </p>
+                {(trace as any).cumulative_transfer_bytes !== undefined && (
+                  <span className="text-[10px] text-slate-400">
+                    Cumulative Transfer: {((trace as any).cumulative_transfer_bytes / (1024 * 1024)).toFixed(2)} MB / {(((trace as any).transfer_budget_bytes || 20971520) / (1024 * 1024)).toFixed(0)} MB Cap
+                  </span>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                {((trace as any).execution_steps as any[]).map((st, idx) => (
+                  <div key={idx} className="p-2 rounded bg-slate-950 border border-slate-800 flex items-center justify-between text-[11px]">
+                    <div className="flex items-center gap-2">
+                      <span className="px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 font-bold text-[10px]">
+                        Step {st.step_number || idx + 1}
+                      </span>
+                      <span className="font-semibold text-slate-200">{st.tool}</span>
+                      <span className="text-slate-400 text-[10px] truncate max-w-xs">{st.description}</span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-slate-400 text-[10px]">{st.execution_time_ms} ms</span>
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                        st.status === 'success' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-rose-950 text-rose-300 border border-rose-800'
+                      }`}>
+                        {st.status.toUpperCase()}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
         </div>
       )}
 

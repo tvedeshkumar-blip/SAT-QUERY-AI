@@ -290,8 +290,11 @@ def compute_calibrated_dual_pol_sar(
         "dprvi_max": dprvi_max,
         "dprvi_assumption_violations": {
             "count": assumption_violation_count,
+            "assumption_violation_count": assumption_violation_count,
             "percentage": assumption_violation_pct,
+            "assumption_violation_pct": assumption_violation_pct,
             "has_violations": assumption_violation_count > 0,
+            "flagged_unphysical_q": assumption_violation_count > 0,
             "warning": "Cross-polarization ratio exceeded 1.0 (VH > VV)" if assumption_violation_count > 0 else None
         },
         "cross_pol_ratio_linear": cross_pol_ratio_linear,
@@ -327,3 +330,6 @@ def compute_calibrated_dual_pol_sar(
         },
         "scientific_limitations": limitations
     }
+
+# Compatibility alias
+compute_dprvi_and_backscatter = compute_calibrated_dual_pol_sar

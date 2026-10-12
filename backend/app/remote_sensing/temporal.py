@@ -37,10 +37,10 @@ SCL_EXCLUDED_CLASSES = {0, 1, 3, 8, 9, 10}  # No data, Defective, Cloud shadows,
 
 
 def compute_temporal_optical_change(
-    t1_b04: np.ndarray,
-    t1_b08: np.ndarray,
-    t2_b04: np.ndarray,
-    t2_b08: np.ndarray,
+    t1_b04: Any,
+    t1_b08: Any = None,
+    t2_b04: Any = None,
+    t2_b08: Any = None,
     t1_scl: Optional[np.ndarray] = None,
     t2_scl: Optional[np.ndarray] = None,
     t1_meta: Optional[Dict[str, Any]] = None,
@@ -53,7 +53,23 @@ def compute_temporal_optical_change(
 ) -> Dict[str, Any]:
     """
     Computes calibrated temporal Sentinel-2 NDVI change with per-scene SCL atmospheric screening.
+    Supports either explicit individual band arrays or structured dictionary inputs for T1/T2.
     """
+    if isinstance(t1_b04, dict) and (isinstance(t1_b08, dict) or t2_b04 is None):
+        t1_dict = t1_b04
+        t2_dict = t1_b08 or {}
+        t1_b04 = t1_dict.get("b04") if t1_dict.get("b04") is not None else t1_dict.get("red")
+        t1_b08 = t1_dict.get("b08") if t1_dict.get("b08") is not None else t1_dict.get("nir")
+        t1_scl = t1_dict.get("scl")
+        t1_meta = t1_dict.get("meta") or {}
+        t1_datetime = t1_datetime or t1_meta.get("datetime")
+
+        t2_b04 = t2_dict.get("b04") if t2_dict.get("b04") is not None else t2_dict.get("red")
+        t2_b08 = t2_dict.get("b08") if t2_dict.get("b08") is not None else t2_dict.get("nir")
+        t2_scl = t2_dict.get("scl")
+        t2_meta = t2_dict.get("meta") or {}
+        t2_datetime = t2_datetime or t2_meta.get("datetime")
+
     t1_meta = t1_meta or {}
     t2_meta = t2_meta or {}
 
@@ -293,6 +309,7 @@ def compute_temporal_optical_change(
         "joint_valid_mask": joint_valid_mask,
         "delta_ndvi_array": delta_ndvi_arr,
         "colorized_preview_base64": colorized_b64,
+        "colorized_change_preview_base64": colorized_b64,
         "preview_base64": colorized_b64,
         "t1_datetime": dt1_str,
         "t2_datetime": dt2_str,
@@ -302,10 +319,10 @@ def compute_temporal_optical_change(
 
 
 def compute_temporal_sar_change(
-    t1_vv: np.ndarray,
-    t1_vh: np.ndarray,
-    t2_vv: np.ndarray,
-    t2_vh: np.ndarray,
+    t1_vv: Any,
+    t1_vh: Any = None,
+    t2_vv: Any = None,
+    t2_vh: Any = None,
     t1_meta: Optional[Dict[str, Any]] = None,
     t2_meta: Optional[Dict[str, Any]] = None,
     t1_datetime: Optional[str] = None,
@@ -316,7 +333,21 @@ def compute_temporal_sar_change(
 ) -> Dict[str, Any]:
     """
     Computes calibrated temporal Sentinel-1 RTC dual-polarization SAR change (Delta-DpRVI & Delta-Backscatter).
+    Supports either explicit individual band arrays or structured dictionary inputs for T1/T2.
     """
+    if isinstance(t1_vv, dict) and (isinstance(t1_vh, dict) or t2_vv is None):
+        t1_dict = t1_vv
+        t2_dict = t1_vh or {}
+        t1_vv = t1_dict.get("vv")
+        t1_vh = t1_dict.get("vh")
+        t1_meta = t1_dict.get("meta") or {}
+        t1_datetime = t1_datetime or t1_meta.get("datetime")
+
+        t2_vv = t2_dict.get("vv")
+        t2_vh = t2_dict.get("vh")
+        t2_meta = t2_dict.get("meta") or {}
+        t2_datetime = t2_datetime or t2_meta.get("datetime")
+
     t1_meta = t1_meta or {}
     t2_meta = t2_meta or {}
 
@@ -544,16 +575,24 @@ def compute_temporal_sar_change(
         "joint_valid_mask": joint_valid_mask,
         "delta_dprvi_array": delta_dprvi_arr,
         "colorized_preview_base64": colorized_b64,
+        "colorized_change_preview_base64": colorized_b64,
         "preview_base64": colorized_b64,
         "t1_datetime": dt1_str,
         "t2_datetime": dt2_str,
         "polarization_mode": "DUAL_VV_VH",
         "sar_terrain_mask_status": "unavailable_from_stac_provider",
+        "validity_policy": {
+            "sar_terrain_layover_shadow_mask": "unavailable_from_stac_provider",
+            "polarization": "DUAL_VV_VH",
+            "unit": "linear_gamma0_power"
+        },
         "dprvi_assumption_violations": {
             "t1": t1_violations,
             "t2": t2_violations,
             "total_count": total_violations,
-            "has_violations": total_violations > 0
+            "has_violations": total_violations > 0,
+            "flagged_unphysical_q": total_violations > 0,
+            "total_pct": round((total_violations / max(1, joint_valid_count)) * 100.0, 2)
         },
         "scientific_limitations": limitations
     }

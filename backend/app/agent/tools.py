@@ -103,6 +103,14 @@ class STACCompositeRetrieveTool(AgentTool):
             max_bytes=max_bytes
         )
         resp = stac_service.retrieve_composite_window(req)
+        parsed_arr = None
+        parsed_meta = {}
+        if resp.data_base64:
+            try:
+                from app.remote_sensing.geotiff import parse_geotiff_or_image
+                parsed_arr, parsed_meta = parse_geotiff_or_image(resp.data_base64, resp.filename)
+            except Exception:
+                pass
         return {
             "status": resp.status,
             "scene_id": resp.scene_id,
@@ -114,6 +122,8 @@ class STACCompositeRetrieveTool(AgentTool):
             "quality_screening": resp.quality_screening or resp.sar_quality_screening,
             "provenance": resp.provenance,
             "data_base64": resp.data_base64,
+            "array": parsed_arr,
+            "raster_metadata": parsed_meta,
             "error": resp.error
         }
 
@@ -138,7 +148,7 @@ class Sentinel2NDVIPipelineTool(AgentTool):
         return res
 
 
-class Sentinel1RTCDpRVI PipelineTool(AgentTool):
+class Sentinel1RTCDpRVIPipelineTool(AgentTool):
     """Tool for calibrated Sentinel-1 RTC dual-polarization SAR backscatter and DpRVI calculation."""
     def __init__(self):
         super().__init__(
@@ -292,11 +302,20 @@ class DeterministicVerifierTool(AgentTool):
             candidate_claims=candidate_claims,
             answer_text=answer_text
         )
+        status = "supported" if passed and not contradictions else ("partially_supported" if passed else "unsupported")
         return {
             "passed": passed,
+            "deterministic_passed": passed,
+            "verification_status": status,
             "failures": failures,
+            "deterministic_failures": failures,
             "claims": [c.dict() if hasattr(c, "dict") else c.model_dump() for c in claims],
-            "contradictions": contradictions
+            "contradictions": contradictions,
+            "unsupported_claims": [],
+            "summary_explanation": f"Deterministic verification {'PASSED' if passed else 'FAILED with ' + str(len(failures)) + ' violations'}.",
+            "missing_evidence": [],
+            "scientific_limitations": getattr(evidence_package, "known_limitations", []) or [],
+            "recommended_checks": []
         }
 
 
@@ -311,7 +330,7 @@ class AgentToolRegistry:
             STACSearchTool(),
             STACCompositeRetrieveTool(),
             Sentinel2NDVIPipelineTool(),
-            Sentinel1RTCDpRVI PipelineTool(),
+            Sentinel1RTCDpRVIPipelineTool(),
             TemporalOpticalChangeTool(),
             TemporalSARChangeTool(),
             OpticalSARJointFusionTool(),

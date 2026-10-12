@@ -108,6 +108,9 @@ export interface AnalysisResponse {
   conflict_info?: ConflictInfo;
   verification?: VerificationResponse | null;
   reproducible_report?: ScientificReport | null;
+  is_clarification_required?: boolean;
+  missing_parameters?: string[];
+  suggested_examples?: string[];
   execution_time_ms: number;
   created_at: string;
 }
@@ -170,6 +173,16 @@ export interface ReportProvenance {
   vh_asset_id?: string | null;
   dprvi_status?: string | null;
   sar_terrain_mask_status?: string | null;
+  delta_ndvi_mean?: number | null;
+  vegetation_loss_pct?: number | null;
+  vegetation_gain_pct?: number | null;
+  delta_dprvi_mean?: number | null;
+  radar_canopy_loss_pct?: number | null;
+  radar_canopy_gain_pct?: number | null;
+  temporal_t1_datetime?: string | null;
+  temporal_t2_datetime?: string | null;
+  joint_valid_pixel_count?: number | null;
+  dprvi_assumption_violations_count?: number | null;
 }
 
 export interface ReportVerificationSummary {
