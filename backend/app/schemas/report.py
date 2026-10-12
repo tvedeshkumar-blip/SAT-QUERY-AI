@@ -57,6 +57,16 @@ class ReportProvenanceSchema(BaseModel):
     fallback_used: bool = Field(default=False, description="Whether fallback baseline was activated")
     is_trained_model: bool = Field(default=False, description="Whether a trained neural model was executed")
     model_status: Optional[str] = Field(None, description="Status of the provider/model")
+    ndvi_mean: Optional[float] = Field(None, description="Calibrated Sentinel-2 B04+B08 mean NDVI")
+    ndvi_p90: Optional[float] = Field(None, description="Calibrated Sentinel-2 B04+B08 90th percentile NDVI")
+    vegetation_coverage_pct: Optional[float] = Field(None, description="Percentage of valid pixels with NDVI >= vegetation threshold")
+    ndvi_vegetation_threshold: Optional[float] = Field(None, description="Explicit NDVI vegetation threshold (default 0.40)")
+    reflectance_scale_factor: Optional[float] = Field(None, description="Surface reflectance scaling factor (e.g. 10000.0)")
+    scl_masking_policy: Optional[str] = Field(None, description="Applied SCL masking policy summary")
+    b04_asset_id: Optional[str] = Field(None, description="Source asset ID or href for B04 (Red)")
+    b08_asset_id: Optional[str] = Field(None, description="Source asset ID or href for B08 (NIR)")
+    scl_asset_id: Optional[str] = Field(None, description="Source asset ID or href for SCL mask")
+    ndvi_status: Optional[str] = Field(None, description="NDVI calculation status (e.g. 'success' or 'unsupported_zero_valid_pixels')")
 
 
 class ReportVerificationSummarySchema(BaseModel):

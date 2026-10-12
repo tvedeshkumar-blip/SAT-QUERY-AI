@@ -206,6 +206,23 @@ export async function retrieveSTACWindowedAsset(
   return await res.json();
 }
 
+export async function retrieveSTACCompositeWindowedAsset(
+  payload: import('../types').STACCompositeRetrieveRequestPayload
+): Promise<import('../types').STACCompositeRetrieveResponsePayload> {
+  const res = await fetch(`${API_BASE}/acquisition/retrieve-composite`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(errorData.detail || `Composite windowed asset retrieval failed (${res.status})`);
+  }
+
+  return await res.json();
+}
+
 
 export async function validateSTACAsset(
   payload: import('../types').STACValidateAssetRequestPayload

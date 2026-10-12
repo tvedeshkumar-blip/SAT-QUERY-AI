@@ -104,6 +104,34 @@ class DeterministicVerifier:
             if "sigma" in cal_q or "sigma0" in cal_q:
                 has_sigma0 = True
 
+        # Check J (Package-Level): Deterministic validation of NDVI measurements
+        for pm in evidence_package.physical_measurements:
+            pm_name_lower = pm.name.lower()
+            cal_qty_lower = (pm.calibration_quantity or "").lower()
+            is_ndvi_measurement = "ndvi" in pm_name_lower or "ndvi" in cal_qty_lower
+            if is_ndvi_measurement:
+                # 1. Measurements must be finite and within [-1.0, 1.0]
+                if pm.value is not None:
+                    try:
+                        val_float = float(pm.value)
+                        import math
+                        if math.isnan(val_float) or math.isinf(val_float):
+                            failures.append(f"NDVI measurement '{pm.name}' must be finite, found NaN/inf.")
+                        elif val_float < -1.0 or val_float > 1.0:
+                            failures.append(f"NDVI measurement '{pm.name}' value {val_float} is outside valid physical range [-1.0, 1.0].")
+                    except (ValueError, TypeError):
+                        failures.append(f"NDVI measurement '{pm.name}' value '{pm.value}' is not a valid numeric float.")
+
+                # 2. Must be reported as a unitless ratio, not percentage or reflectance
+                unit_lower = (pm.unit or "").strip().lower()
+                if any(pu == unit_lower or f" {pu}" in unit_lower or f"{pu} " in unit_lower for pu in ["%", "percent", "percentage", "reflectance"]):
+                    failures.append(f"NDVI measurement '{pm.name}' must be reported as a unitless ratio [-1, 1], not '{pm.unit}'.")
+
+                # 6 & 7. Zero valid pixels defense
+                if evidence_package.valid_pixel_count == 0 or (hasattr(evidence_package, "valid_pixel_percentage") and evidence_package.valid_pixel_percentage == 0.0 and evidence_package.total_pixel_count and evidence_package.total_pixel_count > 0):
+                    if pm.value is not None:
+                        failures.append(f"Cannot report numeric NDVI statistic '{pm.name}' ({pm.value}) when valid pixel count is zero.")
+
         # 5. Evaluate Candidate Claims & Answer Text
         claims_to_check: List[ClaimVerificationItem] = []
         if candidate_claims:
@@ -428,6 +456,124 @@ class DeterministicVerifier:
                     c_status = "unsupported"
                     c_reason = msg
 
+            # Check J: Calibrated Sentinel-2 B04+B08 NDVI Claims
+            is_ndvi_claim = any(
+                t in c_text_lower for t in [
+                    "ndvi", "normalized difference vegetation index", "vegetation index", "calibrated ndvi", "b04+b08"
+                ]
+            )
+            if is_ndvi_claim:
+                # 1. Out-of-bounds or non-finite NDVI values asserted in text
+                ndvi_val_matches = re.findall(r'ndvi\s*(?:is|=|of|value\s*(?:is|=|of)?|score\s*(?:is|=|of)?)\s*[:=]?\s*([+-]?\d+(?:\.\d+)?)', c_text_lower)
+                for nv_str in ndvi_val_matches:
+                    try:
+                        nv = float(nv_str)
+                        if nv < -1.0 or nv > 1.0:
+                            msg = f"Claim asserts NDVI value {nv} outside physical bounds [-1.0, 1.0]."
+                            failures.append(msg)
+                            contradictions.append(msg)
+                            c_status = "contradicted"
+                            c_reason = msg
+                    except ValueError:
+                        pass
+
+                # 2. Asserting NDVI in percentage or reflectance units in claim text
+                if (re.search(r'ndvi\s*(?:is|=|of)?\s*[+-]?\d+(?:\.\d+)?\s*(?:%|percent|percentage)', c_text_lower) or
+                    re.search(r'ndvi\s*(?:is|=|of)?\s*[+-]?\d+(?:\.\d+)?\s*(?:reflectance|surface reflectance)', c_text_lower)):
+                    msg = "Claim reports NDVI as percentage or reflectance rather than unitless ratio."
+                    failures.append(msg)
+                    contradictions.append(msg)
+                    c_status = "contradicted"
+                    c_reason = msg
+
+                # 3 & 4 & 5. Genuine NDVI claims require B04, B08, and SCL provenance; reject RGB-only pseudo-NDVI
+                is_genuine_or_calibrated_claim = any(
+                    t in c_text_lower for t in [
+                        "genuine ndvi", "calibrated ndvi", "sentinel-2 ndvi", "b04", "b08",
+                        "surface-reflectance ndvi", "surface reflectance ndvi", "true ndvi", "measured ndvi"
+                    ]
+                ) or ("ndvi" in c_text_lower and not any(t in c_text_lower for t in ["pseudo", "heuristic", "rgb visual", "visual approximation", "pseudo-ndvi"]))
+
+                is_rgb_only = False
+                has_b04 = False
+                has_b08 = False
+                has_scl = False
+
+                for asset in evidence_package.source_assets:
+                    cat = str(asset.get("asset_category", "")).lower()
+                    aid = str(asset.get("id", "")).lower()
+                    desc = str(asset.get("description", "")).lower()
+                    key = str(asset.get("asset_key", "")).lower()
+                    if "rgb" in cat or "visual" in cat or "rgb_visual" in aid or "visual" in aid:
+                        is_rgb_only = True
+                    if "b04" in aid or "b04" in key or "red" in key or "b04" in desc:
+                        has_b04 = True
+                    if "b08" in aid or "b08" in key or "nir" in key or "b08" in desc:
+                        has_b08 = True
+                    if "scl" in aid or "scl" in key or "scl" in desc:
+                        has_scl = True
+
+                for art in evidence_package.evidence_artifacts:
+                    art_id_l = art.artifact_id.lower()
+                    art_type_l = (art.artifact_type or "").lower()
+                    art_title_l = (art.title or "").lower()
+                    if "b04" in art_id_l or "b04" in art_title_l or "red" in art_title_l:
+                        has_b04 = True
+                    if "b08" in art_id_l or "b08" in art_title_l or "nir" in art_title_l:
+                        has_b08 = True
+                    if "scl" in art_id_l or "scl" in art_title_l or "quality_mask" in art_id_l:
+                        has_scl = True
+                    if "pseudo" in art_id_l or "pseudo" in art_title_l or "rgb_ndvi" in art_id_l or "visual" in art_type_l:
+                        is_rgb_only = True
+
+                q_data = evidence_package.quality_screening or {}
+                if isinstance(q_data, dict):
+                    if q_data.get("optical") or q_data.get("scl") or "clear_mask" in q_data or q_data.get("status") in ("evaluated", "screened") or q_data.get("is_evaluated"):
+                        has_scl = True
+
+                for pm in evidence_package.physical_measurements:
+                    if "b04" in pm.name.lower() or "red" in pm.name.lower():
+                        has_b04 = True
+                    if "b08" in pm.name.lower() or "nir" in pm.name.lower():
+                        has_b08 = True
+                    if "scl" in pm.mask_applied.lower() or "quality" in pm.mask_applied.lower():
+                        has_scl = True
+
+                if is_genuine_or_calibrated_claim:
+                    if is_rgb_only and not (has_b04 and has_b08):
+                        msg = "RGB-only inputs cannot substantiate claims of genuine calibrated NDVI."
+                        failures.append(msg)
+                        contradictions.append(msg)
+                        c_status = "unsupported"
+                        c_reason = msg
+                    elif not (has_b04 and has_b08):
+                        msg = "Genuine NDVI claims require evidence references and provenance for both B04 (Red) and B08 (NIR) inputs."
+                        failures.append(msg)
+                        contradictions.append(msg)
+                        c_status = "unsupported"
+                        c_reason = msg
+                    elif not has_scl:
+                        msg = "Genuine NDVI analysis requires provenance identifying the relevant Scene Classification Layer (SCL) quality mask."
+                        failures.append(msg)
+                        contradictions.append(msg)
+                        c_status = "unsupported"
+                        c_reason = msg
+
+                # 6. Zero valid pixels check
+                if evidence_package.valid_pixel_count == 0 or (hasattr(evidence_package, "valid_pixel_percentage") and evidence_package.valid_pixel_percentage == 0.0 and evidence_package.total_pixel_count and evidence_package.total_pixel_count > 0):
+                    has_numeric_assertion = bool(
+                        re.search(r'ndvi\s*(?:is|=|of)?\s*[+-]?\d+(?:\.\d+)?', c_text_lower) or
+                        re.search(r'(?:mean|average|p90)\s*ndvi', c_text_lower) or
+                        "vegetation coverage" in c_text_lower
+                    )
+                    is_disclaiming_zero = any(t in c_text_lower for t in ["zero valid", "no valid pixels", "unsupported", "cannot be calculated", "none"])
+                    if has_numeric_assertion and not is_disclaiming_zero:
+                        msg = "A zero-valid-pixel result cannot support numeric NDVI statistics or vegetation claims."
+                        failures.append(msg)
+                        contradictions.append(msg)
+                        c_status = "unsupported"
+                        c_reason = msg
+
             evaluated_claims.append(ClaimVerificationItem(
                 claim_text=claim.claim_text,
                 claim_type=claim.claim_type,
@@ -595,6 +741,35 @@ class EvidencePackageBuilder:
                 calibration_quantity="boa_surface_reflectance"
             ))
 
+        # Optical Calibrated NDVI (Sentinel-2 B04 + B08)
+        ndvi_info = meta.get("ndvi_result") or meta.get("ndvi") or opt_sar_meta.get("ndvi") or opt_sar_meta.get("ndvi_result")
+        if isinstance(ndvi_info, dict):
+            ndvi_mean = ndvi_info.get("ndvi_mean")
+            ndvi_p90 = ndvi_info.get("ndvi_p90")
+            ndvi_status = ndvi_info.get("status")
+            scl_applied = bool(ndvi_info.get("validity_policy", {}).get("scl_mask_applied") or opt_screened)
+            ndvi_mask_name = "scl_screened_valid_mask" if scl_applied else "valid_pixel_mask"
+
+            if ndvi_status != "unsupported_zero_valid_pixels":
+                if ndvi_mean is not None:
+                    physical_measurements.append(PhysicalMeasurementItem(
+                        name="optical_mean_ndvi",
+                        value=ndvi_mean,
+                        unit="unitless ratio [-1, 1]",
+                        statistic_type="mean",
+                        mask_applied=ndvi_mask_name,
+                        calibration_quantity="normalized_difference_vegetation_index"
+                    ))
+                if ndvi_p90 is not None:
+                    physical_measurements.append(PhysicalMeasurementItem(
+                        name="optical_p90_ndvi",
+                        value=ndvi_p90,
+                        unit="unitless ratio [-1, 1]",
+                        statistic_type="90th percentile",
+                        mask_applied=ndvi_mask_name,
+                        calibration_quantity="normalized_difference_vegetation_index"
+                    ))
+
         # SAR linear power
         sar_lin = opt_sar_meta.get("sar_mean_linear_power")
         if sar_lin is not None:
@@ -686,8 +861,33 @@ class EvidencePackageBuilder:
                     limitations="Preliminary scene-normalized empirical heuristic proxy; not validated ground-truth."
                 ))
 
+        if isinstance(ndvi_info, dict) and ndvi_info.get("status") != "unsupported_zero_valid_pixels":
+            veg_pct = ndvi_info.get("vegetation_coverage_pct")
+            veg_px = ndvi_info.get("vegetation_pixel_count")
+            if veg_pct is not None:
+                heuristics.append(HeuristicIndicatorItem(
+                    name="calibrated_vegetation_coverage",
+                    percentage=float(veg_pct),
+                    pixel_count=int(veg_px or 0),
+                    definition="Valid pixels with calibrated Sentinel-2 B04+B08 NDVI >= 0.40",
+                    is_certified_classification=False,
+                    limitations="Vegetation proxy based on BOA surface reflectance NDVI threshold 0.40; not certified species classification."
+                ))
+
         # 9. Evidence Artifacts
         evidence_artifacts = []
+        if isinstance(ndvi_info, dict) and ndvi_info.get("preview_base64"):
+            evidence_artifacts.append(EvidenceArtifactItem(
+                artifact_id="ev_optical_ndvi_map",
+                artifact_type="raster_index",
+                title="Sentinel-2 Calibrated NDVI Map",
+                description="Calibrated Sentinel-2 B04/B08 NDVI surface reflectance map screened with SCL mask",
+                statistics={
+                    "mean": ndvi_info.get("ndvi_mean"),
+                    "p90": ndvi_info.get("ndvi_p90"),
+                    "vegetation_coverage_pct": ndvi_info.get("vegetation_coverage_pct")
+                }
+            ))
         raw_evidence = data.get("evidence", [])
         for ev in raw_evidence:
             if isinstance(ev, dict):

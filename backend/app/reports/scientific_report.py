@@ -173,6 +173,47 @@ class ScientificReportBuilder:
         if has_optical and (not quality_screening or not quality_screening.get("optical", {}).get("screened")):
             unavailable_fields.append("optical_radiometric_quality_screening: SCL asset not acquired or screening unperformed")
 
+        # Extract calibrated Sentinel-2 B04+B08 NDVI provenance
+        ndvi_res = metadata.get("ndvi_result") or metadata.get("ndvi") or (metadata.get("optical_sar_joint", {}).get("ndvi") if isinstance(metadata.get("optical_sar_joint"), dict) else None)
+        ndvi_mean = None
+        ndvi_p90 = None
+        veg_pct = None
+        veg_thresh = None
+        scale_fac = None
+        scl_policy = None
+        b04_id = None
+        b08_id = None
+        scl_id = None
+        ndvi_status = None
+
+        if isinstance(ndvi_res, dict):
+            ndvi_mean = ndvi_res.get("ndvi_mean")
+            ndvi_p90 = ndvi_res.get("ndvi_p90")
+            veg_pct = ndvi_res.get("vegetation_coverage_pct")
+            veg_thresh = ndvi_res.get("vegetation_threshold", 0.40)
+            scale_fac = ndvi_res.get("calibration", {}).get("scale_factor", 10000.0)
+            scl_policy = ndvi_res.get("validity_policy", {}).get("scl_mask_applied", "SCL screening applied: classes 0, 1, 3, 8, 9, 10 excluded")
+            b04_id = ndvi_res.get("provenance", {}).get("b04_asset_id") or "B04"
+            b08_id = ndvi_res.get("provenance", {}).get("b08_asset_id") or "B08"
+            scl_id = ndvi_res.get("provenance", {}).get("scl_asset_id") or "SCL"
+            ndvi_status = ndvi_res.get("status")
+        elif evidence_package:
+            for pm in evidence_package.physical_measurements:
+                if pm.name == "optical_mean_ndvi" and pm.value is not None:
+                    try:
+                        ndvi_mean = float(pm.value)
+                    except (ValueError, TypeError):
+                        pass
+                if pm.name == "optical_p90_ndvi" and pm.value is not None:
+                    try:
+                        ndvi_p90 = float(pm.value)
+                    except (ValueError, TypeError):
+                        pass
+            for hi in evidence_package.heuristic_indicators:
+                if hi.name == "calibrated_vegetation_coverage":
+                    veg_pct = hi.percentage
+                    veg_thresh = 0.40
+
         provenance = ReportProvenanceSchema(
             analysis_id=analysis_id,
             task=task,
@@ -198,6 +239,16 @@ class ScientificReportBuilder:
             fallback_used=fallback_used,
             is_trained_model=is_trained_model,
             model_status=model_status,
+            ndvi_mean=ndvi_mean,
+            ndvi_p90=ndvi_p90,
+            vegetation_coverage_pct=veg_pct,
+            ndvi_vegetation_threshold=veg_thresh,
+            reflectance_scale_factor=scale_fac,
+            scl_masking_policy=str(scl_policy) if scl_policy else None,
+            b04_asset_id=b04_id,
+            b08_asset_id=b08_id,
+            scl_asset_id=scl_id,
+            ndvi_status=ndvi_status,
         )
 
         # 3. Physical Measurements
@@ -314,6 +365,9 @@ class ScientificReportBuilder:
         if quality_screening and "RADIOMETRIC_QUALITY_SCREENING_APPLIED" not in pipeline_steps:
             pipeline_steps.append("RADIOMETRIC_QUALITY_SCREENING_APPLIED")
 
+        if (getattr(provenance, "ndvi_mean", None) is not None or getattr(provenance, "ndvi_status", None)) and "SENTINEL2_CALIBRATED_NDVI_COMPUTED" not in pipeline_steps:
+            pipeline_steps.append("SENTINEL2_CALIBRATED_NDVI_COMPUTED")
+
         reproducibility = ReportReproducibilitySchema(
             software_version="SatQuery-AI v1.0.0 (ISRO PS 26167 Stage 8 Scientific Reporting)",
             provider_config={
@@ -372,6 +426,26 @@ def generate_scientific_markdown(report: ScientificReportSchema) -> str:
         lines.append(f"| **Quality Screening** | `Applied` | **Clear Quality Pixels** | `{prov.quality_clearance_percentage or 'N/A'}%` (Excluded: `{prov.excluded_quality_pixel_count or 0}` px) |")
     lines.append(f"| **Provider Engine** | `{prov.provider_name}` | **Model Status** | `{prov.model_status or 'baseline'}` (Fallback: `{prov.fallback_used}`) |")
     lines.append(f"| **Sensor Identities** | `{', '.join(prov.sensor_identities) or 'None'}` | **Acquisition Datetimes** | `{', '.join(prov.acquisition_timestamps) or 'None'}` |")
+
+    if prov.ndvi_mean is not None or prov.ndvi_status:
+        lines.append("")
+        lines.append("### Calibrated Sentinel-2 B04+B08 NDVI Provenance")
+        lines.append("")
+        lines.append("| Metric / Parameter | Value | Description / Standard |")
+        lines.append("| :--- | :--- | :--- |")
+        if prov.ndvi_mean is not None:
+            lines.append(f"| **Mean NDVI** | `{prov.ndvi_mean}` | Unitless ratio [-1.0, 1.0] across valid screened pixels |")
+        if prov.ndvi_p90 is not None:
+            lines.append(f"| **90th-Percentile NDVI (p90)** | `{prov.ndvi_p90}` | Unitless ratio [-1.0, 1.0] representing peak vegetation vitality |")
+        if prov.vegetation_coverage_pct is not None:
+            lines.append(f"| **Vegetation Coverage** | `{prov.vegetation_coverage_pct}%` | Valid pixels exceeding calibrated NDVI threshold `{prov.ndvi_vegetation_threshold or 0.40}` |")
+        if prov.reflectance_scale_factor:
+            lines.append(f"| **Calibration Scale** | `{prov.reflectance_scale_factor}` | Integer reflectance divisor (BOA surface reflectance DN / 10000.0) |")
+        if prov.scl_masking_policy:
+            lines.append(f"| **Quality Mask Policy** | `{prov.scl_masking_policy}` | Classes 0, 1, 3, 8, 9, 10 excluded; invalid denominator masked |")
+        if prov.ndvi_status == "unsupported_zero_valid_pixels":
+            lines.append(f"| **Calculation Status** | `unsupported_zero_valid_pixels` | Zero valid clear pixels observed; numerical NDVI statistics suppressed |")
+
     lines.append("")
 
     # Executive Synthesis

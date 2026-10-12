@@ -142,6 +142,16 @@ export interface ReportProvenance {
   fallback_used: boolean;
   is_trained_model: boolean;
   model_status?: string | null;
+  ndvi_mean?: number | null;
+  ndvi_p90?: number | null;
+  vegetation_coverage_pct?: number | null;
+  ndvi_vegetation_threshold?: number | null;
+  reflectance_scale_factor?: number | null;
+  scl_masking_policy?: string | null;
+  b04_asset_id?: string | null;
+  b08_asset_id?: string | null;
+  scl_asset_id?: string | null;
+  ndvi_status?: string | null;
 }
 
 export interface ReportVerificationSummary {
@@ -392,6 +402,54 @@ export interface STACRetrieveResponsePayload {
   quality_screening?: Record<string, any>;
   validation?: STACValidateAssetResponsePayload;
   provenance?: Record<string, any>;
+  error?: string;
+}
+
+export interface NDVIResultPayload {
+  status: string;
+  ndvi_mean?: number | null;
+  ndvi_p90?: number | null;
+  ndvi_median?: number | null;
+  vegetation_coverage_pct?: number | null;
+  valid_pixel_count?: number | null;
+  total_pixel_count?: number | null;
+  masked_pixel_count?: number | null;
+  vegetation_pixel_count?: number | null;
+  vegetation_threshold?: number;
+  preview_base64?: string | null;
+  calibration?: Record<string, any>;
+  validity_policy?: Record<string, any>;
+  scl_screening?: Record<string, any>;
+  error?: string | null;
+}
+
+export interface STACCompositeRetrieveRequestPayload {
+  scene_id: string;
+  aoi_bbox: [number, number, number, number] | number[];
+  bands?: string[];
+  include_scl?: boolean;
+  collection?: string;
+  target_role?: string;
+  max_bytes?: number;
+  compute_ndvi?: boolean;
+}
+
+export interface STACCompositeRetrieveResponsePayload {
+  status: 'success' | 'error';
+  scene_id: string;
+  collection: string;
+  category: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  data_base64: string;
+  metadata: Record<string, any>;
+  scientific_limitations: string[];
+  provenance: Record<string, any>;
+  bands_retrieved: string[];
+  ndvi_result?: NDVIResultPayload | null;
+  quality_screening?: Record<string, any> | null;
+  validation?: STACValidateAssetResponsePayload;
   error?: string;
 }
 

@@ -8,6 +8,8 @@ from app.schemas.acquisition import (
     STACRetrieveRequest, 
     STACRetrieveResponse,
     STACWindowedRetrieveRequest,
+    STACCompositeRetrieveRequest,
+    STACCompositeRetrieveResponse,
     STACValidateAssetRequest,
     STACValidateAssetResponse,
     STACTemporalPairValidateRequest,
@@ -74,6 +76,26 @@ def retrieve_stac_windowed_asset(request: STACWindowedRetrieveRequest):
         raise
     except Exception as e:
         logger.error(f"Error retrieving windowed STAC asset: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/acquisition/retrieve-composite", response_model=STACCompositeRetrieveResponse)
+def retrieve_stac_composite_asset(request: STACCompositeRetrieveRequest):
+    """
+    Stage 12: Safely retrieves multi-asset Sentinel-2 windowed rasters (B04 Red, B08 NIR, and SCL)
+    belonging to the exact same STAC Item and acquisition time under a cumulative <= 20 MB budget cap.
+    Aligns grids, computes calibrated surface reflectance NDVI with SCL atmospheric screening,
+    and returns a composite GeoTIFF with full physical provenance.
+    """
+    try:
+        resp = stac_service.retrieve_composite_window(request)
+        if resp.status == "error":
+            raise HTTPException(status_code=400, detail=resp.error or "Failed to retrieve composite window.")
+        return resp
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving composite STAC asset: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

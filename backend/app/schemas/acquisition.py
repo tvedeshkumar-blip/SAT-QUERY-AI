@@ -167,6 +167,70 @@ class STACRetrieveResponse(BaseModel):
     error: Optional[str] = None
 
 
+class STACCompositeRetrieveRequest(BaseModel):
+    scene_id: str = Field(..., description="ID of the Sentinel-2 scene to retrieve")
+    aoi_bbox: List[float] = Field(
+        ...,
+        description="Bounding box in EPSG:4326 [min_lon, min_lat, max_lon, max_lat]",
+        min_length=4,
+        max_length=4
+    )
+    bands: List[str] = Field(
+        default_factory=lambda: ["B04", "B08"],
+        description="Spectral band asset keys to retrieve (e.g. ['B04', 'B08'] or ['red', 'nir'])"
+    )
+    include_scl: bool = Field(default=True, description="Whether to also retrieve and evaluate companion SCL quality mask")
+    collection: Optional[str] = Field(default="sentinel-2-l2a", description="Collection name if known")
+    target_role: Optional[str] = Field(default="primary", description="Workspace role: primary, secondary, optical")
+    max_bytes: Optional[int] = Field(None, description="Cumulative transfer budget cap <= 20 MB across all bands")
+    compute_ndvi: bool = Field(default=True, description="Whether to compute calibrated NDVI from acquired B04+B08 bands")
+
+    @field_validator("aoi_bbox")
+    @classmethod
+    def validate_aoi_bbox(cls, v: List[float]) -> List[float]:
+        if len(v) != 4:
+            raise ValueError("aoi_bbox must have exactly 4 coordinates [min_lon, min_lat, max_lon, max_lat]")
+        min_lon, min_lat, max_lon, max_lat = v
+        if min_lat >= max_lat:
+            raise ValueError("Invalid AOI bbox: min_lat cannot be greater than or equal to max_lat.")
+        if min_lon >= max_lon and not (min_lon > 0 and max_lon < 0):
+            raise ValueError("Invalid AOI bbox: min_lon cannot be greater than or equal to max_lon for standard bounding boxes.")
+        if not (-90.0 <= min_lat <= 90.0 and -90.0 <= max_lat <= 90.0):
+            raise ValueError("Latitude values must be between -90 and 90 degrees.")
+        if not (-180.0 <= min_lon <= 180.0 and -180.0 <= max_lon <= 180.0):
+            raise ValueError("Longitude values must be between -180 and 180 degrees.")
+        return v
+
+    @field_validator("max_bytes")
+    @classmethod
+    def validate_max_bytes(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None:
+            if v <= 0:
+                raise ValueError("max_bytes must be a positive integer greater than 0.")
+            if v > 20 * 1024 * 1024:
+                raise ValueError("max_bytes cannot exceed cumulative transfer budget cap of 20 MB (20971520 bytes).")
+        return v
+
+
+class STACCompositeRetrieveResponse(BaseModel):
+    status: str = Field(..., description="Retrieval status: 'success' or 'error'")
+    scene_id: str
+    collection: str = Field(default="sentinel-2-l2a")
+    category: str = Field(default="scientific_multispectral")
+    filename: str
+    mime_type: str = Field(default="image/tiff")
+    size_bytes: int
+    data_base64: str = Field(..., description="Base64 encoded composite GeoTIFF ready for display/workspace ingestion")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Extracted raster metadata across bands")
+    scientific_limitations: List[str] = Field(default_factory=list)
+    provenance: Dict[str, Any] = Field(default_factory=dict)
+    bands_retrieved: List[str] = Field(default_factory=list)
+    ndvi_result: Optional[Dict[str, Any]] = Field(default=None, description="Calibrated NDVI computation results if requested")
+    quality_screening: Optional[Dict[str, Any]] = Field(default=None, description="SCL quality screening evaluation")
+    validation: Optional[STACValidateAssetResponse] = None
+    error: Optional[str] = None
+
+
 class STACTemporalPairValidateRequest(BaseModel):
     t1_scene_id: Optional[str] = None
     t2_scene_id: Optional[str] = None

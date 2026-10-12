@@ -19,7 +19,8 @@ import {
   Clock,
   Layers,
   Radio,
-  Sun
+  Sun,
+  Sprout
 } from 'lucide-react';
 import { AnalysisResponse } from '../types';
 import { API_BASE } from '../services/api';
@@ -112,6 +113,11 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
     (response.reproducible_report?.provenance as any)?.quality_screening;
   const opticalQuality = qualityScreening?.optical;
   const sarQuality = qualityScreening?.sar;
+  const ndviResult = response.metadata?.ndvi_result ||
+    response.metadata?.calibrated_ndvi ||
+    ((response.reproducible_report?.provenance as any)?.ndvi_mean !== undefined ||
+     (response.reproducible_report?.provenance as any)?.ndvi_status ?
+      response.reproducible_report?.provenance : null);
 
   return (
     <div className="glass-panel rounded-2xl p-6 border border-slate-800 bg-slate-900/60 shadow-xl space-y-4">
@@ -469,6 +475,110 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Genuine Sentinel-2 B04 + B08 NDVI Telemetry Banner */}
+      {ndviResult && (
+        <div className="p-4 rounded-xl bg-slate-950/90 border border-emerald-800/60 space-y-3 text-xs font-mono">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-2">
+            <span className="text-emerald-400 font-bold flex items-center gap-1.5 uppercase tracking-wider">
+              <Sprout className="w-4 h-4 text-emerald-400" />
+              GENUINE SENTINEL-2 B04 + B08 CALIBRATED NDVI PIPELINE
+            </span>
+            <div className="flex items-center gap-1.5">
+              <span className={`px-2 py-0.5 rounded text-[10px] border ${
+                ndviResult.status === 'unsupported_zero_valid_pixels'
+                  ? 'bg-amber-950 text-amber-300 border-amber-800'
+                  : 'bg-emerald-950 text-emerald-300 border-emerald-800'
+              }`}>
+                {ndviResult.status === 'unsupported_zero_valid_pixels'
+                  ? 'ZERO VALID PIXELS'
+                  : 'BOA SURFACE REFLECTANCE'}
+              </span>
+              <span className="px-2 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-700 text-[10px]">
+                Red (B04) + NIR (B08)
+              </span>
+            </div>
+          </div>
+
+          {ndviResult.status === 'unsupported_zero_valid_pixels' ? (
+            <div className="p-2.5 rounded-lg bg-amber-950/30 border border-amber-800/50 text-[11px] text-amber-300 space-y-1">
+              <span className="font-bold flex items-center gap-1">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                NUMERIC NDVI STATISTICS SUPPRESSED (0 VALID CLEAR PIXELS)
+              </span>
+              <p className="text-amber-200/80 text-[10px] leading-relaxed">
+                All pixels in the requested spatial window were excluded due to cloud obstruction, cloud shadows, defective detectors, or missing data in the Scene Classification Layer (SCL). In accordance with Stage 12 scientific integrity standards, no fabricated numeric values are reported.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] text-slate-300">
+              <div className="p-2 rounded bg-slate-900/80 border border-slate-800">
+                <span className="text-slate-400 block text-[9px]">MEAN NDVI</span>
+                <span className="font-bold text-emerald-300 text-xs">
+                  {ndviResult.ndvi_mean !== null && ndviResult.ndvi_mean !== undefined
+                    ? Number(ndviResult.ndvi_mean).toFixed(4)
+                    : 'N/A'}
+                </span>
+                <span className="text-slate-500 block text-[8px]">Unitless [-1.0, 1.0]</span>
+              </div>
+              <div className="p-2 rounded bg-slate-900/80 border border-slate-800">
+                <span className="text-slate-400 block text-[9px]">90TH PERCENTILE (P90)</span>
+                <span className="font-bold text-teal-300 text-xs">
+                  {ndviResult.ndvi_p90 !== null && ndviResult.ndvi_p90 !== undefined
+                    ? Number(ndviResult.ndvi_p90).toFixed(4)
+                    : 'N/A'}
+                </span>
+                <span className="text-slate-500 block text-[8px]">Peak Canopy Ratio</span>
+              </div>
+              <div className="p-2 rounded bg-slate-900/80 border border-slate-800">
+                <span className="text-slate-400 block text-[9px]">VEGETATION COVERAGE</span>
+                <span className="font-bold text-emerald-400 text-xs">
+                  {ndviResult.vegetation_coverage_pct !== null && ndviResult.vegetation_coverage_pct !== undefined
+                    ? `${Number(ndviResult.vegetation_coverage_pct).toFixed(1)}%`
+                    : 'N/A'}
+                </span>
+                <span className="text-slate-500 block text-[8px]">Threshold &ge; {ndviResult.vegetation_threshold || 0.40}</span>
+              </div>
+              <div className="p-2 rounded bg-slate-900/80 border border-slate-800">
+                <span className="text-slate-400 block text-[9px]">VALID CLEAR PIXELS</span>
+                <span className="font-bold text-slate-100 text-xs">
+                  {ndviResult.valid_pixel_count !== null && ndviResult.valid_pixel_count !== undefined
+                    ? ndviResult.valid_pixel_count.toLocaleString()
+                    : 'Masked'}
+                </span>
+                <span className="text-slate-500 block text-[8px]">
+                  Total: {ndviResult.total_pixel_count ? ndviResult.total_pixel_count.toLocaleString() : 'N/A'} px
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* SCL Quality Screening Provenance & Preview */}
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800/60 text-[10px] text-slate-400">
+            <div>
+              <span className="text-slate-500">Quality Policy: </span>
+              <span className="text-slate-300">SCL Cloud/Shadow Filter (Classes 0, 1, 3, 8, 9, 10 Excluded)</span>
+            </div>
+            <div>
+              <span className="text-slate-500">Scale: </span>
+              <span className="text-slate-300">Integer BOA Factor (DN / 10,000)</span>
+            </div>
+          </div>
+
+          {ndviResult.preview_base64 && (
+            <div className="mt-2 p-2 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1.5">
+              <span className="text-slate-300 text-[10px] font-bold block">
+                COLORIZED NDVI SURFACE MAP (VALID SCREENED PIXELS ONLY):
+              </span>
+              <img
+                src={ndviResult.preview_base64.startsWith('data:') ? ndviResult.preview_base64 : `data:image/png;base64,${ndviResult.preview_base64}`}
+                alt="Calibrated NDVI Surface Map"
+                className="max-h-48 rounded border border-slate-700 mx-auto object-contain"
+              />
+            </div>
+          )}
         </div>
       )}
 
