@@ -33,3 +33,5 @@ models/weights/
 *.bin
 *.safetensors
 *.ckpt
+
+.venv/
