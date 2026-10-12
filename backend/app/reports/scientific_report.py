@@ -137,8 +137,8 @@ class ScientificReportBuilder:
         quality_clearance_percentage = None
 
         if quality_screening and isinstance(quality_screening, dict):
-            opt_q = quality_screening.get("optical", {})
-            if opt_q:
+            opt_q = quality_screening.get("optical")
+            if isinstance(opt_q, dict):
                 observed_pixel_count = opt_q.get("observed_pixel_count")
                 excluded_quality_pixel_count = opt_q.get("excluded_pixel_count")
                 clr_frac = opt_q.get("quality_clearance_fraction")
@@ -170,7 +170,8 @@ class ScientificReportBuilder:
         has_optical = any("optical" in str(s).lower() or "sentinel-2" in str(s).lower() for s in sensor_identities)
         if not has_optical and evidence_package:
             has_optical = any("optical" in pm.name.lower() for pm in evidence_package.physical_measurements)
-        if has_optical and (not quality_screening or not quality_screening.get("optical", {}).get("screened")):
+        opt_screen_done = bool(quality_screening and isinstance(quality_screening.get("optical"), dict) and quality_screening["optical"].get("screened"))
+        if has_optical and not opt_screen_done:
             unavailable_fields.append("optical_radiometric_quality_screening: SCL asset not acquired or screening unperformed")
 
         # Extract calibrated Sentinel-2 B04+B08 NDVI provenance

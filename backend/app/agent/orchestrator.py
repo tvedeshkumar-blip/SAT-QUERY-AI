@@ -96,12 +96,13 @@ class QueryParser:
             except ValueError:
                 pass
 
-        if not bbox:
-            for name, box in GAZETTEER.items():
-                if name in q_lower:
+        # Check gazetteer names to resolve location_name (and bbox if not already explicitly specified)
+        for name, box in GAZETTEER.items():
+            if name in q_lower:
+                if not bbox:
                     bbox = box
-                    location_name = name.title()
-                    break
+                location_name = name.title()
+                break
 
         # 2. Temporal Resolution
         start_date = None
@@ -195,7 +196,8 @@ class QueryParser:
             "is_fusion": is_fusion,
             "is_ambiguous": is_ambiguous,
             "missing_parameters": missing_params,
-            "clarification_prompt": clarification_prompt
+            "clarification_prompt": clarification_prompt,
+            "raw_query": query
         }
 
 
@@ -555,8 +557,15 @@ class MultiStepOrchestrator:
                         })
                 if tool_name == "optical_sar_fusion" and step_status == "completed":
                     analysis_metadata["optical_sar_fusion"] = tool_out
-                    fused_b64 = tool_out.get("fused_preview_base64") or tool_out.get("colorized_preview_base64") or tool_out.get("preview_base64")
-                    if fused_b64:
+                    if tool_out.get("evidence") and isinstance(tool_out["evidence"], list):
+                        evidence_items.extend(tool_out["evidence"])
+                    fused_b64 = (
+                        tool_out.get("fused_evidence")
+                        or tool_out.get("fused_preview_base64")
+                        or tool_out.get("colorized_preview_base64")
+                        or tool_out.get("preview_base64")
+                    )
+                    if fused_b64 and not any(e.get("type") == "fused" for e in evidence_items):
                         evidence_items.append({
                             "id": "ev_optical_sar_fused_composite",
                             "type": "fused",
@@ -685,13 +694,36 @@ class MultiStepOrchestrator:
                     status="supported"
                 ))
             else:
-                if dprvi.get("status") in ("blocked", "failed", "error"):
+                d_status = dprvi.get("status") if dprvi else None
+                if not d_status:
+                    for step in reversed(execution_steps):
+                        s_status = step.get("status")
+                        s_err = (step.get("error") or "").lower()
+                        if s_status == "unsupported" or (s_err and "unsupported" in s_err and "acquisition" not in s_err):
+                            d_status = "unsupported"
+                            break
+                if d_status == "unsupported_zero_valid_pixels":
+                    overall_status = "unsupported"
+                    answer = dprvi.get("summary") or "No valid radar pixels found. DpRVI calculation unsupported."
+                    confidence = None
+                    confidence_label = "Zero Valid Pixels"
+                elif d_status and d_status.startswith("unsupported"):
+                    overall_status = "unsupported"
+                    answer = dprvi.get("summary") or dprvi.get("error") or "Sentinel-1 RTC dual-polarization analysis unsupported."
+                    confidence = None
+                    confidence_label = "Unsupported Analysis"
+                else:
                     overall_status = "failed"
-                    answer = f"Sentinel-1 RTC dual-polarization analysis failed: {dprvi.get('error', 'Radar imagery unavailable.')}"
                     confidence = None
                     confidence_label = "Acquisition Failed"
-                else:
-                    answer = dprvi.get("summary", "SAR analysis complete.")
+                    err_detail = dprvi.get("error")
+                    if not err_detail and execution_steps:
+                        for s in reversed(execution_steps):
+                            if s.get("status") in ("failed", "blocked") and s.get("error"):
+                                err_detail = s["error"]
+                                break
+                    err_msg = err_detail or "Radar imagery unavailable or STAC retrieval failed."
+                    answer = f"Sentinel-1 RTC dual-polarization analysis failed: {err_msg}"
 
         elif task == "sentinel2_ndvi":
             ndvi = analysis_metadata.get("ndvi_result", {})
@@ -704,13 +736,36 @@ class MultiStepOrchestrator:
                     status="supported"
                 ))
             else:
-                if ndvi.get("status") in ("blocked", "failed", "error"):
+                n_status = ndvi.get("status") if ndvi else None
+                if not n_status:
+                    for step in reversed(execution_steps):
+                        s_status = step.get("status")
+                        s_err = (step.get("error") or "").lower()
+                        if s_status == "unsupported" or (s_err and "unsupported" in s_err and "acquisition" not in s_err):
+                            n_status = "unsupported"
+                            break
+                if n_status == "unsupported_zero_valid_pixels":
+                    overall_status = "unsupported"
+                    answer = ndvi.get("summary") or "No valid clear-sky pixels found after applying SCL quality mask. NDVI calculation unsupported."
+                    confidence = None
+                    confidence_label = "Zero Valid Pixels"
+                elif n_status and n_status.startswith("unsupported"):
+                    overall_status = "unsupported"
+                    answer = ndvi.get("summary") or ndvi.get("error") or "Sentinel-2 NDVI analysis unsupported."
+                    confidence = None
+                    confidence_label = "Unsupported Analysis"
+                else:
                     overall_status = "failed"
-                    answer = f"Sentinel-2 NDVI analysis failed: {ndvi.get('error', 'Optical imagery unavailable.')}"
                     confidence = None
                     confidence_label = "Acquisition Failed"
-                else:
-                    answer = ndvi.get("summary", "Optical NDVI analysis complete.")
+                    err_detail = ndvi.get("error")
+                    if not err_detail and execution_steps:
+                        for s in reversed(execution_steps):
+                            if s.get("status") in ("failed", "blocked") and s.get("error"):
+                                err_detail = s["error"]
+                                break
+                    err_msg = err_detail or "Optical imagery unavailable or STAC retrieval failed."
+                    answer = f"Sentinel-2 NDVI analysis failed: {err_msg}"
         else:
             answer = (analysis_result or {}).get("answer", f"Multi-step analysis for '{task}' completed successfully.")
 
@@ -864,10 +919,13 @@ class MultiStepOrchestrator:
                 "description": "Compute bi-temporal Sentinel-1 RTC SAR backscatter and DpRVI change"
             })
         elif task == "optical_sar":
+            # For local samples, retrieve optical and SAR from local_sample_temporal_t1_pre_monsoon
+            # so both assets share the identical coordinate reference system and bounding box
+            sample_id = "local_sample_temporal_t1_pre_monsoon"
             steps.append({
                 "tool": "stac_composite_retrieve",
                 "args": {
-                    "scene_id": "local_sample_cartosat_optical_bengaluru" if not has_images else "workspace_img_1",
+                    "scene_id": sample_id if not has_images else "workspace_img_1",
                     "aoi_bbox": bbox,
                     "collection": "sentinel-2-l2a",
                     "bands": ["b04", "b08", "scl"],
@@ -879,7 +937,7 @@ class MultiStepOrchestrator:
             steps.append({
                 "tool": "stac_composite_retrieve",
                 "args": {
-                    "scene_id": "local_sample_risat_sar_mumbai" if not has_images else "workspace_img_2",
+                    "scene_id": sample_id if not has_images else "workspace_img_2",
                     "aoi_bbox": bbox,
                     "collection": "sentinel-1-rtc",
                     "bands": ["vv", "vh"],

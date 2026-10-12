@@ -120,6 +120,10 @@ class ModelRegistry:
             model.load()
         return model
 
+    def get(self, task_type: str) -> BaseModel:
+        """Alias for get_model for dictionary-like lookup."""
+        return self.get_model(task_type)
+
     def list_models(self) -> Dict[str, str]:
         return {task: model.model_name for task, model in self._models.items()}
 

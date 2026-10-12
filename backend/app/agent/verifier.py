@@ -1020,8 +1020,8 @@ class EvidencePackageBuilder:
         q_screen = meta.get("quality_screening") or opt_sar_meta.get("quality_screening")
         if not q_screen and isinstance(opt_chg_info, dict) and opt_chg_info.get("scl_filtering_applied"):
             q_screen = {"optical": {"screened": True, "method": "scl_atmospheric_filtering"}, "status": "evaluated", "is_evaluated": True}
-        opt_screened = bool(q_screen and q_screen.get("optical", {}).get("screened"))
-        sar_screened = bool(q_screen and q_screen.get("sar", {}).get("screened"))
+        opt_screened = bool(q_screen and isinstance(q_screen.get("optical"), dict) and q_screen["optical"].get("screened"))
+        sar_screened = bool(q_screen and isinstance(q_screen.get("sar"), dict) and q_screen["sar"].get("screened"))
         opt_mask_name = "joint_screened_quality_mask" if opt_screened else "joint_valid_mask"
         sar_mask_name = "joint_screened_quality_mask" if sar_screened else "joint_valid_mask"
 

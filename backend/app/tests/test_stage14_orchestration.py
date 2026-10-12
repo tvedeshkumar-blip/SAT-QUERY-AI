@@ -366,3 +366,353 @@ def test_api_analyze_orchestration_full_execution():
     assert data["mode"] == "orchestration"
     assert data["trace"] is not None
     assert len(data["trace"]["steps"]) >= 3
+    # Priority 3: API Trace contract survives serialization
+    assert data["trace"]["execution_steps"] is not None
+    assert len(data["trace"]["execution_steps"]) >= 1
+    assert data["trace"]["cumulative_transfer_bytes"] is not None
+    assert data["trace"]["transfer_budget_bytes"] is not None
+    assert data["trace"]["cumulative_transfer_bytes"] <= data["trace"]["transfer_budget_bytes"]
+
+
+# ============================================================================
+# 7. Priority 1 & 2 & 5 Remediation Tests
+# ============================================================================
+
+def test_failed_retrieval_blocks_downstream_temporal_analysis_and_prevents_fabrication(monkeypatch):
+    """Verify that failed retrieval halts temporal analysis and prevents dummy array fabrication."""
+    orchestrator = MultiStepOrchestrator()
+
+    # Monkeypatch stac_composite_retrieve tool to simulate acquisition failure
+    from app.agent.tools import tool_registry
+    original_tool = tool_registry.get("stac_composite_retrieve")
+
+    class FailingRetrieveTool:
+        def __init__(self):
+            self.name = "stac_composite_retrieve"
+            self.description = "Failing mock"
+            self.category = "acquisition"
+        def run(self, **kwargs):
+            return {
+                "status": "error",
+                "scene_id": kwargs.get("scene_id", "test"),
+                "error": "STAC connection timed out; unable to read COG assets",
+                "array": None,
+                "data_base64": None,
+                "size_bytes": 0
+            }
+
+    monkeypatch.setattr(tool_registry, "_tools", {**tool_registry._tools, "stac_composite_retrieve": FailingRetrieveTool()})
+
+    res = orchestrator.orchestrate("Analyze Sentinel-2 NDVI change in Mumbai between 2023-01-01 and 2024-01-01")
+
+    # Verify overall workflow reports failure, NOT false success
+    assert res["status"] == "failed"
+    assert res["confidence"] is None
+    assert res["confidence_label"] == "Acquisition Failed"
+    assert "failed" in res["answer"].lower() or "blocked" in res["answer"].lower()
+
+    # Verify the dependent step is marked blocked
+    steps = res["trace"]["execution_steps"]
+    temporal_step = next((s for s in steps if s["tool"] == "temporal_optical_change"), None)
+    assert temporal_step is not None
+    assert temporal_step["status"] == "blocked"
+    assert "blocked" in temporal_step["error"].lower()
+
+    # Ensure no fabricated change stats exist
+    assert "temporal_optical_change" in res["metadata"]
+    assert res["metadata"]["temporal_optical_change"]["status"] == "blocked"
+
+
+def test_cumulative_transfer_budget_exhaustion_halts_cleanly():
+    """Verify that exhausting transfer budget halts execution cleanly without false success."""
+    orchestrator = MultiStepOrchestrator()
+    # Execute with an impossible 0 byte budget
+    res = orchestrator.orchestrate(
+        query="Analyze Sentinel-2 NDVI change in Mumbai between 2023-01-01 and 2024-01-01",
+        max_bytes=0
+    )
+
+    assert res["status"] == "budget_exhausted"
+    assert res["confidence"] is None
+    assert res["confidence_label"] == "Budget Exhausted"
+    assert "exhausted" in res["answer"].lower()
+    assert res["trace"]["cumulative_transfer_bytes"] <= res["trace"]["transfer_budget_bytes"]
+
+
+def test_optical_sar_joint_fusion_orchestration_flow():
+    """Verify end-to-end plan formulation and execution for optical + SAR cross-sensor query."""
+    orchestrator = MultiStepOrchestrator()
+    res = orchestrator.orchestrate(
+        query="Perform joint optical and radar fusion for Mumbai [72.75, 18.88, 73.05, 19.30]"
+    )
+
+    assert res["task"] == "optical_sar"
+    assert res["status"] == "success"
+    assert res["confidence"] is not None
+    assert "optical_sar_fusion" in res["trace"]["models_selected"]
+
+    # Verify execution DAG contains optical, SAR, and fusion steps
+    steps = res["trace"]["execution_steps"]
+    assert any(s["tool"] == "optical_sar_fusion" and s["status"] == "completed" for s in steps)
+
+    # Verify evidence items contain fused composite
+    assert any(e["type"] == "fused" for e in res["evidence"])
+
+
+def test_orchestrator_bounded_retry_loop(monkeypatch):
+    """Verify bounded retry loop executes up to MAX_TOOL_RETRIES and records retries in trace."""
+    orchestrator = MultiStepOrchestrator()
+    from app.agent.tools import tool_registry
+
+    call_count = {"count": 0}
+
+    class FlakyRetrieveTool:
+        def __init__(self):
+            self.name = "stac_composite_retrieve"
+            self.description = "Flaky mock"
+            self.category = "acquisition"
+        def run(self, **kwargs):
+            call_count["count"] += 1
+            if call_count["count"] == 1:
+                # Transient error on first call
+                return {"status": "error", "error": "Transient 503 Service Unavailable", "size_bytes": 0}
+            # Success on second call
+            dummy = np.full((10, 10, 3), 1000, dtype=np.float32)
+            return {
+                "status": "success",
+                "scene_id": kwargs.get("scene_id", "s2"),
+                "array": dummy,
+                "raster_metadata": {"width": 10, "height": 10},
+                "size_bytes": 1024,
+                "ndvi_result": {"ndvi_mean": 0.50, "status": "success"}
+            }
+
+    monkeypatch.setattr(tool_registry, "_tools", {**tool_registry._tools, "stac_composite_retrieve": FlakyRetrieveTool()})
+
+    res = orchestrator.orchestrate("Compute Sentinel-2 NDVI in Bengaluru [77.45, 12.85, 77.75, 13.15]")
+
+    # Verify retried tool succeeded
+    assert call_count["count"] >= 2
+    retry_steps = [s for s in res["trace"]["steps"] if "RETRY" in s.get("step", "")]
+    assert len(retry_steps) >= 1
+
+
+def test_temporal_sar_baseline_computed_on_joint_valid_mask():
+    """Verify that temporal SAR baseline DpRVI means are calculated on the joint valid-pixel mask."""
+    # Create two scenes with different nodata regions
+    vv1 = np.full((10, 10), 0.05, dtype=np.float32)
+    vh1 = np.full((10, 10), 0.0125, dtype=np.float32)  # q = 0.25 -> DpRVI = 0.5200
+    vv1[:3, :] = -9999.0  # Top 3 rows nodata in T1
+
+    vv2 = np.full((10, 10), 0.05, dtype=np.float32)
+    vh2 = np.full((10, 10), 0.010, dtype=np.float32)   # q = 0.20 -> DpRVI = 0.4444
+    vv2[:, :3] = -9999.0  # Left 3 cols nodata in T2
+
+    res = compute_temporal_sar_change(
+        t1_vv=vv1, t1_vh=vh1,
+        t2_vv=vv2, t2_vh=vh2,
+        t1_datetime="2023-01-01T00:00:00Z",
+        t2_datetime="2024-01-01T00:00:00Z"
+    )
+
+    assert res["status"] == "success"
+    # Joint mask is where both T1 and T2 are valid (7 * 7 = 49 pixels)
+    assert res["joint_valid_pixel_count"] == 49
+    # T1 and T2 baseline means should be computed across the joint valid mask
+    assert res["dprvi_t1_mean"] is not None
+    assert res["dprvi_t2_mean"] is not None
+    # Mean delta should equal t2_mean - t1_mean
+    expected_delta = round(res["dprvi_t2_mean"] - res["dprvi_t1_mean"], 4)
+    assert abs(res["delta_dprvi_mean"] - expected_delta) < 1e-3
+
+
+# ============================================================================
+# Stage 15.1: Targeted Retrieval-Failure & Unsupported-Outcome Regression Tests
+# ============================================================================
+
+def test_sentinel2_ndvi_retrieval_failure_after_retries(monkeypatch):
+    """Verify failed Sentinel-2 retrieval yields overall status 'failed', null confidence, and 'Acquisition Failed' label."""
+    orchestrator = MultiStepOrchestrator()
+
+    class S2FailingRetrieveTool:
+        def __init__(self):
+            self.name = "stac_composite_retrieve"
+            self.description = "Failing S2 retrieve mock"
+            self.category = "acquisition"
+        def run(self, **kwargs):
+            return {
+                "status": "error",
+                "scene_id": kwargs.get("scene_id", "test_s2"),
+                "error": "STAC connection timed out; unable to read COG assets",
+                "array": None,
+                "data_base64": None,
+                "size_bytes": 0
+            }
+
+    monkeypatch.setattr(tool_registry, "_tools", {**tool_registry._tools, "stac_composite_retrieve": S2FailingRetrieveTool()})
+
+    res = orchestrator.orchestrate("Compute Sentinel-2 NDVI in Bengaluru [77.45, 12.85, 77.75, 13.15]")
+
+    assert res["status"] == "failed"
+    assert res["confidence"] is None
+    assert res["confidence_label"] == "Acquisition Failed"
+    assert "failed" in res["answer"].lower()
+    assert "stac connection timed out" in res["answer"].lower()
+    assert res["verification"]["passed"] is False
+    assert not res["metadata"].get("ndvi_result")
+
+
+def test_sentinel1_dprvi_retrieval_failure_after_retries(monkeypatch):
+    """Verify failed Sentinel-1 retrieval yields overall status 'failed', null confidence, and 'Acquisition Failed' label."""
+    orchestrator = MultiStepOrchestrator()
+
+    class S1FailingRetrieveTool:
+        def __init__(self):
+            self.name = "stac_composite_retrieve"
+            self.description = "Failing S1 retrieve mock"
+            self.category = "acquisition"
+        def run(self, **kwargs):
+            return {
+                "status": "error",
+                "scene_id": kwargs.get("scene_id", "test_s1"),
+                "error": "STAC radar asset retrieval failed; S1 RTC unavailable",
+                "array": None,
+                "data_base64": None,
+                "size_bytes": 0
+            }
+
+    monkeypatch.setattr(tool_registry, "_tools", {**tool_registry._tools, "stac_composite_retrieve": S1FailingRetrieveTool()})
+
+    res = orchestrator.orchestrate("Compute Sentinel-1 RTC dual-pol DpRVI for Delhi [76.85, 28.40, 77.35, 28.88]")
+
+    assert res["status"] == "failed"
+    assert res["confidence"] is None
+    assert res["confidence_label"] == "Acquisition Failed"
+    assert "failed" in res["answer"].lower()
+    assert "stac radar asset retrieval failed" in res["answer"].lower()
+    assert res["verification"]["passed"] is False
+    assert not res["metadata"].get("dprvi_result")
+
+
+def test_sentinel2_ndvi_successful_analysis():
+    """Verify successful Sentinel-2 NDVI analysis remains successful with deterministic verification."""
+    orchestrator = MultiStepOrchestrator()
+    res = orchestrator.orchestrate("Compute Sentinel-2 NDVI in Bengaluru [77.45, 12.85, 77.75, 13.15]")
+
+    assert res["status"] == "success"
+    assert res["confidence"] == 0.95
+    assert res["confidence_label"] == "Deterministic Verified"
+    assert res["verification"]["passed"] is True
+    assert "calibrated sentinel-2 surface reflectance ndvi" in res["answer"].lower()
+    assert res["metadata"]["ndvi_result"]["ndvi_mean"] is not None
+
+
+def test_sentinel1_dprvi_successful_analysis():
+    """Verify successful Sentinel-1 DpRVI analysis remains successful with deterministic verification."""
+    orchestrator = MultiStepOrchestrator()
+    res = orchestrator.orchestrate("Compute Sentinel-1 RTC dual-pol DpRVI for Delhi [76.85, 28.40, 77.35, 28.88]")
+
+    assert res["status"] == "success"
+    assert res["confidence"] == 0.95
+    assert res["confidence_label"] == "Deterministic Verified"
+    assert res["verification"]["passed"] is True
+    assert "calibrated sentinel-1 rtc dual-polarization" in res["answer"].lower()
+    assert res["metadata"]["dprvi_result"]["dprvi_mean"] is not None
+
+
+def test_sentinel2_ndvi_zero_valid_pixels_unsupported(monkeypatch):
+    """Verify zero-valid-pixel S2 outcome produces 'unsupported' status and 'Zero Valid Pixels' label."""
+    orchestrator = MultiStepOrchestrator()
+
+    class S2ZeroPixelRetrieveTool:
+        def __init__(self):
+            self.name = "stac_composite_retrieve"
+            self.description = "Zero-pixel S2 retrieve mock"
+            self.category = "acquisition"
+        def run(self, **kwargs):
+            return {
+                "status": "success",
+                "scene_id": "test_s2_zero",
+                "size_bytes": 1024,
+                "ndvi_result": {
+                    "status": "unsupported_zero_valid_pixels",
+                    "ndvi_mean": None,
+                    "summary": "No valid clear-sky pixels found after applying SCL quality mask. NDVI calculation unsupported."
+                }
+            }
+
+    monkeypatch.setattr(tool_registry, "_tools", {**tool_registry._tools, "stac_composite_retrieve": S2ZeroPixelRetrieveTool()})
+
+    res = orchestrator.orchestrate("Compute Sentinel-2 NDVI in Bengaluru [77.45, 12.85, 77.75, 13.15]")
+
+    assert res["status"] == "unsupported"
+    assert res["confidence"] is None
+    assert res["confidence_label"] == "Zero Valid Pixels"
+    assert "no valid clear-sky pixels" in res["answer"].lower()
+    assert res["verification"]["passed"] is False
+
+
+def test_sentinel1_dprvi_zero_valid_pixels_unsupported(monkeypatch):
+    """Verify zero-valid-pixel S1 outcome produces 'unsupported' status and 'Zero Valid Pixels' label."""
+    orchestrator = MultiStepOrchestrator()
+
+    class S1ZeroPixelRetrieveTool:
+        def __init__(self):
+            self.name = "stac_composite_retrieve"
+            self.description = "Zero-pixel S1 retrieve mock"
+            self.category = "acquisition"
+        def run(self, **kwargs):
+            return {
+                "status": "success",
+                "scene_id": "test_s1_zero",
+                "size_bytes": 1024,
+                "dprvi_result": {
+                    "status": "unsupported_zero_valid_pixels",
+                    "dprvi_mean": None,
+                    "summary": "No valid radar pixels found. DpRVI calculation unsupported."
+                }
+            }
+
+    monkeypatch.setattr(tool_registry, "_tools", {**tool_registry._tools, "stac_composite_retrieve": S1ZeroPixelRetrieveTool()})
+
+    res = orchestrator.orchestrate("Compute Sentinel-1 RTC dual-pol DpRVI for Delhi [76.85, 28.40, 77.35, 28.88]")
+
+    assert res["status"] == "unsupported"
+    assert res["confidence"] is None
+    assert res["confidence_label"] == "Zero Valid Pixels"
+    assert "no valid radar pixels" in res["answer"].lower()
+    assert res["verification"]["passed"] is False
+
+
+def test_sentinel2_ndvi_explicitly_unsupported_outcome(monkeypatch):
+    """Verify explicitly unsupported scientific outcome is classified as 'unsupported' with 'Unsupported Analysis' label."""
+    orchestrator = MultiStepOrchestrator()
+
+    class S2UnsupportedRetrieveTool:
+        def __init__(self):
+            self.name = "stac_composite_retrieve"
+            self.description = "Unsupported S2 retrieve mock"
+            self.category = "acquisition"
+        def run(self, **kwargs):
+            return {
+                "status": "success",
+                "scene_id": "test_s2_unsupported",
+                "size_bytes": 1024,
+                "ndvi_result": {
+                    "status": "unsupported",
+                    "ndvi_mean": None,
+                    "summary": "Sentinel-2 band ratio unsupported for requested wavelength."
+                }
+            }
+
+    monkeypatch.setattr(tool_registry, "_tools", {**tool_registry._tools, "stac_composite_retrieve": S2UnsupportedRetrieveTool()})
+
+    res = orchestrator.orchestrate("Compute Sentinel-2 NDVI in Bengaluru [77.45, 12.85, 77.75, 13.15]")
+
+    assert res["status"] == "unsupported"
+    assert res["confidence"] is None
+    assert res["confidence_label"] == "Unsupported Analysis"
+    assert "unsupported" in res["answer"].lower()
+    assert res["verification"]["passed"] is False
+
+
