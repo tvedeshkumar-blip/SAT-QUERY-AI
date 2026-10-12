@@ -175,11 +175,21 @@ def compute_calibrated_dual_pol_sar(
         q = vh_valid / vv_valid
         cross_pol_ratio_arr[valid_mask] = q.astype(np.float32)
 
+        # Track physical assumption violations where q > 1.0 (VH > VV)
+        # Mandal et al. (2020) assumes co-polarized return dominates cross-polarized return (lambda1 = VV >= VH = lambda2).
+        # For targets with q > 1.0, the formula exceeds 1.0 prior to clipping; these must be explicitly flagged.
+        assumption_violation_mask = q > 1.0
+        assumption_violation_count = int(np.count_nonzero(assumption_violation_mask))
+        assumption_violation_pct = round((assumption_violation_count / max(1, valid_pixel_count)) * 100.0, 2)
+
         # DpRVI = (q * (q + 3)) / ((q + 1) ** 2)  (Mandal et al., 2020)
         dprvi_vals = (q * (q + 3.0)) / np.square(q + 1.0)
         # Strictly bound to [0.0, 1.0]
         dprvi_vals = np.clip(dprvi_vals, 0.0, 1.0)
         dprvi_arr[valid_mask] = dprvi_vals.astype(np.float32)
+    else:
+        assumption_violation_count = 0
+        assumption_violation_pct = 0.0
 
     # 7. Statistical Aggregation
     if valid_pixel_count == 0:
@@ -264,6 +274,10 @@ def compute_calibrated_dual_pol_sar(
         "Terrain layover and shadow masks are unavailable from the STAC provider; topographic relief shadows are not masked.",
         "DpRVI characterizes radar volume scattering randomness; it does not replace optical chlorophyll NDVI or identify crop taxonomy in isolation."
     ]
+    if assumption_violation_count > 0:
+        limitations.append(
+            f"Physical assumption notice: {assumption_violation_count:,} valid radar pixels ({assumption_violation_pct}%) had cross-polarization ratio q > 1.0 (VH > VV), violating the dominant co-polarized power assumption of DpRVI (Mandal et al., 2020). These values were clipped to 1.0 and flagged as uncertified volume scattering approximations."
+        )
 
     return {
         "status": status,
@@ -274,6 +288,12 @@ def compute_calibrated_dual_pol_sar(
         "dprvi_median": dprvi_median,
         "dprvi_min": dprvi_min,
         "dprvi_max": dprvi_max,
+        "dprvi_assumption_violations": {
+            "count": assumption_violation_count,
+            "percentage": assumption_violation_pct,
+            "has_violations": assumption_violation_count > 0,
+            "warning": "Cross-polarization ratio exceeded 1.0 (VH > VV)" if assumption_violation_count > 0 else None
+        },
         "cross_pol_ratio_linear": cross_pol_ratio_linear,
         "cross_pol_ratio_db": cross_pol_ratio_db,
         "vv_mean_linear": vv_mean_linear,

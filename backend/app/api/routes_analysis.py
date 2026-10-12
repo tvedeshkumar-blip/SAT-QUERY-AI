@@ -48,6 +48,11 @@ def analyze_optical_sar(request: AnalysisRequest):
     request.mode = "optical_sar"
     return analyze_imagery(request)
 
+@router.post("/analyze/orchestrate", response_model=AnalysisResponseSchema)
+def analyze_orchestrate(request: AnalysisRequest):
+    request.mode = "orchestration"
+    return analyze_imagery(request)
+
 @router.post("/analyze/spectral-indices")
 def analyze_spectral_indices(request: AnalysisRequest):
     try:

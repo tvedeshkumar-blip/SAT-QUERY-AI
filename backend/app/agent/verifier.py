@@ -171,6 +171,45 @@ class DeterministicVerifier:
                 except (ValueError, TypeError):
                     pass
 
+            # Check L (Package-Level): Deterministic validation of Temporal Multimodal Change & Multi-Step Trace
+            is_delta_ndvi = "delta_ndvi" in pm_name_lower or "ndvi_change" in pm_name_lower
+            if is_delta_ndvi:
+                if pm.value is not None:
+                    try:
+                        val_float = float(pm.value)
+                        import math
+                        if math.isnan(val_float) or math.isinf(val_float):
+                            failures.append(f"Temporal NDVI change measurement '{pm.name}' must be finite, found NaN/inf.")
+                        elif val_float < -2.0 or val_float > 2.0:
+                            failures.append(f"Temporal NDVI change measurement '{pm.name}' value {val_float} is outside valid physical range [-2.0, 2.0].")
+                    except (ValueError, TypeError):
+                        failures.append(f"Temporal NDVI change measurement '{pm.name}' value '{pm.value}' is not a valid numeric float.")
+                unit_lower = (pm.unit or "").strip().lower()
+                if any(pu in unit_lower for pu in ["%", "percent", "percentage", "db"]):
+                    failures.append(f"Temporal NDVI change measurement '{pm.name}' must be reported as a unitless ratio [-2, 2], not '{pm.unit}'.")
+                if evidence_package.valid_pixel_count == 0 or (hasattr(evidence_package, "valid_pixel_percentage") and evidence_package.valid_pixel_percentage == 0.0 and evidence_package.total_pixel_count and evidence_package.total_pixel_count > 0):
+                    if pm.value is not None:
+                        failures.append(f"Cannot report numeric temporal NDVI change '{pm.name}' ({pm.value}) when joint valid pixel count is zero.")
+
+            is_delta_dprvi = "delta_dprvi" in pm_name_lower or "dprvi_change" in pm_name_lower
+            if is_delta_dprvi:
+                if pm.value is not None:
+                    try:
+                        val_float = float(pm.value)
+                        import math
+                        if math.isnan(val_float) or math.isinf(val_float):
+                            failures.append(f"Temporal DpRVI change measurement '{pm.name}' must be finite, found NaN/inf.")
+                        elif val_float < -1.0 or val_float > 1.0:
+                            failures.append(f"Temporal DpRVI change measurement '{pm.name}' value {val_float} is outside valid physical range [-1.0, 1.0].")
+                    except (ValueError, TypeError):
+                        failures.append(f"Temporal DpRVI change measurement '{pm.name}' value '{pm.value}' is not a valid numeric float.")
+                unit_lower = (pm.unit or "").strip().lower()
+                if any(pu in unit_lower for pu in ["%", "percent", "percentage", "db"]):
+                    failures.append(f"Temporal DpRVI change measurement '{pm.name}' must be reported as a unitless ratio [-1, 1], not '{pm.unit}'.")
+                if evidence_package.valid_pixel_count == 0 or (hasattr(evidence_package, "valid_pixel_percentage") and evidence_package.valid_pixel_percentage == 0.0 and evidence_package.total_pixel_count and evidence_package.total_pixel_count > 0):
+                    if pm.value is not None:
+                        failures.append(f"Cannot report numeric temporal DpRVI change '{pm.name}' ({pm.value}) when joint valid pixel count is zero.")
+
         # 5. Evaluate Candidate Claims & Answer Text
         claims_to_check: List[ClaimVerificationItem] = []
         if candidate_claims:
@@ -714,6 +753,75 @@ class DeterministicVerifier:
                     c_status = "contradicted"
                     c_reason = msg
 
+            # Check L: Temporal Multimodal Change Claims & Chronology
+            is_temporal_change_claim = any(
+                t in c_text_lower for t in [
+                    "delta ndvi", "delta-ndvi", "ndvi change", "vegetation change", "vegetation loss", "vegetation gain",
+                    "delta dprvi", "delta-dprvi", "dprvi change", "canopy change", "radar change", "temporal change"
+                ]
+            )
+            if is_temporal_change_claim:
+                # 1. Out-of-bounds Delta-NDVI in claim text (physical range [-2.0, 2.0])
+                d_ndvi_matches = re.findall(r'(?:delta[-_ ]?ndvi|ndvi change)\s*(?:is|=|of|value\s*(?:is|=|of)?)\s*[:=]?\s*([+-]?\d+(?:\.\d+)?)', c_text_lower)
+                for d_str in d_ndvi_matches:
+                    try:
+                        d_val = float(d_str)
+                        if d_val < -2.0 or d_val > 2.0:
+                            msg = f"Claim asserts Delta-NDVI value {d_val} outside physical bounds [-2.0, 2.0]."
+                            failures.append(msg)
+                            contradictions.append(msg)
+                            c_status = "contradicted"
+                            c_reason = msg
+                    except ValueError:
+                        pass
+
+                # 2. Out-of-bounds Delta-DpRVI in claim text (physical range [-1.0, 1.0])
+                d_dprvi_matches = re.findall(r'(?:delta[-_ ]?dprvi|dprvi change)\s*(?:is|=|of|value\s*(?:is|=|of)?)\s*[:=]?\s*([+-]?\d+(?:\.\d+)?)', c_text_lower)
+                for d_str in d_dprvi_matches:
+                    try:
+                        d_val = float(d_str)
+                        if d_val < -1.0 or d_val > 1.0:
+                            msg = f"Claim asserts Delta-DpRVI value {d_val} outside physical bounds [-1.0, 1.0]."
+                            failures.append(msg)
+                            contradictions.append(msg)
+                            c_status = "contradicted"
+                            c_reason = msg
+                    except ValueError:
+                        pass
+
+                # 3. Invalid units for Delta-NDVI or Delta-DpRVI
+                if (re.search(r'(?:delta[-_ ]?ndvi|delta[-_ ]?dprvi)\s*(?:is|=|of)?\s*[+-]?\d+(?:\.\d+)?\s*(?:%|percent|percentage)', c_text_lower) or
+                    re.search(r'(?:delta[-_ ]?ndvi|delta[-_ ]?dprvi)\s*(?:is|=|of)?\s*[+-]?\d+(?:\.\d+)?\s*(?:db|decibels)', c_text_lower)):
+                    msg = "Claim reports Delta-NDVI or Delta-DpRVI in percentage or dB rather than unitless difference."
+                    failures.append(msg)
+                    contradictions.append(msg)
+                    c_status = "contradicted"
+                    c_reason = msg
+
+                # 4. Zero valid joint pixels check
+                if evidence_package.valid_pixel_count == 0 or (hasattr(evidence_package, "valid_pixel_percentage") and evidence_package.valid_pixel_percentage == 0.0 and evidence_package.total_pixel_count and evidence_package.total_pixel_count > 0):
+                    has_numeric_assertion = bool(
+                        re.search(r'(?:delta[-_ ]?ndvi|delta[-_ ]?dprvi|vegetation loss|vegetation gain)\s*(?:is|=|of)?\s*[+-]?\d+(?:\.\d+)?', c_text_lower) or
+                        "loss of" in c_text_lower or "gain of" in c_text_lower
+                    )
+                    is_disclaiming_zero = any(t in c_text_lower for t in ["zero valid", "no valid pixels", "unsupported", "cannot be calculated", "none"])
+                    if has_numeric_assertion and not is_disclaiming_zero:
+                        msg = "A zero-valid-pixel temporal result cannot support numeric change statistics or vegetation trend claims."
+                        failures.append(msg)
+                        contradictions.append(msg)
+                        c_status = "unsupported"
+                        c_reason = msg
+
+                # 5. Temporal chronology: T1 and T2 must be distinct
+                if len(evidence_package.acquisition_timestamps) >= 2:
+                    t1_str, t2_str = evidence_package.acquisition_timestamps[0], evidence_package.acquisition_timestamps[1]
+                    if t1_str == t2_str:
+                        msg = f"Temporal change claim requires distinct acquisition dates, but T1 and T2 timestamps are identical ('{t1_str}')."
+                        failures.append(msg)
+                        contradictions.append(msg)
+                        c_status = "contradicted"
+                        c_reason = msg
+
             evaluated_claims.append(ClaimVerificationItem(
                 claim_text=claim.claim_text,
                 claim_type=claim.claim_type,
@@ -1034,6 +1142,54 @@ class EvidencePackageBuilder:
                         calibration_quantity="gamma0"
                     ))
 
+        # Calibrated Temporal Optical Change (Sentinel-2 Delta-NDVI)
+        opt_chg = meta.get("temporal_optical_change") or opt_sar_meta.get("temporal_optical_change")
+        if isinstance(opt_chg, dict) and opt_chg.get("status") != "unsupported_zero_valid_pixels":
+            d_ndvi = opt_chg.get("delta_ndvi_mean")
+            if d_ndvi is not None:
+                physical_measurements.append(PhysicalMeasurementItem(
+                    name="temporal_delta_ndvi_mean",
+                    value=d_ndvi,
+                    unit="unitless ratio [-2, 2]",
+                    statistic_type="mean",
+                    mask_applied="joint_scl_valid_mask",
+                    calibration_quantity="normalized_difference_vegetation_index_change"
+                ))
+
+        # Calibrated Temporal SAR Change (Sentinel-1 RTC Delta-DpRVI & Delta-dB)
+        sar_chg = meta.get("temporal_sar_change") or opt_sar_meta.get("temporal_sar_change")
+        if isinstance(sar_chg, dict) and sar_chg.get("status") != "unsupported_zero_valid_pixels":
+            d_dprvi = sar_chg.get("delta_dprvi_mean")
+            d_vv = sar_chg.get("delta_vv_db")
+            d_vh = sar_chg.get("delta_vh_db")
+            if d_dprvi is not None:
+                physical_measurements.append(PhysicalMeasurementItem(
+                    name="temporal_delta_dprvi_mean",
+                    value=d_dprvi,
+                    unit="unitless ratio [-1, 1]",
+                    statistic_type="mean",
+                    mask_applied="joint_sar_valid_mask",
+                    calibration_quantity="dual_polarimetric_radar_vegetation_index_change"
+                ))
+            if d_vv is not None:
+                physical_measurements.append(PhysicalMeasurementItem(
+                    name="temporal_delta_vv_db",
+                    value=d_vv,
+                    unit="dB",
+                    statistic_type="difference in 10*log10(mean power)",
+                    mask_applied="joint_sar_valid_mask",
+                    calibration_quantity="gamma0"
+                ))
+            if d_vh is not None:
+                physical_measurements.append(PhysicalMeasurementItem(
+                    name="temporal_delta_vh_db",
+                    value=d_vh,
+                    unit="dB",
+                    statistic_type="difference in 10*log10(mean power)",
+                    mask_applied="joint_sar_valid_mask",
+                    calibration_quantity="gamma0"
+                ))
+
         # 7. Display statistics
         display_stats = []
         opt_disp = opt_sar_meta.get("optical_mean_albedo") or opt_sar_meta.get("optical_albedo_display_mean")
@@ -1116,6 +1272,50 @@ class EvidencePackageBuilder:
                     limitations=f"Radar volume scattering proxy based on DpRVI threshold {sar_thresh:.2f}; not certified botanical classification or optical chlorophyll NDVI."
                 ))
 
+        if isinstance(opt_chg, dict) and opt_chg.get("status") != "unsupported_zero_valid_pixels":
+            v_loss = opt_chg.get("vegetation_loss_pct")
+            v_gain = opt_chg.get("vegetation_gain_pct")
+            if v_loss is not None:
+                heuristics.append(HeuristicIndicatorItem(
+                    name="temporal_vegetation_loss_proxy",
+                    percentage=float(v_loss),
+                    pixel_count=int(opt_chg.get("loss_pixel_count", 0)),
+                    definition="Joint clear pixels with calibrated Delta-NDVI <= -0.15",
+                    is_certified_classification=False,
+                    limitations="Temporal optical canopy loss proxy; affected by harvest, fire, clearing, or phenology."
+                ))
+            if v_gain is not None:
+                heuristics.append(HeuristicIndicatorItem(
+                    name="temporal_vegetation_gain_proxy",
+                    percentage=float(v_gain),
+                    pixel_count=int(opt_chg.get("gain_pixel_count", 0)),
+                    definition="Joint clear pixels with calibrated Delta-NDVI >= +0.15",
+                    is_certified_classification=False,
+                    limitations="Temporal optical canopy gain proxy; affected by crop growth, regrowth, or greening."
+                ))
+
+        if isinstance(sar_chg, dict) and sar_chg.get("status") != "unsupported_zero_valid_pixels":
+            r_loss = sar_chg.get("radar_canopy_loss_pct")
+            r_gain = sar_chg.get("radar_canopy_gain_pct")
+            if r_loss is not None:
+                heuristics.append(HeuristicIndicatorItem(
+                    name="temporal_radar_canopy_loss_proxy",
+                    percentage=float(r_loss),
+                    pixel_count=int(sar_chg.get("loss_pixel_count", 0)),
+                    definition="Joint valid pixels with calibrated Delta-DpRVI <= -0.15",
+                    is_certified_classification=False,
+                    limitations="Temporal radar volume scattering reduction proxy; unmasked terrain shadow unaddressed."
+                ))
+            if r_gain is not None:
+                heuristics.append(HeuristicIndicatorItem(
+                    name="temporal_radar_canopy_gain_proxy",
+                    percentage=float(r_gain),
+                    pixel_count=int(sar_chg.get("gain_pixel_count", 0)),
+                    definition="Joint valid pixels with calibrated Delta-DpRVI >= +0.15",
+                    is_certified_classification=False,
+                    limitations="Temporal radar volume scattering increase proxy; unmasked terrain shadow unaddressed."
+                ))
+
         # 9. Evidence Artifacts
         evidence_artifacts = []
         if isinstance(ndvi_info, dict) and ndvi_info.get("preview_base64"):
@@ -1141,6 +1341,30 @@ class EvidencePackageBuilder:
                     "p90": dprvi_info.get("dprvi_p90"),
                     "cross_pol_ratio_db": dprvi_info.get("cross_pol_ratio_db"),
                     "vegetation_proxy_coverage_pct": dprvi_info.get("vegetation_proxy_coverage_pct")
+                }
+            ))
+        if isinstance(opt_chg, dict) and opt_chg.get("preview_base64"):
+            evidence_artifacts.append(EvidenceArtifactItem(
+                artifact_id="ev_temporal_optical_change_map",
+                artifact_type="change_map",
+                title="Sentinel-2 Temporal Delta-NDVI Change Map",
+                description="Bi-temporal calibrated Sentinel-2 Delta-NDVI change map screened with joint SCL mask",
+                statistics={
+                    "delta_ndvi_mean": opt_chg.get("delta_ndvi_mean"),
+                    "vegetation_loss_pct": opt_chg.get("vegetation_loss_pct"),
+                    "vegetation_gain_pct": opt_chg.get("vegetation_gain_pct")
+                }
+            ))
+        if isinstance(sar_chg, dict) and sar_chg.get("preview_base64"):
+            evidence_artifacts.append(EvidenceArtifactItem(
+                artifact_id="ev_temporal_sar_change_map",
+                artifact_type="change_map",
+                title="Sentinel-1 RTC Temporal Delta-DpRVI Change Map",
+                description="Bi-temporal calibrated Sentinel-1 RTC Delta-DpRVI dual-polarization radar change map",
+                statistics={
+                    "delta_dprvi_mean": sar_chg.get("delta_dprvi_mean"),
+                    "radar_canopy_loss_pct": sar_chg.get("radar_canopy_loss_pct"),
+                    "radar_canopy_gain_pct": sar_chg.get("radar_canopy_gain_pct")
                 }
             ))
         raw_evidence = data.get("evidence", [])

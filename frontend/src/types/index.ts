@@ -1,4 +1,4 @@
-export type AnalysisMode = 'single' | 'optical_sar' | 'bitemporal';
+export type AnalysisMode = 'single' | 'optical_sar' | 'bitemporal' | 'orchestration' | 'temporal';
 
 export type TaskType = 
   | 'vqa' 
@@ -6,7 +6,12 @@ export type TaskType =
   | 'grounding' 
   | 'change_detection' 
   | 'change_vqa' 
-  | 'optical_sar';
+  | 'optical_sar'
+  | 'temporal_optical_change'
+  | 'temporal_sar_change'
+  | 'sentinel2_ndvi'
+  | 'sentinel1_rtc_dprvi'
+  | 'orchestration';
 
 export interface BoundingBox {
   xmin: number;

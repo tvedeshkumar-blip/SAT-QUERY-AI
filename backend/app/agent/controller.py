@@ -39,12 +39,70 @@ class AgentController:
         # Step 1: Query received
         trace = ExecutionTraceTracker(task=request.mode)
         trace.add_step("QUERY_RECEIVED", f"Received query: '{request.query}' in mode '{request.mode}'")
-        
-        # Step 2: Validate inputs
-        if not request.images or len(request.images) == 0:
-            trace.add_step("INPUT_VALIDATED", "Input validation failed: No image provided", status="failed")
-            raise ValueError("No input satellite image payload provided.")
 
+        # Dynamic Multi-Step Orchestration Route
+        if not request.images or len(request.images) == 0 or request.mode in ("orchestration", "temporal"):
+            from app.agent.orchestrator import agent_orchestrator
+            from app.schemas.analysis import (
+                VisualEvidenceSchema,
+                ExecutionTraceSchema,
+                TraceStepSchema
+            )
+            orch_res = agent_orchestrator.orchestrate(
+                query=request.query,
+                images=request.images or [],
+                max_bytes=20 * 1024 * 1024
+            )
+            raw_ev = orch_res.get("evidence", [])
+            ev_list = []
+            for ev in raw_ev:
+                if isinstance(ev, dict):
+                    ev_list.append(VisualEvidenceSchema(**ev))
+                elif isinstance(ev, VisualEvidenceSchema):
+                    ev_list.append(ev)
+
+            trace_dict = orch_res.get("trace", {})
+            steps_list = []
+            for st in trace_dict.get("steps", []):
+                if isinstance(st, dict):
+                    steps_list.append(TraceStepSchema(**st))
+                elif isinstance(st, TraceStepSchema):
+                    steps_list.append(st)
+
+            trace_schema = ExecutionTraceSchema(
+                task=trace_dict.get("task", orch_res.get("task", "orchestration")),
+                models_selected=trace_dict.get("models_selected", ["MultiStepOrchestrator"]),
+                steps=steps_list,
+                parameters=trace_dict.get("parameters", {}),
+                execution_time_ms=orch_res.get("execution_time_ms", 0.0)
+            )
+
+            return AnalysisResponseSchema(
+                id=orch_res["id"],
+                task=orch_res.get("task", "orchestration"),
+                mode=orch_res.get("mode", request.mode),
+                answer=orch_res.get("answer", ""),
+                confidence=orch_res.get("confidence", 0.95),
+                confidence_label=orch_res.get("confidence_label", "Deterministic Verified"),
+                models=orch_res.get("models", ["MultiStepOrchestrator"]),
+                implementation_status=orch_res.get("implementation_status", "stage14_orchestration"),
+                primary_model="MultiStepOrchestrator",
+                actual_model_used=orch_res.get("actual_model_used", "MultiStepOrchestrator"),
+                fallback_used=orch_res.get("fallback_used", False),
+                model_status="loaded",
+                evidence=ev_list,
+                trace=trace_schema,
+                metadata=orch_res.get("metadata", {}),
+                verification=orch_res.get("verification"),
+                reproducible_report=orch_res.get("reproducible_report"),
+                is_clarification_required=orch_res.get("is_clarification_required", False),
+                missing_parameters=orch_res.get("missing_parameters"),
+                suggested_examples=orch_res.get("suggested_examples"),
+                execution_time_ms=orch_res.get("execution_time_ms", 0.0),
+                created_at=orch_res.get("created_at", datetime.utcnow().isoformat() + "Z")
+            )
+
+        # Step 2: Validate inputs
         for idx, img_in in enumerate(request.images):
             InputValidator.validate_image_payload(img_in.data, img_in.mimeType, img_in.filename)
 

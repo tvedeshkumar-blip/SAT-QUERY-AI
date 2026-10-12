@@ -80,6 +80,16 @@ class ReportProvenanceSchema(BaseModel):
     vh_asset_id: Optional[str] = Field(None, description="Source asset ID or href for VH polarization")
     dprvi_status: Optional[str] = Field(None, description="DpRVI calculation status (e.g. 'success' or 'unsupported_zero_valid_pixels')")
     sar_terrain_mask_status: Optional[str] = Field(None, description="Status of terrain layover/shadow mask (e.g. 'unavailable_from_stac_provider')")
+    delta_ndvi_mean: Optional[float] = Field(None, description="Calibrated Sentinel-2 bi-temporal mean Delta-NDVI (T2 - T1)")
+    vegetation_loss_pct: Optional[float] = Field(None, description="Percentage of joint clear pixels exhibiting vegetation loss (Delta-NDVI <= -0.15)")
+    vegetation_gain_pct: Optional[float] = Field(None, description="Percentage of joint clear pixels exhibiting vegetation gain (Delta-NDVI >= +0.15)")
+    delta_dprvi_mean: Optional[float] = Field(None, description="Calibrated Sentinel-1 RTC bi-temporal mean Delta-DpRVI (T2 - T1)")
+    radar_canopy_loss_pct: Optional[float] = Field(None, description="Percentage of joint valid pixels exhibiting radar canopy loss (Delta-DpRVI <= -0.15)")
+    radar_canopy_gain_pct: Optional[float] = Field(None, description="Percentage of joint valid pixels exhibiting radar canopy gain (Delta-DpRVI >= +0.15)")
+    temporal_t1_datetime: Optional[str] = Field(None, description="Pre-event acquisition timestamp (T1)")
+    temporal_t2_datetime: Optional[str] = Field(None, description="Post-event acquisition timestamp (T2)")
+    joint_valid_pixel_count: Optional[int] = Field(None, description="Number of joint valid screened pixels across temporal pair")
+    dprvi_assumption_violations_count: Optional[int] = Field(None, description="Count of pixels where q > 1.0 violating co-pol dominance assumption")
 
 
 class ReportVerificationSummarySchema(BaseModel):

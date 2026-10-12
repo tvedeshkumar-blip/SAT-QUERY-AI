@@ -22,9 +22,9 @@ class ImageInput(BaseModel):
     )
 
 class AnalysisRequest(BaseModel):
-    images: List[ImageInput] = Field(..., description="List of input satellite images")
+    images: List[ImageInput] = Field(default_factory=list, description="List of input satellite images")
     query: str = Field(..., description="Natural language prompt / question")
-    mode: str = Field(default="auto", description="Operational mode: auto, single, optical_sar, bitemporal")
+    mode: str = Field(default="auto", description="Operational mode: auto, single, optical_sar, bitemporal, orchestration, temporal")
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 class BoundingBoxSchema(BaseModel):
@@ -92,6 +92,9 @@ class AnalysisResponseSchema(BaseModel):
     conflict_info: Optional[ConflictInfoSchema] = None
     verification: Optional["VerificationResponseSchema"] = Field(default=None, description="Stage 7 Evidence-Grounded Scientific Verification")
     reproducible_report: Optional[ScientificReportSchema] = Field(default=None, description="Stage 8 Structured Reproducible Scientific Analysis Report")
+    is_clarification_required: bool = Field(default=False, description="Whether query is ambiguous and requires user clarification")
+    missing_parameters: Optional[List[str]] = Field(default=None, description="Parameters that require user clarification")
+    suggested_examples: Optional[List[str]] = Field(default=None, description="Suggested valid queries or templates")
     execution_time_ms: float
     created_at: str
 

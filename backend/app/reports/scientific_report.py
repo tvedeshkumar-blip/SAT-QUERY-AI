@@ -332,6 +332,29 @@ class ScientificReportBuilder:
         provenance.dprvi_status = dprvi_status
         provenance.sar_terrain_mask_status = sar_terrain_status
 
+        # Extract calibrated bi-temporal change provenance
+        opt_chg = metadata.get("temporal_optical_change") or (metadata.get("optical_sar_joint", {}).get("temporal_optical_change") if isinstance(metadata.get("optical_sar_joint"), dict) else None)
+        if isinstance(opt_chg, dict):
+            provenance.delta_ndvi_mean = opt_chg.get("delta_ndvi_mean")
+            provenance.vegetation_loss_pct = opt_chg.get("vegetation_loss_pct")
+            provenance.vegetation_gain_pct = opt_chg.get("vegetation_gain_pct")
+            provenance.temporal_t1_datetime = opt_chg.get("t1_datetime")
+            provenance.temporal_t2_datetime = opt_chg.get("t2_datetime")
+            provenance.joint_valid_pixel_count = opt_chg.get("joint_valid_pixel_count")
+
+        sar_chg = metadata.get("temporal_sar_change") or (metadata.get("optical_sar_joint", {}).get("temporal_sar_change") if isinstance(metadata.get("optical_sar_joint"), dict) else None)
+        if isinstance(sar_chg, dict):
+            provenance.delta_dprvi_mean = sar_chg.get("delta_dprvi_mean")
+            provenance.radar_canopy_loss_pct = sar_chg.get("radar_canopy_loss_pct")
+            provenance.radar_canopy_gain_pct = sar_chg.get("radar_canopy_gain_pct")
+            if not provenance.temporal_t1_datetime:
+                provenance.temporal_t1_datetime = sar_chg.get("t1_datetime")
+            if not provenance.temporal_t2_datetime:
+                provenance.temporal_t2_datetime = sar_chg.get("t2_datetime")
+            if not provenance.joint_valid_pixel_count:
+                provenance.joint_valid_pixel_count = sar_chg.get("joint_valid_pixel_count")
+            provenance.dprvi_assumption_violations_count = sar_chg.get("dprvi_assumption_violations", {}).get("total_count", 0)
+
         # 3. Physical Measurements
         physical_measurements: List[PhysicalMeasurementReportItem] = []
         valid_artifact_ids = set()
@@ -553,6 +576,45 @@ def generate_scientific_markdown(report: ScientificReportSchema) -> str:
         lines.append(f"| **Terrain Layover/Shadow Mask** | `{prov.sar_terrain_mask_status or 'unavailable_from_stac_provider'}` | Provider geometric mask unavailable; terrain relief shadows not masked |")
         if prov.dprvi_status == "unsupported_zero_valid_pixels":
             lines.append(f"| **Calculation Status** | `unsupported_zero_valid_pixels` | Zero valid radar pixels observed; numerical dual-pol statistics suppressed |")
+
+    if prov.delta_ndvi_mean is not None or (prov.temporal_t1_datetime and prov.vegetation_loss_pct is not None):
+        lines.append("")
+        lines.append("### Sentinel-2 Temporal Optical Change & SCL Screening Provenance")
+        lines.append("")
+        lines.append("| Metric / Parameter | Value | Description / Standard |")
+        lines.append("| :--- | :--- | :--- |")
+        if prov.temporal_t1_datetime:
+            lines.append(f"| **T1 Acquisition** | `{prov.temporal_t1_datetime}` | Baseline optical acquisition timestamp |")
+        if prov.temporal_t2_datetime:
+            lines.append(f"| **T2 Acquisition** | `{prov.temporal_t2_datetime}` | Comparison optical acquisition timestamp |")
+        if prov.delta_ndvi_mean is not None:
+            lines.append(f"| **Mean ΔNDVI** | `{prov.delta_ndvi_mean}` | Temporal difference (NDVI_T2 - NDVI_T1) [-2.0, 2.0] across joint valid pixels |")
+        if prov.vegetation_loss_pct is not None:
+            lines.append(f"| **Vegetation Loss** | `{prov.vegetation_loss_pct}%` | Joint valid pixels with ΔNDVI <= -0.15 |")
+        if prov.vegetation_gain_pct is not None:
+            lines.append(f"| **Vegetation Gain** | `{prov.vegetation_gain_pct}%` | Joint valid pixels with ΔNDVI >= +0.15 |")
+        if prov.joint_valid_pixel_count is not None:
+            lines.append(f"| **Joint Clear Pixels** | `{prov.joint_valid_pixel_count}` px | Pixels clear of cloud/shadow in both T1 and T2 SCL masks |")
+
+    if prov.delta_dprvi_mean is not None or (prov.temporal_t1_datetime and prov.radar_canopy_loss_pct is not None):
+        lines.append("")
+        lines.append("### Sentinel-1 RTC Temporal SAR Change & DpRVI Provenance")
+        lines.append("")
+        lines.append("| Metric / Parameter | Value | Description / Standard |")
+        lines.append("| :--- | :--- | :--- |")
+        if prov.temporal_t1_datetime:
+            lines.append(f"| **T1 Acquisition** | `{prov.temporal_t1_datetime}` | Baseline SAR acquisition timestamp |")
+        if prov.temporal_t2_datetime:
+            lines.append(f"| **T2 Acquisition** | `{prov.temporal_t2_datetime}` | Comparison SAR acquisition timestamp |")
+        if prov.delta_dprvi_mean is not None:
+            lines.append(f"| **Mean ΔDpRVI** | `{prov.delta_dprvi_mean}` | Dual-pol radar vegetation index change (DpRVI_T2 - DpRVI_T1) [-1.0, 1.0] |")
+        if prov.radar_canopy_loss_pct is not None:
+            lines.append(f"| **Radar Canopy Loss** | `{prov.radar_canopy_loss_pct}%` | Joint valid pixels with ΔDpRVI <= -0.15 |")
+        if prov.radar_canopy_gain_pct is not None:
+            lines.append(f"| **Radar Canopy Gain** | `{prov.radar_canopy_gain_pct}%` | Joint valid pixels with ΔDpRVI >= +0.15 |")
+        if prov.dprvi_assumption_violations_count:
+            lines.append(f"| **DpRVI Assumption Violations** | `{prov.dprvi_assumption_violations_count}` px | Observations where q = VH/VV > 1.0 violating Mandal et al. (2020) |")
+        lines.append(f"| **Terrain Layover/Shadow Mask** | `{prov.sar_terrain_mask_status or 'unavailable_from_stac_provider'}` | Geometric layover/shadow mask unavailable; relief shadows unmasked |")
 
     lines.append("")
 
