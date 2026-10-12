@@ -398,6 +398,9 @@ class QualityScreener:
             ]
         }
 
+    # Alias for Sentinel-1 RTC quality screening
+    evaluate_sar_rtc = evaluate_sar_quality
+
     @classmethod
     def generate_scl_rgb_preview(cls, scl_arr: np.ndarray) -> np.ndarray:
         """

@@ -168,7 +168,7 @@ class STACRetrieveResponse(BaseModel):
 
 
 class STACCompositeRetrieveRequest(BaseModel):
-    scene_id: str = Field(..., description="ID of the Sentinel-2 scene to retrieve")
+    scene_id: str = Field(..., description="ID of the Sentinel-2 or Sentinel-1 scene to retrieve")
     aoi_bbox: List[float] = Field(
         ...,
         description="Bounding box in EPSG:4326 [min_lon, min_lat, max_lon, max_lat]",
@@ -177,13 +177,14 @@ class STACCompositeRetrieveRequest(BaseModel):
     )
     bands: List[str] = Field(
         default_factory=lambda: ["B04", "B08"],
-        description="Spectral band asset keys to retrieve (e.g. ['B04', 'B08'] or ['red', 'nir'])"
+        description="Spectral or polarimetric band asset keys to retrieve (e.g. ['B04', 'B08'] or ['vv', 'vh'])"
     )
-    include_scl: bool = Field(default=True, description="Whether to also retrieve and evaluate companion SCL quality mask")
-    collection: Optional[str] = Field(default="sentinel-2-l2a", description="Collection name if known")
-    target_role: Optional[str] = Field(default="primary", description="Workspace role: primary, secondary, optical")
+    include_scl: bool = Field(default=True, description="Whether to also retrieve and evaluate companion SCL quality mask (optical)")
+    collection: Optional[str] = Field(default="sentinel-2-l2a", description="Collection name if known (e.g. sentinel-2-l2a, sentinel-1-rtc)")
+    target_role: Optional[str] = Field(default="primary", description="Workspace role: primary, secondary, optical, sar")
     max_bytes: Optional[int] = Field(None, description="Cumulative transfer budget cap <= 20 MB across all bands")
     compute_ndvi: bool = Field(default=True, description="Whether to compute calibrated NDVI from acquired B04+B08 bands")
+    compute_dprvi: bool = Field(default=False, description="Whether to compute dual-polarization SAR metrics (DpRVI, cross-pol ratio, linear and dB power) from VV+VH bands")
 
     @field_validator("aoi_bbox")
     @classmethod
@@ -216,7 +217,7 @@ class STACCompositeRetrieveResponse(BaseModel):
     status: str = Field(..., description="Retrieval status: 'success' or 'error'")
     scene_id: str
     collection: str = Field(default="sentinel-2-l2a")
-    category: str = Field(default="scientific_multispectral")
+    category: str = Field(default="scientific_multispectral", description="'scientific_multispectral' or 'scientific_sar'")
     filename: str
     mime_type: str = Field(default="image/tiff")
     size_bytes: int
@@ -226,7 +227,9 @@ class STACCompositeRetrieveResponse(BaseModel):
     provenance: Dict[str, Any] = Field(default_factory=dict)
     bands_retrieved: List[str] = Field(default_factory=list)
     ndvi_result: Optional[Dict[str, Any]] = Field(default=None, description="Calibrated NDVI computation results if requested")
-    quality_screening: Optional[Dict[str, Any]] = Field(default=None, description="SCL quality screening evaluation")
+    dprvi_result: Optional[Dict[str, Any]] = Field(default=None, description="Calibrated dual-polarization SAR and DpRVI computation results if requested")
+    quality_screening: Optional[Dict[str, Any]] = Field(default=None, description="SCL quality screening evaluation (optical)")
+    sar_quality_screening: Optional[Dict[str, Any]] = Field(default=None, description="Sentinel-1 backscatter quality screening")
     validation: Optional[STACValidateAssetResponse] = None
     error: Optional[str] = None
 

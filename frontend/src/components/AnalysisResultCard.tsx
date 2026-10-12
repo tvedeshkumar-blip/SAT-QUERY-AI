@@ -118,6 +118,11 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
     ((response.reproducible_report?.provenance as any)?.ndvi_mean !== undefined ||
      (response.reproducible_report?.provenance as any)?.ndvi_status ?
       response.reproducible_report?.provenance : null);
+  const dprviResult = response.metadata?.dprvi_result ||
+    response.metadata?.calibrated_dprvi ||
+    ((response.reproducible_report?.provenance as any)?.dprvi_mean !== undefined ||
+     (response.reproducible_report?.provenance as any)?.dprvi_status ?
+      response.reproducible_report?.provenance : null);
 
   return (
     <div className="glass-panel rounded-2xl p-6 border border-slate-800 bg-slate-900/60 shadow-xl space-y-4">
@@ -575,6 +580,116 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
               <img
                 src={ndviResult.preview_base64.startsWith('data:') ? ndviResult.preview_base64 : `data:image/png;base64,${ndviResult.preview_base64}`}
                 alt="Calibrated NDVI Surface Map"
+                className="max-h-48 rounded border border-slate-700 mx-auto object-contain"
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Sentinel-1 RTC Dual-Polarization & DpRVI Telemetry Banner */}
+      {dprviResult && (
+        <div className="p-4 rounded-xl bg-slate-950/90 border border-purple-800/60 space-y-3 text-xs font-mono">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-2">
+            <span className="text-purple-400 font-bold flex items-center gap-1.5 uppercase tracking-wider">
+              <Radio className="w-4 h-4 text-purple-400" />
+              SENTINEL-1 RTC DUAL-POLARIZATION & DpRVI PIPELINE
+            </span>
+            <div className="flex items-center gap-1.5">
+              <span className={`px-2 py-0.5 rounded text-[10px] border ${
+                dprviResult.status === 'unsupported_zero_valid_pixels'
+                  ? 'bg-amber-950 text-amber-300 border-amber-800'
+                  : 'bg-purple-950 text-purple-300 border-purple-800'
+              }`}>
+                {dprviResult.status === 'unsupported_zero_valid_pixels'
+                  ? 'ZERO VALID RADAR PIXELS'
+                  : 'RTC GAMMA0 POWER'}
+              </span>
+              <span className="px-2 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-700 text-[10px]">
+                Dual-Pol (VV + VH)
+              </span>
+            </div>
+          </div>
+
+          {dprviResult.status === 'unsupported_zero_valid_pixels' ? (
+            <div className="p-2.5 rounded-lg bg-amber-950/30 border border-amber-800/50 text-[11px] text-amber-300 space-y-1">
+              <span className="font-bold flex items-center gap-1">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                NUMERIC DpRVI STATISTICS SUPPRESSED (0 VALID RADAR PIXELS)
+              </span>
+              <p className="text-amber-200/80 text-[10px] leading-relaxed">
+                All pixels in the requested spatial window were excluded due to nodata sentinels (-32768.0), non-positive linear power, or numerical invalidity. In accordance with Stage 13 scientific integrity standards, no fabricated numeric values are reported.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] text-slate-300">
+              <div className="p-2 rounded bg-slate-900/80 border border-slate-800">
+                <span className="text-slate-400 block text-[9px]">MEAN DpRVI</span>
+                <span className="font-bold text-purple-300 text-xs">
+                  {dprviResult.dprvi_mean !== null && dprviResult.dprvi_mean !== undefined
+                    ? Number(dprviResult.dprvi_mean).toFixed(4)
+                    : 'N/A'}
+                </span>
+                <span className="text-slate-500 block text-[8px]">Unitless [0.0, 1.0]</span>
+              </div>
+              <div className="p-2 rounded bg-slate-900/80 border border-slate-800">
+                <span className="text-slate-400 block text-[9px]">90TH PERCENTILE (P90)</span>
+                <span className="font-bold text-indigo-300 text-xs">
+                  {dprviResult.dprvi_p90 !== null && dprviResult.dprvi_p90 !== undefined
+                    ? Number(dprviResult.dprvi_p90).toFixed(4)
+                    : 'N/A'}
+                </span>
+                <span className="text-slate-500 block text-[8px]">Peak Radar Canopy Proxy</span>
+              </div>
+              <div className="p-2 rounded bg-slate-900/80 border border-slate-800">
+                <span className="text-slate-400 block text-[9px]">CROSS-POL RATIO</span>
+                <span className="font-bold text-pink-300 text-xs">
+                  {dprviResult.cross_pol_ratio_db !== null && dprviResult.cross_pol_ratio_db !== undefined
+                    ? `${Number(dprviResult.cross_pol_ratio_db).toFixed(1)} dB`
+                    : 'N/A'}
+                </span>
+                <span className="text-slate-500 block text-[8px]">
+                  Linear q: {dprviResult.cross_pol_ratio_linear !== null && dprviResult.cross_pol_ratio_linear !== undefined ? Number(dprviResult.cross_pol_ratio_linear).toFixed(4) : 'N/A'}
+                </span>
+              </div>
+              <div className="p-2 rounded bg-slate-900/80 border border-slate-800">
+                <span className="text-slate-400 block text-[9px]">BACKSCATTER POWER</span>
+                <span className="font-bold text-cyan-300 text-xs">
+                  {dprviResult.vv_mean_db !== null && dprviResult.vv_mean_db !== undefined
+                    ? `VV: ${Number(dprviResult.vv_mean_db).toFixed(1)} dB`
+                    : 'N/A'}
+                </span>
+                <span className="text-slate-500 block text-[8px]">
+                  {dprviResult.vh_mean_db !== null && dprviResult.vh_mean_db !== undefined
+                    ? `VH: ${Number(dprviResult.vh_mean_db).toFixed(1)} dB`
+                    : ''}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* DpRVI Validity Policy & Limitations */}
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800/60 text-[10px] text-slate-400">
+            <div>
+              <span className="text-slate-500">Formula: </span>
+              <span className="text-slate-300">DpRVI = q(q+3)/(q+1)^2, q = VH/VV (Mandal et al., 2020)</span>
+            </div>
+            <div>
+              <span className="text-slate-500">Terrain Shadow: </span>
+              <span className="text-amber-400">Unavailable from STAC provider (unmasked)</span>
+            </div>
+          </div>
+
+          {(dprviResult.preview_base64 || dprviResult.colorized_preview_base64) && (
+            <div className="mt-2 p-2 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1.5">
+              <span className="text-slate-300 text-[10px] font-bold block">
+                COLORIZED DpRVI RADAR CANOPY MAP (VALID RADAR PIXELS ONLY):
+              </span>
+              <img
+                src={(dprviResult.preview_base64 || dprviResult.colorized_preview_base64).startsWith('data:')
+                  ? (dprviResult.preview_base64 || dprviResult.colorized_preview_base64)
+                  : `data:image/png;base64,${dprviResult.preview_base64 || dprviResult.colorized_preview_base64}`}
+                alt="Calibrated DpRVI Radar Canopy Map"
                 className="max-h-48 rounded border border-slate-700 mx-auto object-contain"
               />
             </div>

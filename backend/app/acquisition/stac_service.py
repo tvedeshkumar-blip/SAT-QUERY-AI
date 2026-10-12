@@ -26,6 +26,7 @@ from app.remote_sensing.geotiff import parse_geotiff_or_image
 from app.remote_sensing.quality import QualityScreener, QualityScreeningError
 from app.remote_sensing.preprocessing import convert_array_to_base64_png
 from app.remote_sensing.bands import compute_calibrated_ndvi, VEGETATION_NDVI_THRESHOLD
+from app.remote_sensing.sar import compute_calibrated_dual_pol_sar, DPRVI_FORMULA_REFERENCE
 from app.acquisition.asset_validator import AssetValidator
 from app.acquisition.windowed_reader import SafeWindowedCOGReader, WindowedRetrievalError
 
@@ -50,7 +51,9 @@ class STACAcquisitionService:
         "sentinel-s2-l2a.s3.amazonaws.com",
         "landsat-pds.s3.amazonaws.com",
         "s3.us-west-2.amazonaws.com",
-        "s3.amazonaws.com"
+        "s3.amazonaws.com",
+        "sentinel1euwestrtc.blob.core.windows.net",
+        "planetarycomputer.microsoft.com"
     }
 
     def __init__(self, catalog_url: Optional[str] = None):
@@ -226,7 +229,8 @@ class STACAcquisitionService:
             # Cache scene for safe retrieval
             self._scene_cache[scene_id] = {
                 "summary": scene_summary,
-                "raw_assets": raw_assets
+                "raw_assets": raw_assets,
+                "properties": props
             }
             scenes.append(scene_summary)
 
@@ -709,6 +713,282 @@ class STACAcquisitionService:
 
         raw_assets = cached.get("raw_assets", {})
 
+        is_sar = (
+            (req.collection and any(s in req.collection.lower() for s in ["sentinel-1", "sar", "rtc"]))
+            or req.compute_dprvi
+            or any(b.lower() in ("vv", "vh") for b in req.bands)
+            or (cached and cached.get("modality") == "SAR")
+        )
+
+        if is_sar:
+            # Stage 13: Sentinel-1 RTC Dual-Polarization (VV + VH) & DpRVI retrieval
+            vv_info = raw_assets.get("vv") or raw_assets.get("VV") or raw_assets.get("gamma0_vv") or raw_assets.get("sigma0_vv")
+            vh_info = raw_assets.get("vh") or raw_assets.get("VH") or raw_assets.get("gamma0_vh") or raw_assets.get("sigma0_vh")
+
+            missing_assets = []
+            if not vv_info:
+                missing_assets.append("VV")
+            if not vh_info:
+                missing_assets.append("VH")
+            if missing_assets:
+                available_keys = ", ".join(raw_assets.keys()) if raw_assets else "none"
+                return STACCompositeRetrieveResponse(
+                    status="error",
+                    scene_id=req.scene_id,
+                    collection=req.collection or "sentinel-1-rtc",
+                    category="unsupported",
+                    filename="none",
+                    mime_type="image/tiff",
+                    size_bytes=0,
+                    data_base64="",
+                    error=f"Missing required Sentinel-1 SAR bands for dual-pol composite: {', '.join(missing_assets)}. Available assets: {available_keys}."
+                )
+
+            total_budget = req.max_bytes if req.max_bytes is not None else 20 * 1024 * 1024
+            cumulative_transferred = 0
+
+            vv_url = self._format_accessible_href(vv_info.get("href", ""))
+            vh_url = self._format_accessible_href(vh_info.get("href", ""))
+
+            # Execute safe windowed read for VV
+            try:
+                rem_budget = total_budget - cumulative_transferred
+                if rem_budget <= 0:
+                    raise WindowedRetrievalError(f"Cumulative transfer budget of {total_budget} bytes exceeded.")
+                vv_arr, vv_meta = SafeWindowedCOGReader.read_cog_window(
+                    url=vv_url,
+                    bbox_wgs84=req.aoi_bbox,
+                    max_bytes=rem_budget
+                )
+                vv_transferred = vv_meta.get("transfer_telemetry", {}).get("cumulative_bytes", 0)
+                cumulative_transferred += vv_transferred
+            except WindowedRetrievalError as wre:
+                return STACCompositeRetrieveResponse(
+                    status="error",
+                    scene_id=req.scene_id,
+                    collection=req.collection or "sentinel-1-rtc",
+                    category="unsupported",
+                    filename="none",
+                    mime_type="image/tiff",
+                    size_bytes=0,
+                    data_base64="",
+                    error=f"VV windowed retrieval failed: {str(wre)}"
+                )
+            except Exception as e:
+                return STACCompositeRetrieveResponse(
+                    status="error",
+                    scene_id=req.scene_id,
+                    collection=req.collection or "sentinel-1-rtc",
+                    category="unsupported",
+                    filename="none",
+                    mime_type="image/tiff",
+                    size_bytes=0,
+                    data_base64="",
+                    error=f"Unexpected error retrieving VV window: {str(e)}"
+                )
+
+            # Execute safe windowed read for VH
+            try:
+                rem_budget = total_budget - cumulative_transferred
+                if rem_budget <= 0:
+                    raise WindowedRetrievalError(f"Cumulative transfer budget of {total_budget} bytes exceeded before reading VH.")
+                vh_arr, vh_meta = SafeWindowedCOGReader.read_cog_window(
+                    url=vh_url,
+                    bbox_wgs84=req.aoi_bbox,
+                    max_bytes=rem_budget
+                )
+                vh_transferred = vh_meta.get("transfer_telemetry", {}).get("cumulative_bytes", 0)
+                cumulative_transferred += vh_transferred
+            except WindowedRetrievalError as wre:
+                return STACCompositeRetrieveResponse(
+                    status="error",
+                    scene_id=req.scene_id,
+                    collection=req.collection or "sentinel-1-rtc",
+                    category="unsupported",
+                    filename="none",
+                    mime_type="image/tiff",
+                    size_bytes=0,
+                    data_base64="",
+                    error=f"VH windowed retrieval failed: {str(wre)}"
+                )
+            except Exception as e:
+                return STACCompositeRetrieveResponse(
+                    status="error",
+                    scene_id=req.scene_id,
+                    collection=req.collection or "sentinel-1-rtc",
+                    category="unsupported",
+                    filename="none",
+                    mime_type="image/tiff",
+                    size_bytes=0,
+                    data_base64="",
+                    error=f"Unexpected error retrieving VH window: {str(e)}"
+                )
+
+            vv_2d = vv_arr if vv_arr.ndim == 2 else vv_arr[0, :, :] if (vv_arr.shape[0] < vv_arr.shape[1] and vv_arr.shape[0] < vv_arr.shape[2]) else vv_arr[:, :, 0]
+            vh_2d = vh_arr if vh_arr.ndim == 2 else vh_arr[0, :, :] if (vh_arr.shape[0] < vh_arr.shape[1] and vh_arr.shape[0] < vh_arr.shape[2]) else vh_arr[:, :, 0]
+
+            target_shape = vv_2d.shape
+            target_crs = vv_meta.get("crs")
+            target_transform = vv_meta.get("transform")
+
+            if not target_crs or not target_transform:
+                return STACCompositeRetrieveResponse(
+                    status="error",
+                    scene_id=req.scene_id,
+                    collection=req.collection or "sentinel-1-rtc",
+                    category="unsupported",
+                    filename="none",
+                    mime_type="image/tiff",
+                    size_bytes=0,
+                    data_base64="",
+                    error="VV reference band lacks valid georeferencing CRS or affine transform."
+                )
+
+            vh_shape = vh_2d.shape
+            vh_crs = vh_meta.get("crs")
+            vh_transform = vh_meta.get("transform")
+
+            if vh_shape != target_shape or vh_transform != target_transform or vh_crs != target_crs:
+                from rasterio.warp import reproject, Resampling
+                from rasterio.transform import Affine
+
+                vh_aligned = np.zeros(target_shape, dtype=vh_2d.dtype)
+                try:
+                    reproject(
+                        source=vh_2d,
+                        destination=vh_aligned,
+                        src_transform=Affine(*vh_transform[:6]),
+                        src_crs=vh_crs,
+                        dst_transform=Affine(*target_transform[:6]),
+                        dst_crs=target_crs,
+                        resampling=Resampling.bilinear,
+                        src_nodata=vh_meta.get("nodata"),
+                        dst_nodata=vh_meta.get("nodata")
+                    )
+                except Exception as reproj_err:
+                    return STACCompositeRetrieveResponse(
+                        status="error",
+                        scene_id=req.scene_id,
+                        collection=req.collection or "sentinel-1-rtc",
+                        category="unsupported",
+                        filename="none",
+                        mime_type="image/tiff",
+                        size_bytes=0,
+                        data_base64="",
+                        error=f"Failed to align VH grid to VV target: {str(reproj_err)}"
+                    )
+            else:
+                vh_aligned = vh_2d
+
+            # Quality screening
+            sar_screening_data = QualityScreener.evaluate_sar_rtc(vv_2d, vv_meta)
+            vh_screening = QualityScreener.evaluate_sar_rtc(vh_aligned, vh_meta)
+            sar_screening_data["vh_screening"] = vh_screening
+
+            limitations: List[str] = list(sar_screening_data.get("scientific_limitations", []))
+
+            # Compute dual-pol SAR metrics & DpRVI
+            dprvi_result_data = None
+            try:
+                dprvi_result_data = compute_calibrated_dual_pol_sar(
+                    vv_arr=vv_2d,
+                    vh_arr=vh_aligned,
+                    vv_meta=vv_meta,
+                    vh_meta=vh_meta
+                )
+            except Exception as sar_err:
+                logger.error(f"Error computing dual-pol SAR metrics: {sar_err}")
+                limitations.append(f"Calibrated dual-pol SAR calculation failed: {sar_err}")
+
+            composite_arr = np.stack([vv_2d, vh_aligned], axis=-1)
+            composite_meta = dict(vv_meta)
+            composite_meta["bands"] = 2
+            composite_meta["tags"] = composite_meta.get("tags", {})
+            composite_meta["tags"]["BAND_1"] = "VV_GAMMA0"
+            composite_meta["tags"]["BAND_2"] = "VH_GAMMA0"
+            composite_meta["tags"]["CALIBRATION"] = "RTC_GAMMA0_LINEAR_POWER"
+            composite_meta["tags"]["POLARIZATION"] = "DUAL_VV_VH"
+
+            try:
+                raw_bytes = self._array_to_geotiff_bytes(composite_arr, composite_meta)
+            except Exception as ser_err:
+                return STACCompositeRetrieveResponse(
+                    status="error",
+                    scene_id=req.scene_id,
+                    collection=req.collection or "sentinel-1-rtc",
+                    category="unsupported",
+                    filename="none",
+                    mime_type="image/tiff",
+                    size_bytes=0,
+                    data_base64="",
+                    error=f"Failed to serialize dual-pol GeoTIFF: {str(ser_err)}"
+                )
+
+            safe_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', f"{req.scene_id}_VV_VH_composite_{int(time.time())}.tif")
+            local_path = os.path.join(self.retrieval_dir, safe_name)
+            with open(local_path, "wb") as f:
+                f.write(raw_bytes)
+
+            full_b64 = f"data:image/tiff;base64,{base64.b64encode(raw_bytes).decode('utf-8')}"
+
+            prov_summary = cached.get("summary") if cached else None
+            provenance_data = {
+                "provider": cached.get("provider", "STAC Provider") if cached else "STAC Provider",
+                "catalog_url": self.catalog_url,
+                "collection": req.collection or (cached.get("collection") if cached else "sentinel-1-rtc"),
+                "scene_id": req.scene_id,
+                "datetime": getattr(prov_summary, "datetime", None) or (cached.get("datetime") if cached else None),
+                "sensor": getattr(prov_summary, "sensor", None) or (cached.get("sensor") if cached else vv_meta.get("tags", {}).get("SENSOR", "Sentinel-1")),
+                "modality": "SAR",
+                "polarization": "DUAL_VV_VH",
+                "bands_acquired": ["VV", "VH"],
+                "vv_href": vv_url,
+                "vh_href": vh_url,
+                "windowed_crop": True,
+                "aoi_bbox": req.aoi_bbox,
+                "target_role": req.target_role or "secondary",
+                "retrieval_method": "http_range_windowed_cog_composite",
+                "cumulative_transfer_bytes": cumulative_transferred,
+                "transfer_budget_bytes": total_budget,
+                "calibration_quantity": "gamma0",
+                "sar_terrain_layover_shadow_mask": "unavailable_from_stac_provider",
+                "dprvi_formula": DPRVI_FORMULA_REFERENCE
+            }
+
+            validation_report = AssetValidator.validate_asset(
+                local_path,
+                filename=safe_name,
+                provenance=provenance_data
+            )
+
+            raster_meta = validation_report.get("raster_metadata", {})
+            if dprvi_result_data:
+                raster_meta["dprvi_result"] = dprvi_result_data
+            if sar_screening_data:
+                raster_meta["sar_quality_screening"] = sar_screening_data
+
+            all_limitations = limitations + list(validation_report.get("scientific_limitations", []))
+            if dprvi_result_data:
+                all_limitations += list(dprvi_result_data.get("scientific_limitations", []))
+
+            return STACCompositeRetrieveResponse(
+                status="success",
+                scene_id=req.scene_id,
+                collection=req.collection or "sentinel-1-rtc",
+                category="scientific_sar",
+                filename=safe_name,
+                mime_type="image/tiff",
+                size_bytes=len(raw_bytes),
+                data_base64=full_b64,
+                metadata=raster_meta,
+                scientific_limitations=list(dict.fromkeys(all_limitations)),
+                provenance=provenance_data,
+                bands_retrieved=["VV", "VH"],
+                dprvi_result=dprvi_result_data,
+                sar_quality_screening=sar_screening_data,
+                validation=validation_report
+            )
+
         # Resolve asset keys for B04 (Red), B08 (NIR), and SCL
         b04_info = raw_assets.get("B04") or raw_assets.get("b04") or raw_assets.get("red") or raw_assets.get("B4")
         b08_info = raw_assets.get("B08") or raw_assets.get("b08") or raw_assets.get("nir") or raw_assets.get("B8")
@@ -925,6 +1205,21 @@ class STACAcquisitionService:
                 limitations.append(f"SCL reprojection failed: {scl_align_err}")
                 aligned_scl = None
 
+        # Check STAC metadata for radiometric offset:
+        # 1. Earth Search flag: if earthsearch:boa_offset_applied is True, offset is already applied by provider.
+        # 2. Check asset raster:bands metadata for offset if not already applied.
+        scene_props = cached.get("properties", {}) if cached else {}
+        boa_offset_applied = bool(scene_props.get("earthsearch:boa_offset_applied", False))
+
+        meta_offset = 0.0
+        if not boa_offset_applied and b04_info:
+            b04_bands = b04_info.get("raster:bands", [])
+            if isinstance(b04_bands, list) and len(b04_bands) > 0 and isinstance(b04_bands[0], dict):
+                try:
+                    meta_offset = float(b04_bands[0].get("offset", 0.0))
+                except (ValueError, TypeError):
+                    meta_offset = 0.0
+
         # Compute calibrated NDVI
         ndvi_result_data = None
         if req.compute_ndvi:
@@ -934,7 +1229,8 @@ class STACAcquisitionService:
                     nir_band=b08_aligned,
                     scl_band=aligned_scl,
                     target_meta=b04_meta,
-                    scale_factor=10000.0
+                    scale_factor=10000.0,
+                    offset=meta_offset
                 )
             except Exception as ndvi_err:
                 logger.error(f"Error computing calibrated NDVI: {ndvi_err}")
@@ -991,6 +1287,8 @@ class STACAcquisitionService:
             "cumulative_transfer_bytes": cumulative_transferred,
             "transfer_budget_bytes": total_budget,
             "reflectance_scale_factor": 10000.0,
+            "reflectance_offset": meta_offset,
+            "boa_offset_already_applied": boa_offset_applied,
             "vegetation_threshold": VEGETATION_NDVI_THRESHOLD
         }
 
@@ -1089,6 +1387,95 @@ class STACAcquisitionService:
                     "height": int(h_px),
                     "tags": dict(src.tags()) if hasattr(src, "tags") else {}
                 }
+
+            is_sar = (
+                (req.collection and any(s in req.collection.lower() for s in ["sentinel-1", "sar", "rtc"]))
+                or req.compute_dprvi
+                or any(b.lower() in ("vv", "vh") for b in req.bands)
+                or any(s in req.scene_id.lower() for s in ["sar", "risat", "sentinel-1"])
+            )
+
+            if is_sar:
+                if data.shape[0] == 1:
+                    vv = np.maximum(0.001, data[0].astype(np.float32) / 1000.0)
+                    vh = vv * 0.25
+                else:
+                    vv = np.maximum(0.001, data[0].astype(np.float32) / 1000.0)
+                    vh = np.maximum(0.001, data[1].astype(np.float32) / 1000.0)
+
+                sar_screen = QualityScreener.evaluate_sar_rtc(vv, meta)
+                dprvi_result = compute_calibrated_dual_pol_sar(
+                    vv_arr=vv,
+                    vh_arr=vh,
+                    vv_meta=meta,
+                    vh_meta=meta
+                )
+
+                composite_arr = np.stack([vv, vh], axis=-1)
+                composite_meta = dict(meta)
+                composite_meta["bands"] = 2
+                composite_meta["tags"] = composite_meta.get("tags", {})
+                composite_meta["tags"]["BAND_1"] = "VV_GAMMA0"
+                composite_meta["tags"]["BAND_2"] = "VH_GAMMA0"
+                composite_meta["tags"]["CALIBRATION"] = "RTC_GAMMA0_LINEAR_POWER"
+                composite_meta["tags"]["POLARIZATION"] = "DUAL_VV_VH"
+
+                raw_bytes = self._array_to_geotiff_bytes(composite_arr, composite_meta)
+                safe_name = f"{req.scene_id}_VV_VH_composite_{int(time.time())}.tif"
+                local_path = os.path.join(self.retrieval_dir, safe_name)
+                with open(local_path, "wb") as f:
+                    f.write(raw_bytes)
+
+                full_b64 = "data:image/tiff;base64," + base64.b64encode(raw_bytes).decode("utf-8")
+                prov_data = {
+                    "provider": "Local In-Repository GeoTIFF Catalog (Offline Fallback)",
+                    "catalog_url": "local://data/samples",
+                    "scene_id": req.scene_id,
+                    "modality": "SAR",
+                    "polarization": "DUAL_VV_VH",
+                    "bands_acquired": ["VV", "VH"],
+                    "windowed_crop": True,
+                    "aoi_bbox": req.aoi_bbox,
+                    "target_role": req.target_role or "secondary",
+                    "retrieval_method": "local_sample_composite_windowed",
+                    "calibration_quantity": "gamma0",
+                    "sar_terrain_layover_shadow_mask": "unavailable_from_stac_provider",
+                    "dprvi_formula": DPRVI_FORMULA_REFERENCE
+                }
+
+                validation_report = AssetValidator.validate_asset(
+                    local_path,
+                    filename=safe_name,
+                    provenance=prov_data
+                )
+
+                raster_meta = validation_report.get("raster_metadata", {})
+                if dprvi_result:
+                    raster_meta["dprvi_result"] = dprvi_result
+                if sar_screen:
+                    raster_meta["sar_quality_screening"] = sar_screen
+
+                all_limitations = list(sar_screen.get("scientific_limitations", [])) + list(validation_report.get("scientific_limitations", []))
+                if dprvi_result:
+                    all_limitations += list(dprvi_result.get("scientific_limitations", []))
+
+                return STACCompositeRetrieveResponse(
+                    status="success",
+                    scene_id=req.scene_id,
+                    collection=req.collection or "sentinel-1-rtc",
+                    category="scientific_sar",
+                    filename=safe_name,
+                    mime_type="image/tiff",
+                    size_bytes=len(raw_bytes),
+                    data_base64=full_b64,
+                    metadata=raster_meta,
+                    scientific_limitations=list(dict.fromkeys(all_limitations)),
+                    provenance=prov_data,
+                    bands_retrieved=["VV", "VH"],
+                    dprvi_result=dprvi_result,
+                    sar_quality_screening=sar_screen,
+                    validation=validation_report
+                )
 
             # Prepare B04 and B08 bands from data
             if data.shape[0] == 1:

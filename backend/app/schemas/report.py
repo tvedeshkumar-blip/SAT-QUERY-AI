@@ -67,6 +67,19 @@ class ReportProvenanceSchema(BaseModel):
     b08_asset_id: Optional[str] = Field(None, description="Source asset ID or href for B08 (NIR)")
     scl_asset_id: Optional[str] = Field(None, description="Source asset ID or href for SCL mask")
     ndvi_status: Optional[str] = Field(None, description="NDVI calculation status (e.g. 'success' or 'unsupported_zero_valid_pixels')")
+    dprvi_mean: Optional[float] = Field(None, description="Calibrated Sentinel-1 RTC VV/VH mean DpRVI")
+    dprvi_p90: Optional[float] = Field(None, description="Calibrated Sentinel-1 RTC VV/VH 90th percentile DpRVI")
+    cross_pol_ratio_linear: Optional[float] = Field(None, description="Calibrated mean cross-polarization ratio q = VH/VV (linear)")
+    cross_pol_ratio_db: Optional[float] = Field(None, description="Calibrated mean cross-polarization ratio 10*log10(q) (dB)")
+    sar_vv_mean_db: Optional[float] = Field(None, description="Sentinel-1 RTC mean VV backscatter power converted to dB (10*log10(mean linear))")
+    sar_vh_mean_db: Optional[float] = Field(None, description="Sentinel-1 RTC mean VH backscatter power converted to dB (10*log10(mean linear))")
+    sar_polarization_mode: Optional[str] = Field(None, description="Polarization configuration (e.g. 'DUAL_VV_VH')")
+    sar_vegetation_proxy_coverage_pct: Optional[float] = Field(None, description="Percentage of valid radar pixels with DpRVI >= 0.45")
+    dprvi_vegetation_threshold: Optional[float] = Field(None, description="Explicit DpRVI volume scattering canopy threshold (default 0.45)")
+    vv_asset_id: Optional[str] = Field(None, description="Source asset ID or href for VV polarization")
+    vh_asset_id: Optional[str] = Field(None, description="Source asset ID or href for VH polarization")
+    dprvi_status: Optional[str] = Field(None, description="DpRVI calculation status (e.g. 'success' or 'unsupported_zero_valid_pixels')")
+    sar_terrain_mask_status: Optional[str] = Field(None, description="Status of terrain layover/shadow mask (e.g. 'unavailable_from_stac_provider')")
 
 
 class ReportVerificationSummarySchema(BaseModel):

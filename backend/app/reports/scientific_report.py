@@ -251,6 +251,87 @@ class ScientificReportBuilder:
             ndvi_status=ndvi_status,
         )
 
+        # Extract calibrated Sentinel-1 RTC dual-pol DpRVI provenance
+        dprvi_res = metadata.get("dprvi_result") or metadata.get("dprvi") or (metadata.get("optical_sar_joint", {}).get("dprvi") if isinstance(metadata.get("optical_sar_joint"), dict) else None)
+        dprvi_mean = None
+        dprvi_p90 = None
+        q_lin = None
+        q_db = None
+        vv_mean_db = None
+        vh_mean_db = None
+        sar_pol_mode = None
+        sar_veg_pct = None
+        dprvi_veg_thresh = None
+        vv_id = None
+        vh_id = None
+        dprvi_status = None
+        sar_terrain_status = None
+
+        if isinstance(dprvi_res, dict):
+            dprvi_mean = dprvi_res.get("dprvi_mean")
+            dprvi_p90 = dprvi_res.get("dprvi_p90")
+            q_lin = dprvi_res.get("cross_pol_ratio_linear")
+            q_db = dprvi_res.get("cross_pol_ratio_db")
+            vv_mean_db = dprvi_res.get("vv_mean_db")
+            vh_mean_db = dprvi_res.get("vh_mean_db")
+            sar_pol_mode = dprvi_res.get("polarization_mode", "DUAL_VV_VH")
+            sar_veg_pct = dprvi_res.get("vegetation_proxy_coverage_pct")
+            dprvi_veg_thresh = dprvi_res.get("vegetation_threshold", 0.45)
+            vv_id = dprvi_res.get("provenance", {}).get("vv_asset_id") or "VV"
+            vh_id = dprvi_res.get("provenance", {}).get("vh_asset_id") or "VH"
+            dprvi_status = dprvi_res.get("status")
+            sar_terrain_status = dprvi_res.get("validity_policy", {}).get("sar_terrain_layover_shadow_mask", "unavailable_from_stac_provider")
+        elif evidence_package:
+            for pm in evidence_package.physical_measurements:
+                if pm.name == "sar_mean_dprvi" and pm.value is not None:
+                    try:
+                        dprvi_mean = float(pm.value)
+                    except (ValueError, TypeError):
+                        pass
+                if pm.name == "sar_p90_dprvi" and pm.value is not None:
+                    try:
+                        dprvi_p90 = float(pm.value)
+                    except (ValueError, TypeError):
+                        pass
+                if pm.name == "sar_cross_pol_ratio_linear" and pm.value is not None:
+                    try:
+                        q_lin = float(pm.value)
+                    except (ValueError, TypeError):
+                        pass
+                if pm.name == "sar_cross_pol_ratio_db" and pm.value is not None:
+                    try:
+                        q_db = float(pm.value)
+                    except (ValueError, TypeError):
+                        pass
+                if pm.name == "sar_vv_mean_to_db" and pm.value is not None:
+                    try:
+                        vv_mean_db = float(pm.value)
+                    except (ValueError, TypeError):
+                        pass
+                if pm.name == "sar_vh_mean_to_db" and pm.value is not None:
+                    try:
+                        vh_mean_db = float(pm.value)
+                    except (ValueError, TypeError):
+                        pass
+            for hi in evidence_package.heuristic_indicators:
+                if hi.name == "radar_vegetation_volume_coverage":
+                    sar_veg_pct = hi.percentage
+                    dprvi_veg_thresh = 0.45
+
+        provenance.dprvi_mean = dprvi_mean
+        provenance.dprvi_p90 = dprvi_p90
+        provenance.cross_pol_ratio_linear = q_lin
+        provenance.cross_pol_ratio_db = q_db
+        provenance.sar_vv_mean_db = vv_mean_db
+        provenance.sar_vh_mean_db = vh_mean_db
+        provenance.sar_polarization_mode = sar_pol_mode
+        provenance.sar_vegetation_proxy_coverage_pct = sar_veg_pct
+        provenance.dprvi_vegetation_threshold = dprvi_veg_thresh
+        provenance.vv_asset_id = vv_id
+        provenance.vh_asset_id = vh_id
+        provenance.dprvi_status = dprvi_status
+        provenance.sar_terrain_mask_status = sar_terrain_status
+
         # 3. Physical Measurements
         physical_measurements: List[PhysicalMeasurementReportItem] = []
         valid_artifact_ids = set()
@@ -368,6 +449,9 @@ class ScientificReportBuilder:
         if (getattr(provenance, "ndvi_mean", None) is not None or getattr(provenance, "ndvi_status", None)) and "SENTINEL2_CALIBRATED_NDVI_COMPUTED" not in pipeline_steps:
             pipeline_steps.append("SENTINEL2_CALIBRATED_NDVI_COMPUTED")
 
+        if (getattr(provenance, "dprvi_mean", None) is not None or getattr(provenance, "dprvi_status", None)) and "SENTINEL1_RTC_DUAL_POL_COMPUTED" not in pipeline_steps:
+            pipeline_steps.append("SENTINEL1_RTC_DUAL_POL_COMPUTED")
+
         reproducibility = ReportReproducibilitySchema(
             software_version="SatQuery-AI v1.0.0 (ISRO PS 26167 Stage 8 Scientific Reporting)",
             provider_config={
@@ -445,6 +529,30 @@ def generate_scientific_markdown(report: ScientificReportSchema) -> str:
             lines.append(f"| **Quality Mask Policy** | `{prov.scl_masking_policy}` | Classes 0, 1, 3, 8, 9, 10 excluded; invalid denominator masked |")
         if prov.ndvi_status == "unsupported_zero_valid_pixels":
             lines.append(f"| **Calculation Status** | `unsupported_zero_valid_pixels` | Zero valid clear pixels observed; numerical NDVI statistics suppressed |")
+
+    if prov.dprvi_mean is not None or prov.dprvi_status:
+        lines.append("")
+        lines.append("### Sentinel-1 RTC Dual-Polarization (VV + VH) & DpRVI Provenance")
+        lines.append("")
+        lines.append("| Metric / Parameter | Value | Description / Standard |")
+        lines.append("| :--- | :--- | :--- |")
+        if prov.dprvi_mean is not None:
+            lines.append(f"| **Mean DpRVI** | `{prov.dprvi_mean}` | Dual-Polarimetric Radar Vegetation Index [0.0, 1.0] (Mandal et al., 2020) |")
+        if prov.dprvi_p90 is not None:
+            lines.append(f"| **90th-Percentile DpRVI (p90)** | `{prov.dprvi_p90}` | Peak radar volume scattering proxy [0.0, 1.0] |")
+        if prov.cross_pol_ratio_linear is not None:
+            lines.append(f"| **Cross-Pol Ratio (linear)** | `{prov.cross_pol_ratio_linear}` | Mean linear power ratio q = VH / VV across valid radar pixels |")
+        if prov.cross_pol_ratio_db is not None:
+            lines.append(f"| **Cross-Pol Ratio (dB)** | `{prov.cross_pol_ratio_db} dB` | 10*log10(mean cross-pol ratio) |")
+        if prov.sar_vv_mean_db is not None:
+            lines.append(f"| **Mean VV Backscatter** | `{prov.sar_vv_mean_db} dB` | Radiometric average: 10*log10(mean linear gamma0) |")
+        if prov.sar_vh_mean_db is not None:
+            lines.append(f"| **Mean VH Backscatter** | `{prov.sar_vh_mean_db} dB` | Radiometric average: 10*log10(mean linear gamma0) |")
+        if prov.sar_vegetation_proxy_coverage_pct is not None:
+            lines.append(f"| **Radar Vegetation Proxy** | `{prov.sar_vegetation_proxy_coverage_pct}%` | Valid pixels exceeding DpRVI canopy threshold `{prov.dprvi_vegetation_threshold or 0.45}` |")
+        lines.append(f"| **Terrain Layover/Shadow Mask** | `{prov.sar_terrain_mask_status or 'unavailable_from_stac_provider'}` | Provider geometric mask unavailable; terrain relief shadows not masked |")
+        if prov.dprvi_status == "unsupported_zero_valid_pixels":
+            lines.append(f"| **Calculation Status** | `unsupported_zero_valid_pixels` | Zero valid radar pixels observed; numerical dual-pol statistics suppressed |")
 
     lines.append("")
 

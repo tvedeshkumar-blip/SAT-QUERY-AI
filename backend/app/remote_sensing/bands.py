@@ -18,6 +18,7 @@ def compute_calibrated_ndvi(
     scl_arr: Optional[np.ndarray] = None,
     scl_meta: Optional[Dict[str, Any]] = None,
     scale_factor: float = 10000.0,
+    offset: float = 0.0,
     vegetation_threshold: float = VEGETATION_NDVI_THRESHOLD,
     allow_uncertain_as_clear: bool = False,
     # Compatibility aliases
@@ -32,7 +33,7 @@ def compute_calibrated_ndvi(
         NDVI = (B08 - B04) / (B08 + B04)
 
     Requirements:
-    - Reflectance conversion: DN / scale_factor (default: 10,000 for Sentinel-2 L2A).
+    - Reflectance conversion: (DN / scale_factor) + offset (default scale: 10,000 for Sentinel-2 L2A).
     - Grid alignment: Validates matching CRS, affine geotransform, and dimensions.
     - Zero denominator protection: Pixels where (B08 + B04) <= 1e-5 are masked (never assigned 0).
     - SCL quality screening: Excludes clouds (8, 9, 10), cloud shadows (3), defective (1), nodata (0),
@@ -78,12 +79,39 @@ def compute_calibrated_ndvi(
         else:
             raise ValueError(f"Spatial dimension mismatch between B04 ({b04_2d.shape}) and B08 ({b08_2d.shape})")
 
-    # 3. Surface Reflectance Scaling (Sentinel-2 Level-2A convention: DN / 10000.0)
+    # 3. Surface Reflectance Scaling (Sentinel-2 Level-2A convention: (DN / scale_factor) + offset)
     is_b04_int = np.issubdtype(b04_2d.dtype, np.integer) or np.issubdtype(b04_2d.dtype, np.unsignedinteger)
     is_b08_int = np.issubdtype(aligned_b08.dtype, np.integer) or np.issubdtype(aligned_b08.dtype, np.unsignedinteger)
 
-    red_refl = (b04_2d.astype(np.float64) / scale_factor) if (is_b04_int or np.nanmax(b04_2d) > 2.0) else b04_2d.astype(np.float64)
-    nir_refl = (aligned_b08.astype(np.float64) / scale_factor) if (is_b08_int or np.nanmax(aligned_b08) > 2.0) else aligned_b08.astype(np.float64)
+    # Resolve metadata-driven or parameter-driven radiometric offset
+    effective_offset = offset
+    if effective_offset == 0.0 and b04_meta:
+        if "offset" in b04_meta:
+            try:
+                effective_offset = float(b04_meta["offset"])
+            except (ValueError, TypeError):
+                pass
+        elif "raster:bands" in b04_meta and isinstance(b04_meta["raster:bands"], list) and len(b04_meta["raster:bands"]) > 0:
+            band_info = b04_meta["raster:bands"][0]
+            if isinstance(band_info, dict) and "offset" in band_info:
+                try:
+                    effective_offset = float(band_info["offset"])
+                except (ValueError, TypeError):
+                    pass
+
+    # Normalize offset to reflectance units:
+    # If |effective_offset| > 2.0, it is represented in integer DN units (e.g. -1000 DN -> -0.1 reflectance)
+    offset_refl = (effective_offset / scale_factor) if abs(effective_offset) > 2.0 else float(effective_offset)
+
+    if is_b04_int or np.nanmax(b04_2d) > 2.0:
+        red_refl = (b04_2d.astype(np.float64) / scale_factor) + offset_refl
+    else:
+        red_refl = b04_2d.astype(np.float64) + (offset_refl if abs(effective_offset) <= 2.0 else 0.0)
+
+    if is_b08_int or np.nanmax(aligned_b08) > 2.0:
+        nir_refl = (aligned_b08.astype(np.float64) / scale_factor) + offset_refl
+    else:
+        nir_refl = aligned_b08.astype(np.float64) + (offset_refl if abs(effective_offset) <= 2.0 else 0.0)
 
     # 4. Valid-pixel policy & masking
     finite_mask = np.isfinite(red_refl) & np.isfinite(nir_refl)
@@ -187,7 +215,8 @@ def compute_calibrated_ndvi(
 
     # 9. Document Scientific Limitations
     limitations = [
-        f"Calibrated NDVI was computed from Sentinel-2 L2A BOA surface reflectance using scale factor {scale_factor}.",
+        f"Calibrated NDVI was computed from Sentinel-2 L2A BOA surface reflectance using scale factor {scale_factor}" +
+        (f" and radiometric offset {effective_offset}." if effective_offset != 0.0 else "."),
         f"Vegetation canopy coverage proxy uses explicit scientific threshold NDVI >= {vegetation_threshold:.2f}.",
         "NDVI indicates chlorophyll absorption and cellular structure; it does not identify crop species, tree taxonomy, or plant health in isolation."
     ]
@@ -218,8 +247,11 @@ def compute_calibrated_ndvi(
         "preview_base64": colorized_b64,
         "scl_evaluation": scl_eval,
         "scale_factor_applied": scale_factor,
+        "offset_applied": effective_offset,
         "calibration": {
             "scale_factor": scale_factor,
+            "offset": effective_offset,
+            "offset_reflectance": offset_refl,
             "convention": "BOA_SURFACE_REFLECTANCE"
         },
         "validity_policy": {

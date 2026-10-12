@@ -132,6 +132,45 @@ class DeterministicVerifier:
                     if pm.value is not None:
                         failures.append(f"Cannot report numeric NDVI statistic '{pm.name}' ({pm.value}) when valid pixel count is zero.")
 
+        # Check K (Package-Level): Deterministic validation of Sentinel-1 RTC Dual-Polarization & DpRVI measurements
+        for pm in evidence_package.physical_measurements:
+            pm_name_lower = pm.name.lower()
+            cal_qty_lower = (pm.calibration_quantity or "").lower()
+            is_dprvi_measurement = "dprvi" in pm_name_lower or "dprvi" in cal_qty_lower
+            if is_dprvi_measurement:
+                # 1. DpRVI values must be finite and within [0.0, 1.0] (Mandal et al., 2020)
+                if pm.value is not None:
+                    try:
+                        val_float = float(pm.value)
+                        import math
+                        if math.isnan(val_float) or math.isinf(val_float):
+                            failures.append(f"DpRVI measurement '{pm.name}' must be finite, found NaN/inf.")
+                        elif val_float < 0.0 or val_float > 1.0:
+                            failures.append(f"DpRVI measurement '{pm.name}' value {val_float} is outside valid physical range [0.0, 1.0].")
+                    except (ValueError, TypeError):
+                        failures.append(f"DpRVI measurement '{pm.name}' value '{pm.value}' is not a valid numeric float.")
+
+                # 2. Must be reported as a unitless ratio [0, 1], not dB, %, or linear power
+                unit_lower = (pm.unit or "").strip().lower()
+                invalid_dprvi_units = ["db", "%", "percent", "percentage", "reflectance", "m^2/m^2", "m2/m2"]
+                if any(iu == unit_lower or f" {iu}" in unit_lower or f"{iu} " in unit_lower for iu in invalid_dprvi_units):
+                    failures.append(f"DpRVI measurement '{pm.name}' must be reported as a unitless ratio [0, 1], not '{pm.unit}'.")
+
+                # 3. Zero valid pixels defense
+                if evidence_package.valid_pixel_count == 0 or (hasattr(evidence_package, "valid_pixel_percentage") and evidence_package.valid_pixel_percentage == 0.0 and evidence_package.total_pixel_count and evidence_package.total_pixel_count > 0):
+                    if pm.value is not None:
+                        failures.append(f"Cannot report numeric DpRVI statistic '{pm.name}' ({pm.value}) when valid pixel count is zero.")
+
+            # Cross-polarization ratio validation
+            is_cross_pol_linear = "cross_pol_ratio_linear" in pm_name_lower
+            if is_cross_pol_linear and pm.value is not None:
+                try:
+                    val_float = float(pm.value)
+                    if val_float < 0.0:
+                        failures.append(f"Cross-polarization ratio '{pm.name}' linear power ratio cannot be negative ({val_float}).")
+                except (ValueError, TypeError):
+                    pass
+
         # 5. Evaluate Candidate Claims & Answer Text
         claims_to_check: List[ClaimVerificationItem] = []
         if candidate_claims:
@@ -574,6 +613,107 @@ class DeterministicVerifier:
                         c_status = "unsupported"
                         c_reason = msg
 
+            # Check K: Sentinel-1 RTC Dual-Polarization (VV + VH) & DpRVI Claims
+            is_dprvi_claim = any(
+                t in c_text_lower for t in [
+                    "dprvi", "dual-pol radar vegetation index", "dual-polarimetric radar vegetation index",
+                    "radar vegetation index", "dual-pol rvi", "cross-polarization ratio", "cross-pol ratio"
+                ]
+            )
+            if is_dprvi_claim:
+                # 1. Out-of-bounds DpRVI values in claim text (valid physical range [0.0, 1.0])
+                dprvi_val_matches = re.findall(r'dprvi\s*(?:is|=|of|value\s*(?:is|=|of)?|score\s*(?:is|=|of)?)\s*[:=]?\s*([+-]?\d+(?:\.\d+)?)', c_text_lower)
+                for dv_str in dprvi_val_matches:
+                    try:
+                        dv = float(dv_str)
+                        if dv < 0.0 or dv > 1.0:
+                            msg = f"Claim asserts DpRVI value {dv} outside physical bounds [0.0, 1.0]."
+                            failures.append(msg)
+                            contradictions.append(msg)
+                            c_status = "contradicted"
+                            c_reason = msg
+                    except ValueError:
+                        pass
+
+                # 2. Asserting DpRVI in invalid units (percentage, dB, reflectance, linear power)
+                if (re.search(r'dprvi\s*(?:is|=|of)?\s*[+-]?\d+(?:\.\d+)?\s*(?:%|percent|percentage)', c_text_lower) or
+                    re.search(r'dprvi\s*(?:is|=|of)?\s*[+-]?\d+(?:\.\d+)?\s*(?:db|decibels)', c_text_lower) or
+                    re.search(r'dprvi\s*(?:is|=|of)?\s*[+-]?\d+(?:\.\d+)?\s*(?:reflectance|surface reflectance)', c_text_lower) or
+                    re.search(r'dprvi\s*(?:is|=|of)?\s*[+-]?\d+(?:\.\d+)?\s*(?:m\^2/m\^2|m2/m2)', c_text_lower)):
+                    msg = "Claim reports DpRVI in invalid units (% / dB / reflectance / m^2/m^2) rather than unitless ratio [0, 1]."
+                    failures.append(msg)
+                    contradictions.append(msg)
+                    c_status = "contradicted"
+                    c_reason = msg
+
+                # 3. Dual-polarization completeness: DpRVI requires both VV and VH inputs
+                has_vv = False
+                has_vh = False
+                for asset in evidence_package.source_assets:
+                    aid = str(asset.get("id", "")).lower()
+                    desc = str(asset.get("description", "")).lower()
+                    key = str(asset.get("asset_key", "")).lower()
+                    pol = str(asset.get("polarization", "")).lower()
+                    if "vv" in aid or "vv" in key or "vv" in desc or "vv" in pol:
+                        has_vv = True
+                    if "vh" in aid or "vh" in key or "vh" in desc or "vh" in pol:
+                        has_vh = True
+                    if "dual_vv_vh" in pol or "dual" in pol:
+                        has_vv = True
+                        has_vh = True
+
+                for art in evidence_package.evidence_artifacts:
+                    art_id_l = art.artifact_id.lower()
+                    art_title_l = (art.title or "").lower()
+                    if "vv" in art_id_l or "vv" in art_title_l:
+                        has_vv = True
+                    if "vh" in art_id_l or "vh" in art_title_l:
+                        has_vh = True
+                    if "dprvi" in art_id_l or "dprvi" in art_title_l:
+                        has_vv = True
+                        has_vh = True
+
+                for pm in evidence_package.physical_measurements:
+                    pm_l = pm.name.lower()
+                    if "vv" in pm_l:
+                        has_vv = True
+                    if "vh" in pm_l:
+                        has_vh = True
+                    if "dprvi" in pm_l:
+                        has_vv = True
+                        has_vh = True
+
+                # If claim asserts DpRVI but evidence package is single-pol (e.g., only VV or only VH)
+                if not (has_vv and has_vh):
+                    msg = "DpRVI dual-polarization analysis requires evidence and provenance for both VV and VH channels; single-pol data cannot support DpRVI."
+                    failures.append(msg)
+                    contradictions.append(msg)
+                    c_status = "unsupported"
+                    c_reason = msg
+
+                # 4. Zero valid pixels check
+                if evidence_package.valid_pixel_count == 0 or (hasattr(evidence_package, "valid_pixel_percentage") and evidence_package.valid_pixel_percentage == 0.0 and evidence_package.total_pixel_count and evidence_package.total_pixel_count > 0):
+                    has_numeric_assertion = bool(
+                        re.search(r'dprvi\s*(?:is|=|of)?\s*[+-]?\d+(?:\.\d+)?', c_text_lower) or
+                        re.search(r'(?:mean|average|p90)\s*dprvi', c_text_lower) or
+                        "radar vegetation" in c_text_lower
+                    )
+                    is_disclaiming_zero = any(t in c_text_lower for t in ["zero valid", "no valid pixels", "unsupported", "cannot be calculated", "none"])
+                    if has_numeric_assertion and not is_disclaiming_zero:
+                        msg = "A zero-valid-pixel SAR result cannot support numeric DpRVI statistics or radar canopy claims."
+                        failures.append(msg)
+                        contradictions.append(msg)
+                        c_status = "unsupported"
+                        c_reason = msg
+
+                # 5. Scientific distinction: DpRVI cannot claim to measure optical chlorophyll
+                if any(t in c_text_lower for t in ["chlorophyll", "photosynthetic", "pigment absorption"]):
+                    msg = "DpRVI characterizes radar microwave volume scattering randomness (Mandal et al., 2020); it cannot be claimed as a direct measure of optical chlorophyll."
+                    failures.append(msg)
+                    contradictions.append(msg)
+                    c_status = "contradicted"
+                    c_reason = msg
+
             evaluated_claims.append(ClaimVerificationItem(
                 claim_text=claim.claim_text,
                 claim_type=claim.claim_type,
@@ -806,6 +946,94 @@ class EvidencePackageBuilder:
                 calibration_quantity="gamma0"
             ))
 
+        # Calibrated Sentinel-1 RTC Dual-Polarization (VV + VH) & DpRVI
+        dprvi_info = meta.get("dprvi_result") or meta.get("dprvi") or opt_sar_meta.get("dprvi_result") or opt_sar_meta.get("dprvi")
+        if isinstance(dprvi_info, dict):
+            dprvi_mean = dprvi_info.get("dprvi_mean")
+            dprvi_p90 = dprvi_info.get("dprvi_p90")
+            q_lin = dprvi_info.get("cross_pol_ratio_linear")
+            q_db = dprvi_info.get("cross_pol_ratio_db")
+            vv_lin = dprvi_info.get("vv_mean_linear")
+            vh_lin = dprvi_info.get("vh_mean_linear")
+            vv_db = dprvi_info.get("vv_mean_db")
+            vh_db = dprvi_info.get("vh_mean_db")
+            dprvi_status = dprvi_info.get("status")
+            sar_dprvi_mask = "sar_rtc_valid_mask"
+
+            if dprvi_status != "unsupported_zero_valid_pixels":
+                if dprvi_mean is not None:
+                    physical_measurements.append(PhysicalMeasurementItem(
+                        name="sar_mean_dprvi",
+                        value=dprvi_mean,
+                        unit="unitless ratio [0, 1]",
+                        statistic_type="mean",
+                        mask_applied=sar_dprvi_mask,
+                        calibration_quantity="dual_polarimetric_radar_vegetation_index"
+                    ))
+                if dprvi_p90 is not None:
+                    physical_measurements.append(PhysicalMeasurementItem(
+                        name="sar_p90_dprvi",
+                        value=dprvi_p90,
+                        unit="unitless ratio [0, 1]",
+                        statistic_type="90th percentile",
+                        mask_applied=sar_dprvi_mask,
+                        calibration_quantity="dual_polarimetric_radar_vegetation_index"
+                    ))
+                if q_lin is not None:
+                    physical_measurements.append(PhysicalMeasurementItem(
+                        name="sar_cross_pol_ratio_linear",
+                        value=q_lin,
+                        unit="unitless ratio",
+                        statistic_type="mean linear cross-pol ratio (VH/VV)",
+                        mask_applied=sar_dprvi_mask,
+                        calibration_quantity="cross_polarization_ratio"
+                    ))
+                if q_db is not None:
+                    physical_measurements.append(PhysicalMeasurementItem(
+                        name="sar_cross_pol_ratio_db",
+                        value=q_db,
+                        unit="dB",
+                        statistic_type="10*log10(mean cross-pol ratio)",
+                        mask_applied=sar_dprvi_mask,
+                        calibration_quantity="cross_polarization_ratio"
+                    ))
+                if vv_lin is not None:
+                    physical_measurements.append(PhysicalMeasurementItem(
+                        name="sar_vv_mean_linear_power",
+                        value=vv_lin,
+                        unit="linear power (m^2/m^2)",
+                        statistic_type="mean linear power",
+                        mask_applied=sar_dprvi_mask,
+                        calibration_quantity="gamma0"
+                    ))
+                if vh_lin is not None:
+                    physical_measurements.append(PhysicalMeasurementItem(
+                        name="sar_vh_mean_linear_power",
+                        value=vh_lin,
+                        unit="linear power (m^2/m^2)",
+                        statistic_type="mean linear power",
+                        mask_applied=sar_dprvi_mask,
+                        calibration_quantity="gamma0"
+                    ))
+                if vv_db is not None:
+                    physical_measurements.append(PhysicalMeasurementItem(
+                        name="sar_vv_mean_to_db",
+                        value=vv_db,
+                        unit="dB",
+                        statistic_type="10*log10(mean power)",
+                        mask_applied=sar_dprvi_mask,
+                        calibration_quantity="gamma0"
+                    ))
+                if vh_db is not None:
+                    physical_measurements.append(PhysicalMeasurementItem(
+                        name="sar_vh_mean_to_db",
+                        value=vh_db,
+                        unit="dB",
+                        statistic_type="10*log10(mean power)",
+                        mask_applied=sar_dprvi_mask,
+                        calibration_quantity="gamma0"
+                    ))
+
         # 7. Display statistics
         display_stats = []
         opt_disp = opt_sar_meta.get("optical_mean_albedo") or opt_sar_meta.get("optical_albedo_display_mean")
@@ -874,6 +1102,20 @@ class EvidencePackageBuilder:
                     limitations="Vegetation proxy based on BOA surface reflectance NDVI threshold 0.40; not certified species classification."
                 ))
 
+        if isinstance(dprvi_info, dict) and dprvi_info.get("status") != "unsupported_zero_valid_pixels":
+            sar_veg_pct = dprvi_info.get("vegetation_proxy_coverage_pct")
+            sar_veg_px = dprvi_info.get("veg_pixel_count")
+            sar_thresh = float(dprvi_info.get("vegetation_threshold", 0.45))
+            if sar_veg_pct is not None:
+                heuristics.append(HeuristicIndicatorItem(
+                    name="radar_vegetation_volume_coverage",
+                    percentage=float(sar_veg_pct),
+                    pixel_count=int(sar_veg_px or 0),
+                    definition=f"Valid pixels with Sentinel-1 RTC DpRVI >= {sar_thresh:.2f}",
+                    is_certified_classification=False,
+                    limitations=f"Radar volume scattering proxy based on DpRVI threshold {sar_thresh:.2f}; not certified botanical classification or optical chlorophyll NDVI."
+                ))
+
         # 9. Evidence Artifacts
         evidence_artifacts = []
         if isinstance(ndvi_info, dict) and ndvi_info.get("preview_base64"):
@@ -886,6 +1128,19 @@ class EvidencePackageBuilder:
                     "mean": ndvi_info.get("ndvi_mean"),
                     "p90": ndvi_info.get("ndvi_p90"),
                     "vegetation_coverage_pct": ndvi_info.get("vegetation_coverage_pct")
+                }
+            ))
+        if isinstance(dprvi_info, dict) and (dprvi_info.get("preview_base64") or dprvi_info.get("colorized_preview_base64")):
+            evidence_artifacts.append(EvidenceArtifactItem(
+                artifact_id="ev_sar_dprvi_map",
+                artifact_type="raster_index",
+                title="Sentinel-1 Calibrated DpRVI Map",
+                description="Calibrated Sentinel-1 RTC VV/VH DpRVI dual-polarization radar vegetation index map",
+                statistics={
+                    "mean": dprvi_info.get("dprvi_mean"),
+                    "p90": dprvi_info.get("dprvi_p90"),
+                    "cross_pol_ratio_db": dprvi_info.get("cross_pol_ratio_db"),
+                    "vegetation_proxy_coverage_pct": dprvi_info.get("vegetation_proxy_coverage_pct")
                 }
             ))
         raw_evidence = data.get("evidence", [])

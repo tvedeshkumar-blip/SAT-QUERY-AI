@@ -152,6 +152,19 @@ export interface ReportProvenance {
   b08_asset_id?: string | null;
   scl_asset_id?: string | null;
   ndvi_status?: string | null;
+  dprvi_mean?: number | null;
+  dprvi_p90?: number | null;
+  cross_pol_ratio_linear?: number | null;
+  cross_pol_ratio_db?: number | null;
+  sar_vv_mean_db?: number | null;
+  sar_vh_mean_db?: number | null;
+  sar_polarization_mode?: string | null;
+  sar_vegetation_proxy_coverage_pct?: number | null;
+  dprvi_vegetation_threshold?: number | null;
+  vv_asset_id?: string | null;
+  vh_asset_id?: string | null;
+  dprvi_status?: string | null;
+  sar_terrain_mask_status?: string | null;
 }
 
 export interface ReportVerificationSummary {
@@ -423,6 +436,38 @@ export interface NDVIResultPayload {
   error?: string | null;
 }
 
+export interface DpRVIResultPayload {
+  status: string;
+  is_calibrated?: boolean;
+  summary?: string;
+  dprvi_mean?: number | null;
+  dprvi_p90?: number | null;
+  dprvi_median?: number | null;
+  dprvi_min?: number | null;
+  dprvi_max?: number | null;
+  cross_pol_ratio_linear?: number | null;
+  cross_pol_ratio_db?: number | null;
+  vv_mean_linear?: number | null;
+  vh_mean_linear?: number | null;
+  vv_mean_db?: number | null;
+  vh_mean_db?: number | null;
+  vv_pixel_db_mean?: number | null;
+  vh_pixel_db_mean?: number | null;
+  vegetation_proxy_coverage_pct?: number | null;
+  vegetation_threshold?: number;
+  veg_pixel_count?: number;
+  valid_pixel_count?: number | null;
+  total_pixel_count?: number | null;
+  masked_pixel_count?: number | null;
+  colorized_preview_base64?: string | null;
+  preview_base64?: string | null;
+  polarization_mode?: string;
+  calibration?: Record<string, any>;
+  validity_policy?: Record<string, any>;
+  scientific_limitations?: string[];
+  error?: string | null;
+}
+
 export interface STACCompositeRetrieveRequestPayload {
   scene_id: string;
   aoi_bbox: [number, number, number, number] | number[];
@@ -432,6 +477,7 @@ export interface STACCompositeRetrieveRequestPayload {
   target_role?: string;
   max_bytes?: number;
   compute_ndvi?: boolean;
+  compute_dprvi?: boolean;
 }
 
 export interface STACCompositeRetrieveResponsePayload {
@@ -448,7 +494,9 @@ export interface STACCompositeRetrieveResponsePayload {
   provenance: Record<string, any>;
   bands_retrieved: string[];
   ndvi_result?: NDVIResultPayload | null;
+  dprvi_result?: DpRVIResultPayload | null;
   quality_screening?: Record<string, any> | null;
+  sar_quality_screening?: Record<string, any> | null;
   validation?: STACValidateAssetResponsePayload;
   error?: string;
 }
