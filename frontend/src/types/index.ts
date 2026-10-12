@@ -11,7 +11,16 @@ export type TaskType =
   | 'temporal_sar_change'
   | 'sentinel2_ndvi'
   | 'sentinel1_rtc_dprvi'
-  | 'orchestration';
+  | 'orchestration'
+  | 'temporal_multimodal_clarification';
+
+export interface AnalysisRequest {
+  query: string;
+  images?: any[];
+  mode?: AnalysisMode;
+  target_role?: string;
+  user_model_preference?: string;
+}
 
 export interface BoundingBox {
   xmin: number;
@@ -56,10 +65,21 @@ export interface VisualEvidence {
   statistics?: Record<string, number | string>;
 }
 
+export interface ExecutionTraceStep {
+  step_number: number;
+  tool: string;
+  status: 'completed' | 'failed' | 'retrying';
+  latency_ms: number;
+  summary?: string;
+  error?: string;
+}
+
 export interface TraceStep {
-  step: string;
+  step?: string;
+  step_name?: string;
   timestamp: string;
-  detail: string;
+  detail?: string;
+  details?: string;
   status: 'pending' | 'active' | 'completed' | 'failed';
 }
 
@@ -69,6 +89,9 @@ export interface ExecutionTrace {
   steps: TraceStep[];
   parameters: Record<string, any>;
   execution_time_ms: number;
+  execution_steps?: ExecutionTraceStep[];
+  cumulative_transfer_bytes?: number;
+  transfer_budget_bytes?: number;
 }
 
 export interface ConfidenceBreakdown {
@@ -84,6 +107,63 @@ export interface ConflictInfo {
   conflict_details?: string | null;
   reanalysis_performed: boolean;
   reanalysis_tool?: string | null;
+}
+
+export interface TemporalOpticalChangePayload {
+  status: string;
+  is_calibrated: boolean;
+  summary: string;
+  delta_ndvi_mean?: number | null;
+  delta_ndvi_median?: number | null;
+  delta_ndvi_p10?: number | null;
+  delta_ndvi_p90?: number | null;
+  delta_ndvi_std?: number | null;
+  ndvi_t1_mean?: number | null;
+  ndvi_t2_mean?: number | null;
+  vegetation_loss_pct?: number | null;
+  vegetation_gain_pct?: number | null;
+  stable_vegetation_pct?: number | null;
+  loss_pixel_count?: number;
+  gain_pixel_count?: number;
+  stable_pixel_count?: number;
+  loss_threshold?: number;
+  gain_threshold?: number;
+  joint_valid_pixel_count?: number;
+  total_pixel_count?: number;
+  joint_clearance_pct?: number;
+  colorized_preview_base64?: string;
+  preview_base64?: string;
+  t1_datetime?: string | null;
+  t2_datetime?: string | null;
+  scl_filtering_applied?: boolean;
+  scientific_limitations?: string[];
+}
+
+export interface TemporalSARChangePayload {
+  status: string;
+  is_calibrated: boolean;
+  summary: string;
+  delta_dprvi_mean?: number | null;
+  delta_dprvi_median?: number | null;
+  delta_dprvi_p10?: number | null;
+  delta_dprvi_p90?: number | null;
+  radar_canopy_loss_pct?: number | null;
+  radar_canopy_gain_pct?: number | null;
+  stable_canopy_pct?: number | null;
+  loss_pixel_count?: number;
+  gain_pixel_count?: number;
+  stable_pixel_count?: number;
+  delta_vv_db?: number | null;
+  delta_vh_db?: number | null;
+  t1_dprvi_mean?: number | null;
+  t2_dprvi_mean?: number | null;
+  dprvi_assumption_violations?: Record<string, any>;
+  polarization_mode?: string;
+  calibration_quantity?: string;
+  sar_terrain_layover_shadow_mask?: string;
+  colorized_preview_base64?: string;
+  preview_base64?: string;
+  scientific_limitations?: string[];
 }
 
 export interface AnalysisResponse {
@@ -102,6 +182,7 @@ export interface AnalysisResponse {
   model_status?: string;
   model_provenance?: Record<string, any>;
   evidence: VisualEvidence[];
+  structured_evidence?: any;
   trace: ExecutionTrace;
   metadata?: Record<string, any>;
   confidence_breakdown?: ConfidenceBreakdown;
@@ -126,18 +207,18 @@ export interface PhysicalMeasurementReportItem {
 }
 
 export interface ReportProvenance {
-  analysis_id: string;
-  task: string;
-  query: string;
-  mode: string;
-  created_at: string;
-  sensor_identities: string[];
-  source_asset_ids: string[];
-  acquisition_timestamps: string[];
+  analysis_id?: string;
+  task?: string;
+  query?: string;
+  mode?: string;
+  created_at?: string;
+  sensor_identities?: string[];
+  source_asset_ids?: string[];
+  acquisition_timestamps?: string[];
   crs?: string | null;
   spatial_resolution_m?: number | string | null;
   dimensions?: string | null;
-  registration_status: Record<string, any>;
+  registration_status?: Record<string, any>;
   valid_pixel_count?: number | null;
   total_pixel_count?: number | null;
   valid_pixel_percentage?: number | null;
@@ -145,10 +226,11 @@ export interface ReportProvenance {
   observed_pixel_count?: number | null;
   excluded_quality_pixel_count?: number | null;
   quality_clearance_percentage?: number | null;
-  provider_name: string;
+  provider_name?: string;
+  provider?: string;
   actual_model_used?: string | null;
-  fallback_used: boolean;
-  is_trained_model: boolean;
+  fallback_used?: boolean;
+  is_trained_model?: boolean;
   model_status?: string | null;
   ndvi_mean?: number | null;
   ndvi_p90?: number | null;
@@ -183,6 +265,9 @@ export interface ReportProvenance {
   temporal_t2_datetime?: string | null;
   joint_valid_pixel_count?: number | null;
   dprvi_assumption_violations_count?: number | null;
+  temporal_optical_provenance?: Record<string, any>;
+  temporal_sar_provenance?: Record<string, any>;
+  modality?: string;
 }
 
 export interface ReportVerificationSummary {

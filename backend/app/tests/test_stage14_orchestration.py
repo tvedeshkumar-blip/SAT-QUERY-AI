@@ -159,7 +159,7 @@ def test_temporal_optical_change_rejects_identical_timestamps():
     t1_data = {"b04": b04, "b08": b08, "scl": scl, "meta": {"datetime": "2023-05-01T10:00:00Z"}}
     t2_data = {"b04": b04, "b08": b08, "scl": scl, "meta": {"datetime": "2023-05-01T10:00:00Z"}}
 
-    with pytest.raises(ValueError, match="Temporal optical change requires two distinct acquisition timestamps"):
+    with pytest.raises(ValueError, match="identical acquisition timestamps"):
         compute_temporal_optical_change(t1_data, t2_data)
 
 
@@ -243,14 +243,13 @@ def test_verifier_check_l_rejects_out_of_bounds_delta_ndvi():
             )
         ]
     )
-    result = verifier.verify(pkg, candidate_claims=[])
-    assert result["deterministic_passed"] is False
-    assert any("CHECK_L_OUT_OF_BOUNDS_DELTA_NDVI" in fail for fail in result["deterministic_failures"])
+    passed, failures, claims, contradictions = DeterministicVerifier.verify(pkg, candidate_claims=[])
+    assert passed is False
+    assert any("CHECK_L_OUT_OF_BOUNDS_DELTA_NDVI" in fail for fail in failures)
 
 
 def test_verifier_check_l_rejects_out_of_bounds_delta_dprvi():
     """Verify Check L deterministic package rejection when Delta-DpRVI is outside [-1.0, 1.0]."""
-    verifier = DeterministicVerifier()
     pkg = EvidencePackageSchema(
         task_id="test_chk_l_2",
         query="Test Delta DpRVI bounds",
@@ -265,14 +264,13 @@ def test_verifier_check_l_rejects_out_of_bounds_delta_dprvi():
             )
         ]
     )
-    result = verifier.verify(pkg, candidate_claims=[])
-    assert result["deterministic_passed"] is False
-    assert any("CHECK_L_OUT_OF_BOUNDS_DELTA_DPRVI" in fail for fail in result["deterministic_failures"])
+    passed, failures, claims, contradictions = DeterministicVerifier.verify(pkg, candidate_claims=[])
+    assert passed is False
+    assert any("CHECK_L_OUT_OF_BOUNDS_DELTA_DPRVI" in fail for fail in failures)
 
 
 def test_verifier_check_l_contradicts_fabricated_delta_claim():
     """Verify Check L claim-level contradiction when user claims an impossible delta."""
-    verifier = DeterministicVerifier()
     pkg = EvidencePackageSchema(
         task_id="test_chk_l_3",
         query="Verify claim",
@@ -292,8 +290,8 @@ def test_verifier_check_l_contradicts_fabricated_delta_claim():
         claim_type="measurement",
         status="supported"
     )
-    result = verifier.verify(pkg, candidate_claims=[claim])
-    eval_claim = result["claims"][0]
+    passed, failures, claims, contradictions = DeterministicVerifier.verify(pkg, candidate_claims=[claim])
+    eval_claim = claims[0]
     assert eval_claim.status == "contradicted"
     assert "exceeds mathematical limits" in eval_claim.reason
 

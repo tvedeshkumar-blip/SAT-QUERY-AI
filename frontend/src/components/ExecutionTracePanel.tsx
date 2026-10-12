@@ -3,11 +3,12 @@ import { Terminal, ChevronDown, ChevronRight, CheckCircle2, Clock, Cpu, FileText
 import { ExecutionTrace } from '../types';
 
 interface ExecutionTracePanelProps {
-  trace: ExecutionTrace;
+  trace?: ExecutionTrace;
 }
 
 export const ExecutionTracePanel: React.FC<ExecutionTracePanelProps> = ({ trace }) => {
   const [isOpen, setIsOpen] = useState<boolean>(true);
+  if (!trace) return null;
 
   return (
     <div className="glass-panel rounded-2xl border border-slate-800 bg-slate-900/60 shadow-xl overflow-hidden">

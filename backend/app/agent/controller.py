@@ -9,7 +9,9 @@ from app.schemas.analysis import (
     AnalysisResponseSchema, 
     VisualEvidenceSchema,
     ConfidenceBreakdownSchema,
-    ConflictInfoSchema
+    ConflictInfoSchema,
+    ExecutionTraceSchema,
+    TraceStepSchema
 )
 from app.remote_sensing.validation import InputValidator, ValidationError
 from app.remote_sensing.geotiff import parse_geotiff_or_image
@@ -43,11 +45,6 @@ class AgentController:
         # Dynamic Multi-Step Orchestration Route
         if not request.images or len(request.images) == 0 or request.mode in ("orchestration", "temporal"):
             from app.agent.orchestrator import agent_orchestrator
-            from app.schemas.analysis import (
-                VisualEvidenceSchema,
-                ExecutionTraceSchema,
-                TraceStepSchema
-            )
             orch_res = agent_orchestrator.orchestrate(
                 query=request.query,
                 images=request.images or [],

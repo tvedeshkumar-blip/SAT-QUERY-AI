@@ -181,7 +181,7 @@ class DeterministicVerifier:
                         if math.isnan(val_float) or math.isinf(val_float):
                             failures.append(f"Temporal NDVI change measurement '{pm.name}' must be finite, found NaN/inf.")
                         elif val_float < -2.0 or val_float > 2.0:
-                            failures.append(f"Temporal NDVI change measurement '{pm.name}' value {val_float} is outside valid physical range [-2.0, 2.0].")
+                            failures.append(f"CHECK_L_OUT_OF_BOUNDS_DELTA_NDVI: Temporal NDVI change measurement '{pm.name}' value {val_float} is outside valid physical range [-2.0, 2.0].")
                     except (ValueError, TypeError):
                         failures.append(f"Temporal NDVI change measurement '{pm.name}' value '{pm.value}' is not a valid numeric float.")
                 unit_lower = (pm.unit or "").strip().lower()
@@ -200,7 +200,7 @@ class DeterministicVerifier:
                         if math.isnan(val_float) or math.isinf(val_float):
                             failures.append(f"Temporal DpRVI change measurement '{pm.name}' must be finite, found NaN/inf.")
                         elif val_float < -1.0 or val_float > 1.0:
-                            failures.append(f"Temporal DpRVI change measurement '{pm.name}' value {val_float} is outside valid physical range [-1.0, 1.0].")
+                            failures.append(f"CHECK_L_OUT_OF_BOUNDS_DELTA_DPRVI: Temporal DpRVI change measurement '{pm.name}' value {val_float} is outside valid physical range [-1.0, 1.0].")
                     except (ValueError, TypeError):
                         failures.append(f"Temporal DpRVI change measurement '{pm.name}' value '{pm.value}' is not a valid numeric float.")
                 unit_lower = (pm.unit or "").strip().lower()
@@ -767,7 +767,7 @@ class DeterministicVerifier:
                     try:
                         d_val = float(d_str)
                         if d_val < -2.0 or d_val > 2.0:
-                            msg = f"Claim asserts Delta-NDVI value {d_val} outside physical bounds [-2.0, 2.0]."
+                            msg = f"Claim asserts Delta-NDVI value {d_val} outside physical bounds [-2.0, 2.0] which exceeds mathematical limits."
                             failures.append(msg)
                             contradictions.append(msg)
                             c_status = "contradicted"
@@ -781,7 +781,7 @@ class DeterministicVerifier:
                     try:
                         d_val = float(d_str)
                         if d_val < -1.0 or d_val > 1.0:
-                            msg = f"Claim asserts Delta-DpRVI value {d_val} outside physical bounds [-1.0, 1.0]."
+                            msg = f"Claim asserts Delta-DpRVI value {d_val} outside physical bounds [-1.0, 1.0] which exceeds mathematical limits."
                             failures.append(msg)
                             contradictions.append(msg)
                             c_status = "contradicted"
@@ -949,6 +949,46 @@ class EvidencePackageBuilder:
                 "asset_category": meta.get("asset_category")
             })
 
+        for sc in meta.get("retrieved_scenes", []):
+            if isinstance(sc, dict):
+                coll = str(sc.get("collection", "sentinel-2-l2a"))
+                bands_list = sc.get("bands") or []
+                b_str = " ".join(bands_list)
+                source_assets.append({
+                    "id": sc.get("scene_id", "scene"),
+                    "collection": coll,
+                    "bands": bands_list,
+                    "description": f"Retrieved {coll} {sc.get('scene_id')} with {b_str}",
+                    "asset_key": f"{sc.get('scene_id')}_{b_str}",
+                    "asset_category": "scientific_multispectral" if "sentinel-2" in coll.lower() else "scientific_sar",
+                    "polarization": "DUAL_VV_VH" if "sentinel-1" in coll.lower() else None
+                })
+
+        opt_chg_info = meta.get("temporal_optical_change")
+        if isinstance(opt_chg_info, dict) and opt_chg_info.get("status") != "unsupported_zero_valid_pixels":
+            source_assets.append({
+                "id": "sentinel2_temporal_pair_b04_b08_scl",
+                "collection": "sentinel-2-l2a",
+                "bands": ["B04", "B08", "SCL"],
+                "asset_key": "b04_b08_scl",
+                "description": "Sentinel-2 L2A surface reflectance B04 (Red), B08 (NIR) and SCL quality mask pair",
+                "calibration": "surface_reflectance_boa",
+                "asset_category": "scientific_multispectral"
+            })
+
+        sar_chg_info = meta.get("temporal_sar_change")
+        if isinstance(sar_chg_info, dict) and sar_chg_info.get("status") != "unsupported_zero_valid_pixels":
+            source_assets.append({
+                "id": "sentinel1_rtc_temporal_pair_vv_vh",
+                "collection": "sentinel-1-rtc",
+                "bands": ["VV", "VH"],
+                "asset_key": "vv_vh",
+                "description": "Sentinel-1 RTC radiometrically terrain-corrected gamma0 VV and VH temporal pair",
+                "calibration": "rtc_gamma0_linear_power",
+                "asset_category": "scientific_sar",
+                "polarization": "DUAL_VV_VH"
+            })
+
         # 3. CRS, Resolution, Dimensions
         crs = meta.get("crs_display") or meta.get("crs")
         res = meta.get("resolution") or meta.get("pixel_size")
@@ -963,13 +1003,23 @@ class EvidencePackageBuilder:
 
         # 5. Valid pixel count & Quality Screening
         valid_px = reg_info.get("valid_pixels") or meta.get("valid_pixel_count")
+        if valid_px is None and isinstance(opt_chg_info, dict):
+            valid_px = opt_chg_info.get("joint_valid_pixel_count")
+        if valid_px is None and isinstance(sar_chg_info, dict):
+            valid_px = sar_chg_info.get("joint_valid_pixel_count")
         total_px = reg_info.get("total_pixels") or meta.get("total_pixels")
+        if total_px is None and isinstance(opt_chg_info, dict):
+            total_px = opt_chg_info.get("total_pixel_count")
+        if total_px is None and isinstance(sar_chg_info, dict):
+            total_px = sar_chg_info.get("total_pixel_count")
         valid_pct = reg_info.get("valid_percentage")
         if valid_pct is None and valid_px and total_px:
             valid_pct = round((valid_px / total_px) * 100.0, 2)
 
         # Quality screening provenance
         q_screen = meta.get("quality_screening") or opt_sar_meta.get("quality_screening")
+        if not q_screen and isinstance(opt_chg_info, dict) and opt_chg_info.get("scl_filtering_applied"):
+            q_screen = {"optical": {"screened": True, "method": "scl_atmospheric_filtering"}, "status": "evaluated", "is_evaluated": True}
         opt_screened = bool(q_screen and q_screen.get("optical", {}).get("screened"))
         sar_screened = bool(q_screen and q_screen.get("sar", {}).get("screened"))
         opt_mask_name = "joint_screened_quality_mask" if opt_screened else "joint_valid_mask"

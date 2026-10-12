@@ -6,7 +6,7 @@ import type { AnalysisResponse } from '../types/index.ts';
  * actually computed and present in the analysis response.
  */
 export function extractStructuredEvidence(response: AnalysisResponse | null): Record<string, any> | null {
-  if (!response) return null;
+  if (!response || !response.evidence) return null;
 
   const evidence: Record<string, any> = {
     task: response.task,
