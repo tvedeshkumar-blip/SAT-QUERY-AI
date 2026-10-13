@@ -336,6 +336,7 @@ class SafeWindowedCOGReader:
                     meta = {
                         "driver": src.driver,
                         "dtype": str(data.dtype),
+                        "layout": "HWC" if data.ndim == 3 else "HW",
                         "nodata": src.nodata,
                         "crs": str(src.crs),
                         "crs_display": str(src.crs),

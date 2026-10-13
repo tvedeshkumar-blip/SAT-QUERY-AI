@@ -1,8 +1,11 @@
 import React from 'react';
-import { Sparkles, Layers, ArrowRight, Eye, Split, Cpu, AlertTriangle } from 'lucide-react';
+import { Sparkles, ArrowRight } from 'lucide-react';
 import { AnalysisMode } from '../types';
 import { UploadedFileState } from './ImageUploader';
-import { generateSyntheticSatelliteScene } from '../utils/demoData';
+import { DEMO_PRESETS, DemoPresetItem } from '../utils/demoPresets';
+
+export { DEMO_PRESETS };
+export type { DemoPresetItem };
 
 interface DemoPresetsBarProps {
   onLoadDemo: (config: {
@@ -13,137 +16,7 @@ interface DemoPresetsBarProps {
 }
 
 export const DemoPresetsBar: React.FC<DemoPresetsBarProps> = ({ onLoadDemo }) => {
-  const demos = [
-    {
-      id: 'demo1',
-      title: 'Demo 1: Single-Image VQA',
-      subtitle: 'Multimodal terrain question answering',
-      mode: 'single' as AnalysisMode,
-      query: 'What type of surface feature dominates this scene?',
-      badge: 'VQA',
-      load: () => {
-        const img = generateSyntheticSatelliteScene('agricultural');
-        return {
-          mode: 'single' as AnalysisMode,
-          query: 'What type of surface feature dominates this scene?',
-          files: [
-            {
-              dataUrl: img,
-              filename: 'cartosat_optical_canopy.tif',
-              role: 'primary' as const,
-              isGeoTIFF: true
-            }
-          ]
-        };
-      }
-    },
-    {
-      id: 'demo2',
-      title: 'Demo 2: Single-Image Captioning',
-      subtitle: 'Procedural spectral scene description',
-      mode: 'single' as AnalysisMode,
-      query: 'Describe this satellite image and summarize its land cover layout.',
-      badge: 'CAPTION',
-      load: () => {
-        const img = generateSyntheticSatelliteScene('optical');
-        return {
-          mode: 'single' as AnalysisMode,
-          query: 'Describe this satellite image and summarize its land cover layout.',
-          files: [
-            {
-              dataUrl: img,
-              filename: 'cartosat_multispectral_scene.tif',
-              role: 'primary' as const,
-              isGeoTIFF: true
-            }
-          ]
-        };
-      }
-    },
-    {
-      id: 'demo3',
-      title: 'Demo 3: Bi-Temporal Change',
-      subtitle: 'T1 vs T2 difference map & quantification',
-      mode: 'bitemporal' as AnalysisMode,
-      query: 'What changed between these two dates?',
-      badge: 'CHANGE DETECT',
-      load: () => {
-        const t1 = generateSyntheticSatelliteScene('urban_t1');
-        const t2 = generateSyntheticSatelliteScene('urban_t2');
-        return {
-          mode: 'bitemporal' as AnalysisMode,
-          query: 'What changed between these two dates?',
-          files: [
-            {
-              dataUrl: t1,
-              filename: 'temporal_t1_pre_monsoon.tif',
-              role: 'primary' as const,
-              isGeoTIFF: true
-            },
-            {
-              dataUrl: t2,
-              filename: 'temporal_t2_post_monsoon.tif',
-              role: 'secondary' as const,
-              isGeoTIFF: true
-            }
-          ]
-        };
-      }
-    },
-    {
-      id: 'demo4',
-      title: 'Demo 4: Optical + SAR Joint Analysis',
-      subtitle: 'Reflectance + C-Band SAR backscatter',
-      mode: 'optical_sar' as AnalysisMode,
-      query: 'Use optical reflectance and SAR backscatter to identify water and urban structures.',
-      badge: 'OPTICAL+SAR',
-      load: () => {
-        const opt = generateSyntheticSatelliteScene('optical');
-        const sar = generateSyntheticSatelliteScene('sar');
-        return {
-          mode: 'optical_sar' as AnalysisMode,
-          query: 'Use optical reflectance and SAR backscatter to identify water and urban structures.',
-          files: [
-            {
-              dataUrl: opt,
-              filename: 'cartosat_optical_bengaluru.tif',
-              role: 'optical' as const,
-              isGeoTIFF: true
-            },
-            {
-              dataUrl: sar,
-              filename: 'risat_sar_mumbai.tif',
-              role: 'sar' as const,
-              isGeoTIFF: true
-            }
-          ]
-        };
-      }
-    },
-    {
-      id: 'demo5',
-      title: 'Demo 5: Conflict & Reanalysis',
-      subtitle: 'Contradiction trigger & automated reanalysis',
-      mode: 'single' as AnalysisMode,
-      query: 'Locate and outline all urban building structures with bounding boxes.',
-      badge: 'REANALYSIS',
-      load: () => {
-        const img = generateSyntheticSatelliteScene('coastal');
-        return {
-          mode: 'single' as AnalysisMode,
-          query: 'Locate and outline all urban building structures with bounding boxes.',
-          files: [
-            {
-              dataUrl: img,
-              filename: 'coastal_estuary_test.tif',
-              role: 'primary' as const,
-              isGeoTIFF: true
-            }
-          ]
-        };
-      }
-    }
-  ];
+  const demos = DEMO_PRESETS;
 
   return (
     <div className="glass-panel rounded-2xl p-5 border border-slate-800 bg-slate-900/70 shadow-2xl space-y-3">

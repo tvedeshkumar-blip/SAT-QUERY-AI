@@ -425,3 +425,355 @@ def test_p0_3_unreferenced_equal_sized_arrays_never_infer_alignment():
     assert res["water_pct"] is None
     assert res["urban_pct"] is None
     assert res["veg_pct"] is None
+
+
+# ============================================================================
+# Stage 4B P1-3 Regression Tests: Multi-band NoData Mask Precision
+# ============================================================================
+
+def test_p1_3_compute_source_valid_mask_all_channels_valid():
+    """All channels valid produces an all-True 2D boolean mask."""
+    arr = np.full((10, 10, 3), 100, dtype=np.uint8)
+    mask = compute_source_valid_mask(arr, nodata=0)
+    assert mask.shape == (10, 10)
+    assert mask.all()
+
+
+def test_p1_3_compute_source_valid_mask_all_channels_nodata():
+    """All channels equal to nodata produces an all-False mask."""
+    arr = np.zeros((10, 10, 3), dtype=np.uint8)
+    mask = compute_source_valid_mask(arr, nodata=0)
+    assert mask.shape == (10, 10)
+    assert not mask.any()
+
+
+def test_p1_3_compute_source_valid_mask_one_channel_nodata_is_invalid():
+    """
+    CRITICAL P1-3: A pixel must be INVALID if ANY required source channel is NoData.
+    Testing pixel (0, 0) having channel 1 as NoData (0), channels 0 and 2 valid (100).
+    """
+    arr = np.full((10, 10, 3), 100, dtype=np.uint8)
+    arr[0, 0, 1] = 0  # One channel is nodata
+    mask = compute_source_valid_mask(arr, nodata=0)
+    assert mask.shape == (10, 10)
+    assert mask[0, 0] == False  # Strictly False: one channel NoData makes pixel invalid
+    assert mask[0, 1] == True   # Other pixels remain valid
+
+
+def test_p1_3_compute_source_valid_mask_nan_and_inf_handling():
+    """Floating-point NaN and Inf in any channel invalidate the pixel."""
+    arr = np.full((10, 10, 3), 1.0, dtype=np.float32)
+    arr[2, 3, 0] = np.nan
+    arr[4, 5, 2] = np.inf
+    arr[6, 7, 1] = -np.inf
+    mask = compute_source_valid_mask(arr, nodata=-9999.0)
+    assert mask[2, 3] == False
+    assert mask[4, 5] == False
+    assert mask[6, 7] == False
+    assert mask[0, 0] == True
+
+
+def test_p1_3_compute_source_valid_mask_single_band():
+    """Single-band 2D array (H, W) handles nodata and valid pixels correctly."""
+    arr = np.array([
+        [10.0, -9999.0, 20.0],
+        [np.nan, 30.0, np.inf]
+    ], dtype=np.float32)
+    mask = compute_source_valid_mask(arr, nodata=-9999.0)
+    assert mask.shape == (2, 3)
+    assert mask[0, 0] == True
+    assert mask[0, 1] == False
+    assert mask[0, 2] == True
+    assert mask[1, 0] == False
+    assert mask[1, 1] == True
+    assert mask[1, 2] == False
+
+
+def test_p1_3_compute_source_valid_mask_channel_first_layout():
+    """(C, H, W) layout correctly identifies channel axis 0 and produces (H, W) mask."""
+    arr = np.full((3, 20, 30), 100, dtype=np.uint8)
+    arr[1, 5, 5] = 0  # Channel 1 at (y=5, x=5) is nodata
+    mask = compute_source_valid_mask(arr, nodata=0)
+    assert mask.shape == (20, 30)
+    assert mask[5, 5] == False
+    assert mask[0, 0] == True
+
+
+# ============================================================================
+# Step 4B.2 Regression Tests: Array-Layout Safety, Hints, and Ambiguity Protection
+# ============================================================================
+
+def test_step4b2_explicit_layout_hwc_and_chw():
+    """Explicit layout parameter accurately directs channel collapse for both layouts."""
+    # HWC layout
+    arr_hwc = np.full((25, 35, 4), 100.0, dtype=np.float32)
+    arr_hwc[10, 15, 2] = -9999.0
+    mask_hwc = compute_source_valid_mask(arr_hwc, nodata=-9999.0, layout="HWC")
+    assert mask_hwc.shape == (25, 35)
+    assert mask_hwc[10, 15] == False
+    assert mask_hwc[0, 0] == True
+
+    # CHW layout
+    arr_chw = np.full((4, 25, 35), 100.0, dtype=np.float32)
+    arr_chw[2, 10, 15] = -9999.0
+    mask_chw = compute_source_valid_mask(arr_chw, nodata=-9999.0, layout="CHW")
+    assert mask_chw.shape == (25, 35)
+    assert mask_chw[10, 15] == False
+    assert mask_chw[0, 0] == True
+
+
+def test_step4b2_channel_first_with_small_spatial_dimension():
+    """
+    Channel-first array where channel dimension exceeds a spatial dimension (e.g. C=12, H=8, W=256).
+    Must not be misclassified as channel-last (H=12, W=8, C=256).
+    """
+    arr = np.full((12, 8, 256), 50.0, dtype=np.float32)
+    # Channel 5 at (y=3, x=10) has nodata
+    arr[5, 3, 10] = -9999.0
+
+    # 1. With explicit layout parameter
+    mask_layout = compute_source_valid_mask(arr, nodata=-9999.0, layout="CHW")
+    assert mask_layout.shape == (8, 256)
+    assert mask_layout[3, 10] == False
+    assert mask_layout[0, 0] == True
+
+    # 2. With metadata hint
+    meta = {"bands": 12, "height": 8, "width": 256}
+    mask_meta = compute_source_valid_mask(arr, nodata=-9999.0, metadata=meta)
+    assert mask_meta.shape == (8, 256)
+    assert mask_meta[3, 10] == False
+
+    # 3. Shape deduction without hint (d0=12 <= 16, d2=256 > 16)
+    mask_auto = compute_source_valid_mask(arr, nodata=-9999.0)
+    assert mask_auto.shape == (8, 256)
+    assert mask_auto[3, 10] == False
+
+
+def test_step4b2_ambiguous_shape_3_3_3_raises_value_error():
+    """
+    Genuinely ambiguous 3D array (3, 3, 3) without a layout hint MUST fail explicitly
+    rather than guessing and potentially producing wrong masks.
+    """
+    arr = np.full((3, 3, 3), 10.0, dtype=np.float32)
+    with pytest.raises(ValueError, match="Ambiguous 3D array shape"):
+        compute_source_valid_mask(arr, nodata=-9999.0)
+
+
+def test_step4b2_ambiguous_shape_3_3_3_resolves_with_layout_hint():
+    """
+    Ambiguous (3, 3, 3) resolves safely when explicit layout is specified,
+    collapsing the proper channel axis.
+    """
+    arr = np.full((3, 3, 3), 10.0, dtype=np.float32)
+    # Put nodata at coordinate (0, 1, 2)
+    arr[0, 1, 2] = -9999.0
+
+    # Under HWC: (H=3, W=3, C=3) -> nodata is at (y=0, x=1, c=2), so pixel (0, 1) is invalid
+    mask_hwc = compute_source_valid_mask(arr, nodata=-9999.0, layout="HWC")
+    assert mask_hwc.shape == (3, 3)
+    assert mask_hwc[0, 1] == False
+    assert mask_hwc[1, 2] == True
+
+    # Under CHW: (C=3, H=3, W=3) -> nodata is at (c=0, y=1, x=2), so pixel (1, 2) is invalid
+    mask_chw = compute_source_valid_mask(arr, nodata=-9999.0, layout="CHW")
+    assert mask_chw.shape == (3, 3)
+    assert mask_chw[1, 2] == False
+    assert mask_chw[0, 1] == True
+
+
+def test_step4b2_ambiguous_shape_resolves_with_metadata():
+    """Ambiguous shapes resolve accurately using metadata layout hints or channel axis."""
+    arr = np.full((3, 3, 3), 20.0, dtype=np.float32)
+    arr[0, 1, 2] = -9999.0
+
+    # Metadata layout hint
+    mask_hwc = compute_source_valid_mask(arr, nodata=-9999.0, metadata={"layout": "HWC"})
+    assert mask_hwc.shape == (3, 3)
+    assert mask_hwc[0, 1] == False
+
+    # Metadata channel_axis hint
+    mask_chw = compute_source_valid_mask(arr, nodata=-9999.0, metadata={"channel_axis": 0})
+    assert mask_chw.shape == (3, 3)
+    assert mask_chw[1, 2] == False
+
+
+def test_step4b2_ambiguous_strip_chip_fails_without_hint_and_succeeds_with_hint():
+    """
+    Shape (8, 256, 12) has both boundary dimensions <= 16.
+    Fails explicitly without a hint, succeeds when layout is provided.
+    """
+    arr = np.full((8, 256, 12), 10.0, dtype=np.float32)
+    with pytest.raises(ValueError, match="Ambiguous 3D array shape"):
+        compute_source_valid_mask(arr, nodata=-9999.0)
+
+    # Resolves with layout='HWC' (H=8, W=256, C=12)
+    mask_hwc = compute_source_valid_mask(arr, nodata=-9999.0, layout="HWC")
+    assert mask_hwc.shape == (8, 256)
+
+    # Resolves with layout='CHW' (C=8, H=256, W=12)
+    mask_chw = compute_source_valid_mask(arr, nodata=-9999.0, layout="CHW")
+    assert mask_chw.shape == (256, 12)
+
+
+def test_step4b2_single_band_and_2d_arrays():
+    """Handles 2D (H, W), 3D single-band HWC (H, W, 1), and 3D single-band CHW (1, H, W)."""
+    # 2D array
+    arr_2d = np.array([[1.0, -9999.0], [np.nan, 2.0]], dtype=np.float32)
+    mask_2d = compute_source_valid_mask(arr_2d, nodata=-9999.0)
+    assert mask_2d.shape == (2, 2)
+    assert mask_2d[0, 0] == True
+    assert mask_2d[0, 1] == False
+    assert mask_2d[1, 0] == False
+    assert mask_2d[1, 1] == True
+
+    # 3D single-band (H, W, 1)
+    arr_3d_hwc = np.array([[[1.0], [-9999.0]], [[np.nan], [2.0]]], dtype=np.float32)
+    mask_3d_hwc = compute_source_valid_mask(arr_3d_hwc, nodata=-9999.0, layout="HWC")
+    assert mask_3d_hwc.shape == (2, 2)
+    assert mask_3d_hwc[0, 0] == True
+    assert mask_3d_hwc[0, 1] == False
+    assert mask_3d_hwc[1, 0] == False
+    assert mask_3d_hwc[1, 1] == True
+
+    # 3D single-band (1, H, W)
+    arr_3d_chw = np.array([[[1.0, -9999.0], [np.nan, 2.0]]], dtype=np.float32)
+    mask_3d_chw = compute_source_valid_mask(arr_3d_chw, nodata=-9999.0, layout="CHW")
+    assert mask_3d_chw.shape == (2, 2)
+    assert mask_3d_chw[0, 0] == True
+    assert mask_3d_chw[0, 1] == False
+    assert mask_3d_chw[1, 0] == False
+    assert mask_3d_chw[1, 1] == True
+
+
+def test_step4b2_partial_band_nodata_strictly_invalidates():
+    """Pixel is invalid if even a single channel out of many contains NoData."""
+    arr = np.full((10, 10, 4), 100.0, dtype=np.float32)
+    # At pixel (4, 4), channel 3 has nodata, but channels 0, 1, 2 are valid
+    arr[4, 4, 3] = -9999.0
+    mask = compute_source_valid_mask(arr, nodata=-9999.0, layout="HWC")
+    assert mask.shape == (10, 10)
+    assert mask[4, 4] == False
+    assert mask[0, 0] == True
+
+
+def test_step4b2_nan_inf_strictness():
+    """NaN, +Inf, -Inf in any channel strictly invalidate the pixel."""
+    arr = np.full((10, 10, 3), 1.0, dtype=np.float32)
+    arr[2, 3, 0] = np.nan
+    arr[4, 5, 1] = np.inf
+    arr[6, 7, 2] = -np.inf
+    mask = compute_source_valid_mask(arr, layout="HWC")
+    assert mask[2, 3] == False
+    assert mask[4, 5] == False
+    assert mask[6, 7] == False
+    assert mask[0, 0] == True
+
+
+def test_step4b2_zero_value_preservation():
+    """Legitimate zero values are preserved unless nodata is explicitly 0."""
+    arr = np.zeros((10, 10, 3), dtype=np.float32)
+
+    # 1. nodata = -9999.0: zeros are valid observations
+    mask_neg = compute_source_valid_mask(arr, nodata=-9999.0, layout="HWC")
+    assert mask_neg.all()
+
+    # 2. nodata is None: zeros are valid observations
+    mask_none = compute_source_valid_mask(arr, nodata=None, layout="HWC")
+    assert mask_none.all()
+
+    # 3. nodata = 0: zeros are declared NoData
+    mask_zero = compute_source_valid_mask(arr, nodata=0, layout="HWC")
+    assert not mask_zero.any()
+
+
+def test_step4b2_invalid_array_dimensions_raise_value_error():
+    """1D or 4D arrays raise ValueError."""
+    arr_1d = np.ones((50,))
+    with pytest.raises(ValueError, match="Expected 2D or 3D array"):
+        compute_source_valid_mask(arr_1d)
+
+    arr_4d = np.ones((1, 3, 50, 50))
+    with pytest.raises(ValueError, match="Expected 2D or 3D array"):
+        compute_source_valid_mask(arr_4d)
+
+
+# ============================================================================
+# Stage 4B P1-1 Regression Tests: CrossSensorValidator Pre-Fusion Integration
+# ============================================================================
+
+def test_p1_1_optical_sar_provider_rejects_incompatible_pair():
+    """
+    P1-1 Test: OpticalSARJointAnalysisProvider rejects pair rejected by CrossSensorValidator.
+    Must return status='unsupported', analysis_status='unsupported_validation',
+    water_pct=None, and retain the explicit rejection reason.
+    """
+    analyzer = OpticalSARJointAnalysisProvider()
+
+    # 10m Optical vs 250m SAR (> 10x resolution disparity rejected by CrossSensorValidator)
+    opt = np.random.randint(40, 200, (64, 64, 3), dtype=np.uint8)
+    sar = np.random.randint(10, 200, (4, 4), dtype=np.uint8)
+
+    meta_opt = {
+        "crs": "EPSG:32643",
+        "bounds": [770000.0, 1427000.0, 771000.0, 1428000.0],
+        "width": 64,
+        "height": 64,
+        "modality": "OPTICAL",
+        "resolution": [10.0, 10.0]
+    }
+    meta_sar = {
+        "crs": "EPSG:32643",
+        "bounds": [770000.0, 1427000.0, 771000.0, 1428000.0],
+        "width": 4,
+        "height": 4,
+        "modality": "SAR",
+        "resolution": [250.0, 250.0],
+        "tags": {"SENSOR": "Sentinel-1", "POLARIZATION": "VV"}
+    }
+
+    res = analyzer.predict([opt, sar], metadata={"optical": meta_opt, "sar": meta_sar})
+
+    assert res["status"] == "unsupported"
+    assert res["analysis_status"] == "unsupported_validation"
+    assert "Excessive resolution disparity" in res["answer"]
+    assert res["water_pct"] is None
+    assert res["urban_pct"] is None
+    assert res["veg_pct"] is None
+    assert res["cross_sensor_validation"]["is_compatible"] is False
+
+
+def test_p1_1_temporal_advisory_warning_does_not_hard_reject():
+    """
+    P1-1 Test: Temporal separation advisory warning (> 60 days) does NOT become a hard rejection.
+    Pair proceeds to fusion, with the warning recorded in limitations and warnings.
+    """
+    analyzer = OpticalSARJointAnalysisProvider()
+
+    opt = np.random.randint(40, 200, (64, 64, 3), dtype=np.uint8)
+    sar = np.random.randint(10, 200, (64, 64), dtype=np.uint8)
+
+    meta_opt = {
+        "crs": "EPSG:32643",
+        "bounds": [770000.0, 1427000.0, 771000.0, 1428000.0],
+        "width": 64,
+        "height": 64,
+        "modality": "OPTICAL",
+        "datetime": "2023-01-01T10:00:00Z"
+    }
+    meta_sar = {
+        "crs": "EPSG:32643",
+        "bounds": [770000.0, 1427000.0, 771000.0, 1428000.0],
+        "width": 64,
+        "height": 64,
+        "modality": "SAR",
+        "datetime": "2023-04-15T10:00:00Z",  # ~104 days apart (> 60 days warning)
+        "tags": {"SENSOR": "Sentinel-1", "POLARIZATION": "VV"}
+    }
+
+    res = analyzer.predict([opt, sar], metadata={"optical": meta_opt, "sar": meta_sar})
+
+    # Must NOT be rejected
+    assert res["status"] in ("success", None) or res.get("analysis_status") not in ("unsupported_validation",)
+    assert res["water_pct"] is not None
+    # Temporal advisory warning is preserved in limitations
+    assert any("Temporal separation advisory" in lim for lim in res["limitations"])

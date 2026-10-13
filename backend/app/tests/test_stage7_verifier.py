@@ -429,20 +429,34 @@ def test_llm_timeout_path():
 
 # Test 15: Preservation of existing analysis response fields and endpoint integration
 def test_preservation_of_analysis_response_fields():
+    from app.tests.test_optical_sar_cross_sensor import create_geotiff_b64
+    opt_b64 = create_geotiff_b64(bounds=(77.5, 12.9, 77.6, 13.0))
+    sar_b64 = create_geotiff_b64(bounds=(77.5, 12.9, 77.6, 13.0), tags={"POLARIZATION": "VV"})
+
     with patch("app.chatbot.lmstudio_client.LMStudioClient.is_reachable", return_value=False):
         payload = {
             "images": [
                 {
-                    "data": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
-                    "mimeType": "image/png",
-                    "filename": "s2.png",
-                    "role": "optical"
+                    "data": opt_b64,
+                    "mimeType": "image/tiff",
+                    "filename": "s2.tif",
+                    "role": "optical",
+                    "provenance": {
+                        "modality": "OPTICAL",
+                        "sensor": "Sentinel-2 L2A",
+                        "datetime": "2024-02-01T10:00:00Z"
+                    }
                 },
                 {
-                    "data": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
-                    "mimeType": "image/png",
-                    "filename": "s1.png",
-                    "role": "sar"
+                    "data": sar_b64,
+                    "mimeType": "image/tiff",
+                    "filename": "s1.tif",
+                    "role": "sar",
+                    "provenance": {
+                        "modality": "SAR",
+                        "sensor": "Sentinel-1 GRD",
+                        "datetime": "2024-02-05T10:00:00Z"
+                    }
                 }
             ],
             "query": "Joint optical and SAR assessment",

@@ -652,3 +652,195 @@ def test_p0_1_missing_georeferencing_resolution_fails_safely():
     res_zero = CrossSensorValidator._compute_ground_resolution_meters({"crs": "EPSG:32643", "resolution": [0.0, 0.0]})
     assert res_zero is None
 
+
+# ============================================================================
+# Stage 4B P1-2 Regression Tests: Requested AOI Enforcement & Cross-CRS Overlap
+# ============================================================================
+
+def test_p1_2_both_scenes_overlap_each_other_and_aoi_valid():
+    """
+    P1-2 Test 1: Both scenes overlap each other and the requested AOI.
+    Valid spatial overlap established, with clearly separated coverage metrics.
+    """
+    opt_b64 = create_geotiff_b64(bounds=(77.50, 12.90, 77.60, 13.00), crs="EPSG:4326")
+    sar_b64 = create_geotiff_b64(
+        bounds=(77.52, 12.92, 77.62, 13.02),
+        crs="EPSG:4326",
+        tags={"SENSOR": "Sentinel-1", "POLARIZATION": "VV"}
+    )
+    aoi = [77.54, 12.94, 77.58, 12.98]  # Nested inside the mutual intersection
+
+    res = CrossSensorValidator.validate_pair(
+        optical_input=opt_b64,
+        sar_input=sar_b64,
+        optical_provenance={"modality": "OPTICAL"},
+        sar_provenance={"modality": "SAR"},
+        aoi_bbox=aoi
+    )
+
+    assert res["is_compatible"] is True
+    assert res["status"] in ("compatible", "compatible_with_limitations")
+    assert res["rejection_reason"] is None
+    assert res["aoi_intersection_valid"] is True
+    assert res["aoi_coverage_pct"] == 100.0  # AOI is 100% covered by mutual overlap
+    assert res["spatial_overlap_pct"] > 50.0  # Mutual scene overlap % of smaller scene
+
+
+def test_p1_2_scenes_overlap_each_other_but_outside_aoi_rejected():
+    """
+    P1-2 Test 2: Scenes overlap each other, but lie outside the requested AOI.
+    Must reject because no joint observation exists over the target AOI.
+    """
+    opt_b64 = create_geotiff_b64(bounds=(77.50, 12.90, 77.60, 13.00), crs="EPSG:4326")
+    sar_b64 = create_geotiff_b64(
+        bounds=(77.52, 12.92, 77.62, 13.02),
+        crs="EPSG:4326",
+        tags={"SENSOR": "Sentinel-1", "POLARIZATION": "VV"}
+    )
+    # Requested AOI in Mumbai (disjoint from Bangalore scene overlap)
+    aoi_mumbai = [72.80, 18.90, 72.90, 19.00]
+
+    res = CrossSensorValidator.validate_pair(
+        optical_input=opt_b64,
+        sar_input=sar_b64,
+        optical_provenance={"modality": "OPTICAL"},
+        sar_provenance={"modality": "SAR"},
+        aoi_bbox=aoi_mumbai
+    )
+
+    assert res["is_compatible"] is False
+    assert res["status"] == "rejected"
+    assert "Spatial coverage failure" in res["rejection_reason"]
+    assert "Neither optical nor SAR scene intersects the requested AOI" in res["rejection_reason"]
+
+
+def test_p1_2_only_one_scene_intersects_aoi_rejected():
+    """
+    P1-2 Test 3: Only one scene intersects the requested AOI.
+    Must reject with an explicit reason identifying the missing sensor coverage.
+    """
+    # Optical covers Bangalore
+    opt_b64 = create_geotiff_b64(bounds=(77.50, 12.90, 77.60, 13.00), crs="EPSG:4326")
+    # SAR covers Chennai
+    sar_b64 = create_geotiff_b64(
+        bounds=(80.10, 13.00, 80.20, 13.10),
+        crs="EPSG:4326",
+        tags={"SENSOR": "Sentinel-1", "POLARIZATION": "VV"}
+    )
+    # AOI in Bangalore: intersects optical, but NOT SAR
+    aoi_bangalore = [77.52, 12.92, 77.58, 12.98]
+
+    res = CrossSensorValidator.validate_pair(
+        optical_input=opt_b64,
+        sar_input=sar_b64,
+        optical_provenance={"modality": "OPTICAL"},
+        sar_provenance={"modality": "SAR"},
+        aoi_bbox=aoi_bangalore
+    )
+
+    assert res["is_compatible"] is False
+    assert res["status"] == "rejected"
+    assert "SAR scene footprint does not intersect the requested AOI" in res["rejection_reason"]
+
+
+def test_p1_2_neither_scene_intersects_aoi_rejected():
+    """
+    P1-2 Test 4: Neither scene intersects the requested AOI.
+    """
+    opt_b64 = create_geotiff_b64(bounds=(77.50, 12.90, 77.60, 13.00), crs="EPSG:4326")
+    sar_b64 = create_geotiff_b64(
+        bounds=(77.52, 12.92, 77.62, 13.02),
+        crs="EPSG:4326",
+        tags={"SENSOR": "Sentinel-1", "POLARIZATION": "VV"}
+    )
+    # AOI in Delhi
+    aoi_delhi = [77.10, 28.50, 77.25, 28.65]
+
+    res = CrossSensorValidator.validate_pair(
+        optical_input=opt_b64,
+        sar_input=sar_b64,
+        optical_provenance={"modality": "OPTICAL"},
+        sar_provenance={"modality": "SAR"},
+        aoi_bbox=aoi_delhi
+    )
+
+    assert res["is_compatible"] is False
+    assert res["status"] == "rejected"
+    assert "Neither optical nor SAR scene intersects the requested AOI" in res["rejection_reason"]
+
+
+def test_p1_2_invalid_aoi_coordinates_rejected():
+    """
+    P1-2 Test 5: Invalid AOI coordinates or ordering fails safely with clear reason.
+    """
+    opt_b64 = create_geotiff_b64(bounds=(77.50, 12.90, 77.60, 13.00), crs="EPSG:4326")
+    sar_b64 = create_geotiff_b64(
+        bounds=(77.52, 12.92, 77.62, 13.02),
+        crs="EPSG:4326",
+        tags={"SENSOR": "Sentinel-1", "POLARIZATION": "VV"}
+    )
+
+    # Inverted bounding box (min_x > max_x)
+    res_inverted = CrossSensorValidator.validate_pair(
+        optical_input=opt_b64,
+        sar_input=sar_b64,
+        optical_provenance={"modality": "OPTICAL"},
+        sar_provenance={"modality": "SAR"},
+        aoi_bbox=[77.60, 12.90, 77.50, 13.00]
+    )
+    assert res_inverted["is_compatible"] is False
+    assert "Invalid AOI bounding box" in res_inverted["rejection_reason"]
+    assert "min coordinates must be strictly less than max coordinates" in res_inverted["rejection_reason"]
+
+    # Non-numeric coordinate
+    res_nan = CrossSensorValidator.validate_pair(
+        optical_input=opt_b64,
+        sar_input=sar_b64,
+        optical_provenance={"modality": "OPTICAL"},
+        sar_provenance={"modality": "SAR"},
+        aoi_bbox=[77.50, 12.90, float("nan"), 13.00]
+    )
+    assert res_nan["is_compatible"] is False
+    assert "Invalid AOI bounding box" in res_nan["rejection_reason"]
+
+
+def test_p1_2_different_crs_transforms_footprints_consistently_before_intersection():
+    """
+    P1-2 Test 6: Different CRSs transform footprints consistently before testing AOI intersection.
+    Optical in UTM 43N (EPSG:32643) and SAR in WGS84 (EPSG:4326) are both normalized to
+    EPSG:4326 to verify mutual overlap and AOI intersection.
+    """
+    from rasterio.warp import transform_bounds
+
+    # Optical in UTM 43N (around Bangalore: 77.58°E, 12.96°N is roughly 780000m E, 1434000m N)
+    opt_bounds_utm = [779000.0, 1433000.0, 781000.0, 1435000.0]
+    opt_b64 = create_geotiff_b64(bounds=opt_bounds_utm, crs="EPSG:32643")
+
+    # Get corresponding WGS84 bounds for SAR and AOI
+    wgs84_bounds = transform_bounds("EPSG:32643", "EPSG:4326", *opt_bounds_utm)
+    # SAR in EPSG:4326 covering nearly the same geographic footprint
+    sar_b64 = create_geotiff_b64(
+        bounds=(wgs84_bounds[0], wgs84_bounds[1], wgs84_bounds[2], wgs84_bounds[3]),
+        crs="EPSG:4326",
+        tags={"SENSOR": "Sentinel-1", "POLARIZATION": "VV"}
+    )
+
+    # Requested AOI in WGS84 inside the transformed area
+    mid_lon = (wgs84_bounds[0] + wgs84_bounds[2]) / 2.0
+    mid_lat = (wgs84_bounds[1] + wgs84_bounds[3]) / 2.0
+    aoi_nested = [mid_lon - 0.002, mid_lat - 0.002, mid_lon + 0.002, mid_lat + 0.002]
+
+    res = CrossSensorValidator.validate_pair(
+        optical_input=opt_b64,
+        sar_input=sar_b64,
+        optical_provenance={"modality": "OPTICAL"},
+        sar_provenance={"modality": "SAR"},
+        aoi_bbox=aoi_nested
+    )
+
+    assert res["is_compatible"] is True
+    assert res["status"] in ("compatible", "compatible_with_limitations")
+    assert res["aoi_intersection_valid"] is True
+    assert res["aoi_coverage_pct"] > 90.0
+    assert any("Different CRSs" in w for w in res["warnings"])
+

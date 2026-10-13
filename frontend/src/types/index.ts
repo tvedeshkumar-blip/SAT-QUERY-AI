@@ -14,6 +14,19 @@ export type TaskType =
   | 'orchestration'
   | 'temporal_multimodal_clarification';
 
+export interface UploadedFileState {
+  file?: File;
+  dataUrl: string;
+  filename: string;
+  size?: number;
+  role: 'primary' | 'secondary' | 'optical' | 'sar';
+  isGeoTIFF: boolean;
+  assetCategory?: 'visual_preview' | 'rgb_visual_raster' | 'single_band_spectral' | 'multispectral_cube' | 'scientific_raster' | 'unsupported';
+  stacProvenance?: Record<string, any>;
+  validation?: any;
+  scientificLimitations?: string[];
+}
+
 export interface AnalysisRequest {
   query: string;
   images?: any[];

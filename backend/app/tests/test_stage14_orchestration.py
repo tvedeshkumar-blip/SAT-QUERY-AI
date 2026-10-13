@@ -818,3 +818,294 @@ def test_p0_4_orchestrate_end_to_end_unsupported_optical_sar_fusion(monkeypatch)
     assert res["verification"]["verification_status"] == "unsupported"
     assert len(res["verification"]["claims"]) == 0
 
+
+def test_p1_1_orchestrator_cross_sensor_validator_rejection(monkeypatch):
+    """
+    P1-1 Orchestrator Test: Orchestrator validates optical-SAR pair with CrossSensorValidator.
+    When scenes have excessive resolution disparity (e.g. 10m Optical vs 250m SAR),
+    CrossSensorValidator rejects the pair before fusion tool execution.
+    Orchestration completes with status='unsupported', retains truthful rejection reason,
+    and produces 0 success claims.
+    """
+    orchestrator = MultiStepOrchestrator()
+
+    opt_meta = {
+        "crs": "EPSG:32643",
+        "bounds": [770000.0, 1427000.0, 771000.0, 1428000.0],
+        "width": 64,
+        "height": 64,
+        "modality": "OPTICAL",
+        "resolution": [10.0, 10.0]
+    }
+    sar_meta = {
+        "crs": "EPSG:32643",
+        "bounds": [770000.0, 1427000.0, 771000.0, 1428000.0],
+        "width": 4,
+        "height": 4,
+        "modality": "SAR",
+        "resolution": [250.0, 250.0],
+        "tags": {"SENSOR": "Sentinel-1", "POLARIZATION": "VV"}
+    }
+
+    class MockRetrieveTool:
+        def __init__(self):
+            self.name = "stac_composite_retrieve"
+            self.call_count = 0
+
+        def run(self, **kwargs):
+            self.call_count += 1
+            if self.call_count == 1:
+                return {
+                    "status": "success",
+                    "collection": "sentinel-2-l2a",
+                    "scene_id": "S2_BANGALORE",
+                    "array": np.full((64, 64, 3), 100, dtype=np.uint8),
+                    "raster_metadata": opt_meta
+                }
+            else:
+                return {
+                    "status": "success",
+                    "collection": "sentinel-1-rtc",
+                    "scene_id": "S1_BANGALORE",
+                    "array": np.full((4, 4), 80, dtype=np.uint8),
+                    "raster_metadata": sar_meta
+                }
+
+    fusion_executed = False
+    class SentinelFusionTool:
+        def __init__(self):
+            self.name = "optical_sar_fusion"
+
+        def run(self, **kwargs):
+            nonlocal fusion_executed
+            fusion_executed = True
+            return {"status": "success"}
+
+    monkeypatch.setattr(tool_registry, "_tools", {
+        **tool_registry._tools,
+        "stac_composite_retrieve": MockRetrieveTool(),
+        "optical_sar_fusion": SentinelFusionTool()
+    })
+
+    res = orchestrator.orchestrate(
+        query="Fuse optical and radar scenes for Bangalore [77.488, 12.896, 77.498, 12.906]"
+    )
+
+    # Fusion tool must NOT have been executed because validator rejected the pair
+    assert fusion_executed is False
+    assert res["task"] == "optical_sar"
+    assert res["status"] == "unsupported"
+    assert res["confidence"] is None
+    assert "Excessive resolution disparity" in res["answer"]
+    assert res["verification"]["passed"] is False
+    assert len(res["verification"]["claims"]) == 0
+
+
+# ============================================================================
+# Stage 4C: Dynamic Orchestrator Contradiction Detection Integration Tests
+# ============================================================================
+
+def test_orchestrator_contradiction_detection_e2e_blocks_success(monkeypatch):
+    """
+    End-to-End Orchestrator Test: Proves evidence-based contradiction detection runs in the
+    dynamic orchestration pipeline and blocks declaring analysis successful when physical
+    contradictions exist between claims and evidence.
+    """
+    orchestrator = MultiStepOrchestrator()
+
+    class ContradictoryFusionTool:
+        def __init__(self):
+            self.name = "optical_sar_fusion"
+            self.description = "Mock contradictory optical-SAR fusion"
+            self.category = "fusion"
+
+        def run(self, **kwargs):
+            return {
+                "status": "success",
+                "task": "optical_sar",
+                "answer": "Optical imagery identifies open water reservoir.",
+                "water_pct": 0.0,
+                "mean_sar_display": 215.0,
+                "sar_db_mean": -2.0,
+                "valid_pixel_count": 500,
+                "registration_info": {
+                    "co_registered": True,
+                    "alignment_valid": True,
+                    "is_display_only": False,
+                    "spatial_overlap_pct": 98.0
+                },
+                "evidence": [
+                    {
+                        "id": "ev_fused",
+                        "type": "fused",
+                        "title": "Fused Preview",
+                        "data_base64": "fake_fused"
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(tool_registry, "_tools", {**tool_registry._tools, "optical_sar_fusion": ContradictoryFusionTool()})
+
+    res = orchestrator.orchestrate(
+        query="Perform joint optical and radar fusion for water body lake in Mumbai [72.75, 18.88, 73.05, 19.30]"
+    )
+
+    # 1. Orchestration must NOT declare success; it must transition to 'contradicted'
+    assert res["status"] == "contradicted"
+    assert res["confidence"] == 0.35
+    assert res["confidence_label"] == "Contradiction Detected"
+
+    # 2. Contradiction must be visible in the structured response
+    assert res["conflict_info"] is not None
+    assert res["conflict_info"]["conflict_detected"] is True
+    assert res["conflict_info"]["conflict_type"] == "OPTICAL_SAR_SPECULAR_WATER_CONTRADICTION"
+    assert res["conflict_info"]["reanalysis_tool"] == "cross_sensor_polarimetric_decomposition"
+
+    # 3. Execution trace must explicitly include CONFLICT_DETECTED step
+    steps = res["trace"]["steps"]
+    conflict_step = next((s for s in steps if s.get("step") == "CONFLICT_DETECTED"), None)
+    assert conflict_step is not None
+    assert "Contradiction identified [OPTICAL_SAR_SPECULAR_WATER_CONTRADICTION]" in conflict_step["detail"]
+
+    # 4. Answer text includes warning banner
+    assert "[CONTRADICTION DETECTED]" in res["answer"]
+
+    # 5. Verification block reflects contradiction status
+    assert res["verification"]["passed"] is False
+    assert res["verification"]["verification_status"] == "contradicted"
+    assert len(res["verification"]["contradictions"]) >= 1
+
+    # 6. Provenance and execution trace information are preserved
+    assert res["trace"]["execution_steps"] is not None
+    assert res["reproducible_report"] is not None
+
+
+def test_orchestrator_insufficient_evidence_unaligned_propagation(monkeypatch):
+    """
+    Verify that unaligned or display-only optical-SAR rasters do not invent false conflicts;
+    the orchestrator records INSUFFICIENT_EVIDENCE in the execution trace and propagates unsupported status.
+    """
+    orchestrator = MultiStepOrchestrator()
+
+    class UnalignedFusionTool:
+        def __init__(self):
+            self.name = "optical_sar_fusion"
+            self.description = "Mock unaligned optical-SAR fusion"
+            self.category = "fusion"
+
+        def run(self, **kwargs):
+            return {
+                "status": "success",
+                "task": "optical_sar",
+                "answer": "Optical and SAR rasters processed for display only.",
+                "water_pct": 0.0,
+                "mean_sar_display": 220.0,
+                "registration_info": {
+                    "co_registered": False,
+                    "alignment_valid": False,
+                    "is_display_only": True
+                },
+                "evidence": []
+            }
+
+    monkeypatch.setattr(tool_registry, "_tools", {**tool_registry._tools, "optical_sar_fusion": UnalignedFusionTool()})
+
+    res = orchestrator.orchestrate(
+        query="Analyze open water lake with optical and SAR in Mumbai [72.75, 18.88, 73.05, 19.30]"
+    )
+
+    # Must NOT invent a conflict
+    assert res["conflict_info"]["conflict_detected"] is False
+    assert "lack authenticated geospatial co-registration" in res["conflict_info"]["conflict_details"]
+
+    # Trace logs INSUFFICIENT_EVIDENCE
+    steps = res["trace"]["steps"]
+    insuf_step = next((s for s in steps if s.get("step") == "INSUFFICIENT_EVIDENCE"), None)
+    assert insuf_step is not None
+    assert "Cross-evidence evaluation uncertain" in insuf_step["detail"]
+
+    # Status must be unsupported without inventing conflict
+    assert res["status"] == "unsupported"
+    assert res["confidence"] is None
+    assert res["confidence_label"] == "Insufficient Evidence"
+
+
+def test_orchestrator_insufficient_evidence_zero_valid_pixels_propagation(monkeypatch):
+    """
+    Verify that zero valid clear-sky pixels do not invent false conflicts;
+    the orchestrator records INSUFFICIENT_EVIDENCE and propagates unsupported status.
+    """
+    orchestrator = MultiStepOrchestrator()
+
+    class ZeroPixelFusionTool:
+        def __init__(self):
+            self.name = "optical_sar_fusion"
+            self.description = "Mock zero pixel optical-SAR fusion"
+            self.category = "fusion"
+
+        def run(self, **kwargs):
+            return {
+                "status": "success",
+                "task": "optical_sar",
+                "answer": "Zero clear-sky pixels available.",
+                "valid_pixel_count": 0,
+                "water_pct": 0.0,
+                "mean_sar_display": 220.0,
+                "registration_info": {
+                    "co_registered": True,
+                    "alignment_valid": True,
+                    "is_display_only": False
+                },
+                "evidence": []
+            }
+
+    monkeypatch.setattr(tool_registry, "_tools", {**tool_registry._tools, "optical_sar_fusion": ZeroPixelFusionTool()})
+
+    res = orchestrator.orchestrate(
+        query="Analyze open water lake with optical and SAR in Mumbai [72.75, 18.88, 73.05, 19.30]"
+    )
+
+    # Must NOT invent a conflict
+    assert res["conflict_info"]["conflict_detected"] is False
+    assert "Zero valid clear-sky pixels" in res["conflict_info"]["conflict_details"]
+
+    # Trace logs INSUFFICIENT_EVIDENCE
+    steps = res["trace"]["steps"]
+    insuf_step = next((s for s in steps if s.get("step") == "INSUFFICIENT_EVIDENCE"), None)
+    assert insuf_step is not None
+
+    # Status must be unsupported
+    assert res["status"] == "unsupported"
+    assert res["confidence"] is None
+    assert res["confidence_label"] == "Insufficient Evidence"
+
+
+def test_orchestrator_deterministic_claim_contradiction_integration(monkeypatch):
+    """
+    Verify that when DeterministicVerifier detects a claim contradiction (Check L),
+    the dynamic orchestrator transitions overall status to 'contradicted', populates conflict_info,
+    and logs CONFLICT_DETECTED in the trace.
+    """
+    orchestrator = MultiStepOrchestrator()
+
+    orig_synth = orchestrator._synthesize_claims
+    def mock_synth(*args, **kwargs):
+        status, conf, conf_lbl, ans, claims = orig_synth(*args, **kwargs)
+        claims.append(ClaimVerificationItem(
+            claim_text="The observed Delta-NDVI is +3.5 indicating massive rapid greening.",
+            claim_type="measurement",
+            status="supported"
+        ))
+        return status, conf, conf_lbl, ans, claims
+
+    monkeypatch.setattr(orchestrator, "_synthesize_claims", mock_synth)
+
+    res = orchestrator.orchestrate("Analyze Sentinel-2 NDVI change in Mumbai between 2023-01-01 and 2024-01-01")
+
+    assert res["status"] == "contradicted"
+    assert res["confidence"] == 0.35
+    assert res["confidence_label"] == "Contradiction Detected"
+    assert res["conflict_info"]["conflict_detected"] is True
+    assert "CONFLICT_DETECTED" in [s.get("step") for s in res["trace"]["steps"]]
+    assert res["verification"]["passed"] is False
+    assert res["verification"]["verification_status"] == "contradicted"

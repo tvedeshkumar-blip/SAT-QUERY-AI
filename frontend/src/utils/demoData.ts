@@ -6,6 +6,9 @@ export function generateSyntheticSatelliteScene(
   width = 512,
   height = 512
 ): string {
+  if (typeof document === 'undefined') {
+    return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  }
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;

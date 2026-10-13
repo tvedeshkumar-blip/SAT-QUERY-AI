@@ -103,6 +103,9 @@ def parse_geotiff_or_image(image_base64: str, filename: Optional[str] = None) ->
                 # Transpose from (bands, height, width) to (height, width, bands)
                 if arr.ndim == 3:
                     arr = np.transpose(arr, (1, 2, 0))
+                    metadata["layout"] = "HWC"
+                else:
+                    metadata["layout"] = "HW"
 
                 logger.info(f"Read GeoTIFF with Rasterio: shape={arr.shape}, CRS={metadata['crs']}")
                 return arr, metadata
@@ -169,6 +172,7 @@ def parse_geotiff_or_image(image_base64: str, filename: Optional[str] = None) ->
         metadata["height"] = int(pil_img.height)
         metadata["bands"] = int(arr.shape[2] if arr.ndim == 3 else 1)
         metadata["dtype"] = str(arr.dtype)
+        metadata["layout"] = "HWC" if arr.ndim == 3 else "HW"
 
         if not metadata["crs"]:
             metadata["crs"] = None

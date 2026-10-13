@@ -28,47 +28,188 @@ def compute_bounds_overlap(bounds_a: List[float], bounds_b: List[float]) -> floa
 
     return float(round((inter_area / min_area) * 100.0, 2))
 
-def compute_source_valid_mask(arr: np.ndarray, nodata: Optional[Any] = None) -> np.ndarray:
+def compute_source_valid_mask(
+    arr: np.ndarray,
+    nodata: Optional[Any] = None,
+    layout: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> np.ndarray:
     """
-    Computes 2D boolean mask (True = valid data, False = nodata / NaN / Inf).
-    A pixel is invalid if ANY channel is nodata, NaN, or non-finite.
+    Computes a 2D boolean mask (True = valid data, False = nodata / NaN / Inf).
+    A pixel is invalid if ANY channel contains the declared NoData value, NaN, or infinity.
     Preserves legitimate zero-valued pixels unless nodata is explicitly set to 0.
-    Handles (H, W), (H, W, C), and (C, H, W) array layouts.
+
+    Array layout resolution:
+    - 2D arrays: (H, W), unambiguous.
+    - 3D arrays:
+      1. Explicit `layout` parameter: 'HWC' (channel-last) or 'CHW' (channel-first).
+      2. Trusted `metadata`: 'layout', 'channel_axis', 'bands' / 'count', 'width', 'height'.
+      3. Unambiguous shape deduction: exactly one boundary axis is a standard channel
+         count (<= 16) and the other is a spatial dimension (> 16), or spatial dimensions
+         form a clear square grid with standard channels.
+      4. Explicit failure on genuinely ambiguous shapes: if boundary axes are equal
+         (e.g. (3, 3, 3)), both <= 4, or cannot be resolved without a hint, raises ValueError.
     """
+    if not isinstance(arr, np.ndarray):
+        arr = np.asarray(arr)
+
     if arr.ndim == 2:
         h, w = arr.shape
         channel_axis = None
     elif arr.ndim == 3:
-        # Determine channel axis: if shape[0] is small (<= 16) and shape[2] is larger, it's (C, H, W)
-        if arr.shape[0] < min(arr.shape[1], arr.shape[2]) and arr.shape[0] <= 16:
-            h, w = arr.shape[1], arr.shape[2]
-            channel_axis = 0
-        else:
-            h, w = arr.shape[0], arr.shape[1]
-            channel_axis = -1
+        d0, d1, d2 = arr.shape
+        channel_axis = None
+        h, w = 0, 0
+
+        # 1. Explicit layout parameter
+        if layout is not None:
+            layout_norm = str(layout).strip().upper()
+            if layout_norm in ("HWC", "CHANNELS_LAST", "CHANNEL_LAST", "LAST"):
+                channel_axis = -1
+                h, w = d0, d1
+            elif layout_norm in ("CHW", "CHANNELS_FIRST", "CHANNEL_FIRST", "FIRST"):
+                channel_axis = 0
+                h, w = d1, d2
+            elif layout_norm in ("HW", "2D"):
+                if d0 == 1:
+                    channel_axis = 0
+                    h, w = d1, d2
+                elif d2 == 1:
+                    channel_axis = -1
+                    h, w = d0, d1
+                else:
+                    raise ValueError(
+                        f"Layout '{layout}' specified 2D/HW, but 3D array has shape {arr.shape} with no singleton channel."
+                    )
+            elif layout_norm not in ("AUTO", "NONE", ""):
+                raise ValueError(f"Unsupported layout '{layout}'. Expected 'HWC' or 'CHW'.")
+
+        # 2. Trusted metadata inspection
+        if channel_axis is None and metadata is not None and isinstance(metadata, dict):
+            meta_layout = metadata.get("layout") or metadata.get("array_layout")
+            if meta_layout is not None:
+                ml_norm = str(meta_layout).strip().upper()
+                if ml_norm in ("HWC", "CHANNELS_LAST", "CHANNEL_LAST", "LAST"):
+                    channel_axis = -1
+                    h, w = d0, d1
+                elif ml_norm in ("CHW", "CHANNELS_FIRST", "CHANNEL_FIRST", "FIRST"):
+                    channel_axis = 0
+                    h, w = d1, d2
+                elif ml_norm not in ("AUTO", "NONE", ""):
+                    raise ValueError(f"Unsupported metadata layout '{meta_layout}'. Expected 'HWC' or 'CHW'.")
+
+            if channel_axis is None and "channel_axis" in metadata:
+                meta_axis = metadata["channel_axis"]
+                if meta_axis in (0, "0", "first"):
+                    channel_axis = 0
+                    h, w = d1, d2
+                elif meta_axis in (-1, 2, "-1", "2", "last"):
+                    channel_axis = -1
+                    h, w = d0, d1
+
+            if channel_axis is None:
+                meta_bands = metadata.get("bands") or metadata.get("count")
+                if meta_bands is not None:
+                    try:
+                        b_int = int(meta_bands)
+                        if b_int == d0 and b_int != d2:
+                            channel_axis = 0
+                            h, w = d1, d2
+                        elif b_int == d2 and b_int != d0:
+                            channel_axis = -1
+                            h, w = d0, d1
+                    except (ValueError, TypeError):
+                        pass
+
+            if channel_axis is None:
+                meta_w = metadata.get("width")
+                meta_h = metadata.get("height")
+                if meta_w is not None and meta_h is not None:
+                    try:
+                        exp_w = int(meta_w)
+                        exp_h = int(meta_h)
+                        is_chw = (d1 == exp_h and d2 == exp_w)
+                        is_hwc = (d0 == exp_h and d1 == exp_w)
+                        if is_chw and not is_hwc:
+                            channel_axis = 0
+                            h, w = d1, d2
+                        elif is_hwc and not is_chw:
+                            channel_axis = -1
+                            h, w = d0, d1
+                    except (ValueError, TypeError):
+                        pass
+
+        # 3. Shape deduction when unambiguous; explicit error when ambiguous
+        if channel_axis is None:
+            MAX_CHANNELS = 16
+            # Ambiguous: identical boundary dimensions (e.g. (3, 3, 3), (4, 100, 4))
+            if d0 == d2:
+                raise ValueError(
+                    f"Ambiguous 3D array shape {arr.shape}: first and last dimensions are equal ({d0}). "
+                    "Cannot distinguish (C, H, W) from (H, W, C) without explicit layout hint or metadata. "
+                    "Specify layout='HWC' or layout='CHW'."
+                )
+
+            # Square spatial grid with standard channels (e.g. (10, 10, 3) or (3, 10, 10))
+            if d0 == d1 and d2 <= 4 and d0 > d2:
+                channel_axis = -1
+                h, w = d0, d1
+            elif d1 == d2 and d0 <= 4 and d2 > d0:
+                channel_axis = 0
+                h, w = d1, d2
+            # Ambiguous: both boundary dimensions are common channel counts (e.g. (3, 10, 4), (4, 5, 3))
+            elif d0 <= 4 and d2 <= 4:
+                raise ValueError(
+                    f"Ambiguous 3D array shape {arr.shape}: both first ({d0}) and last ({d2}) dimensions "
+                    "are common channel counts (<= 4). Cannot determine layout without explicit layout hint. "
+                    "Specify layout='HWC' or layout='CHW'."
+                )
+            # Ambiguous: both boundary dimensions are plausible bands (e.g. (8, 256, 12))
+            elif d0 <= MAX_CHANNELS and d2 <= MAX_CHANNELS:
+                raise ValueError(
+                    f"Ambiguous 3D array shape {arr.shape}: both first ({d0}) and last ({d2}) dimensions "
+                    f"are plausible channel counts (<= {MAX_CHANNELS}). "
+                    "Cannot determine layout without explicit layout hint or metadata. "
+                    "Specify layout='HWC' or layout='CHW'."
+                )
+            # Ambiguous: neither dimension is within standard channel range (e.g. (64, 64, 64))
+            elif d0 > MAX_CHANNELS and d2 > MAX_CHANNELS:
+                raise ValueError(
+                    f"Ambiguous 3D array shape {arr.shape}: neither first ({d0}) nor last ({d2}) dimension "
+                    f"is a standard channel count (<= {MAX_CHANNELS}). "
+                    "Cannot determine layout without explicit layout hint or metadata. "
+                    "Specify layout='HWC' or layout='CHW'."
+                )
+            # Unambiguous: one is <= MAX_CHANNELS and the other is > MAX_CHANNELS
+            elif d0 <= MAX_CHANNELS and d2 > MAX_CHANNELS:
+                channel_axis = 0
+                h, w = d1, d2
+            elif d2 <= MAX_CHANNELS and d0 > MAX_CHANNELS:
+                channel_axis = -1
+                h, w = d0, d1
     else:
-        h, w = arr.shape[:2]
-        channel_axis = -1
+        raise ValueError(f"Expected 2D or 3D array, got {arr.ndim}D array with shape {arr.shape}.")
 
     mask = np.ones((h, w), dtype=bool)
 
     # 1. Floating-point NaN / Inf checks
     if np.issubdtype(arr.dtype, np.floating):
+        invalid_floats = np.isnan(arr) | np.isinf(arr)
         if channel_axis is None:
-            mask &= ~(np.isnan(arr) | np.isinf(arr))
+            mask &= ~invalid_floats
         else:
-            invalid_floats = np.isnan(arr) | np.isinf(arr)
             mask &= ~np.any(invalid_floats, axis=channel_axis)
 
     # 2. Source nodata exclusions
     if nodata is not None:
         try:
             nd_val = float(nodata)
-            if channel_axis is None:
-                mask &= (arr != nd_val)
-            else:
-                # Pixel is invalid if ANY required channel equals nodata
-                mask &= ~np.any(arr == nd_val, axis=channel_axis)
+            if not np.isnan(nd_val):
+                if channel_axis is None:
+                    mask &= (arr != nd_val)
+                else:
+                    # Pixel is invalid if ANY required channel equals nodata
+                    mask &= ~np.any(arr == nd_val, axis=channel_axis)
         except Exception:
             pass
 
@@ -120,9 +261,11 @@ def align_image_pair(
     nodata_a = meta_a.get("nodata")
     nodata_b = meta_b.get("nodata")
 
-    # Compute source validity masks
-    src_valid_a = compute_source_valid_mask(img_a, nodata_a)
-    src_valid_b = compute_source_valid_mask(img_b, nodata_b)
+    # Compute source validity masks with explicit layout and metadata hints
+    layout_a = meta_a.get("layout") or ("HWC" if img_a.ndim == 3 else None)
+    layout_b = meta_b.get("layout") or ("HWC" if img_b.ndim == 3 else None)
+    src_valid_a = compute_source_valid_mask(img_a, nodata_a, layout=layout_a, metadata=meta_a)
+    src_valid_b = compute_source_valid_mask(img_b, nodata_b, layout=layout_b, metadata=meta_b)
 
     # Stage 10: Integrate radiometric quality masks if present
     q_mask_a = meta_a.get("quality_mask")

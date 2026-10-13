@@ -1,20 +1,9 @@
 import React, { useRef } from 'react';
 import { Upload, FileCode, CheckCircle2, Image as ImageIcon, RefreshCw } from 'lucide-react';
-import { AnalysisMode } from '../types';
+import { AnalysisMode, UploadedFileState } from '../types';
 import { isGeoTIFF, formatFileSize } from '../utils/imageHelper';
 
-export interface UploadedFileState {
-  file?: File;
-  dataUrl: string;
-  filename: string;
-  size?: number;
-  role: 'primary' | 'secondary' | 'optical' | 'sar';
-  isGeoTIFF: boolean;
-  assetCategory?: 'visual_preview' | 'rgb_visual_raster' | 'single_band_spectral' | 'multispectral_cube' | 'scientific_raster' | 'unsupported';
-  stacProvenance?: Record<string, any>;
-  validation?: any;
-  scientificLimitations?: string[];
-}
+export type { UploadedFileState };
 
 
 interface ImageUploaderProps {

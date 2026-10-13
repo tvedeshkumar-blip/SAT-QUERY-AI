@@ -90,6 +90,13 @@ export const QuestionPanel: React.FC<QuestionPanelProps> = ({
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isGenerating]);
 
+  // Synchronize external query prop to local chatInput when query changes (e.g. loading demo presets)
+  useEffect(() => {
+    if (query !== undefined) {
+      setChatInput(query);
+    }
+  }, [query]);
+
   // Derived structured evidence from the latest analysis response
   const activeEvidence = extractStructuredEvidence(analysisResponse);
 

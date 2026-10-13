@@ -86,8 +86,8 @@ export const WorkspacePage: React.FC = () => {
       }));
 
 
-      // Fallback synthetic preset if no file uploaded
-      if (imagePayloads.length === 0) {
+      // Fallback synthetic preset if no file uploaded and mode is not autonomous orchestration or temporal
+      if (imagePayloads.length === 0 && mode !== 'orchestration' && mode !== 'temporal') {
         const dummyPreset = currentPresets[0] || EARTH_OBSERVATION_PRESETS[0];
         imagePayloads.push({
           data: dummyPreset.imageUrl,

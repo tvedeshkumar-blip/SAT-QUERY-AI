@@ -29,6 +29,8 @@ from app.agent.tools import tool_registry
 from app.agent.trace import ExecutionTraceTracker
 from app.remote_sensing.temporal import compute_temporal_optical_change, compute_temporal_sar_change
 from app.agent.verifier import DeterministicVerifier, EvidencePackageBuilder
+from app.agent.conflict_detector import ConflictDetector, ConflictCheckResult
+from app.schemas.analysis import ConflictInfoSchema
 from app.schemas.verification import EvidencePackageSchema, ClaimVerificationItem
 from app.reports.scientific_report import ScientificReportBuilder
 
@@ -629,10 +631,67 @@ class MultiStepOrchestrator:
                     analysis_metadata["optical_sar_fusion"] = {"status": "blocked", "error": err_msg}
                     continue
 
+                active_aoi = parsed.get("bbox")
+                opt_meta = opt_scene.get("raster_metadata") or opt_scene.get("metadata") or {}
+                sar_meta = sar_scene.get("raster_metadata") or sar_scene.get("metadata") or {}
+                opt_prov = opt_scene.get("provenance") or opt_meta
+                sar_prov = sar_scene.get("provenance") or sar_meta
+
+                is_local_demo_sample = (
+                    str(opt_scene.get("scene_id", "")).startswith("local_sample_") or
+                    str(sar_scene.get("scene_id", "")).startswith("local_sample_")
+                )
+                validation_aoi = None if is_local_demo_sample else active_aoi
+
+                # Validate pair using CrossSensorValidator before execution (P1-1 integration)
+                from app.acquisition.cross_sensor_validator import CrossSensorValidator
+                cs_val = CrossSensorValidator.validate_pair(
+                    optical_input=opt_scene["array"],
+                    sar_input=sar_scene["array"],
+                    optical_metadata=opt_meta,
+                    sar_metadata=sar_meta,
+                    optical_provenance=opt_prov,
+                    sar_provenance=sar_prov,
+                    aoi_bbox=validation_aoi
+                )
+
+                if not cs_val.get("is_compatible", True):
+                    rejection_reason = cs_val.get("rejection_reason") or "Cross-sensor validation failed."
+                    err_msg = f"Cross-sensor validation rejected optical-SAR pair: {rejection_reason}"
+                    trace.add_step(f"TOOL_{tool_name.upper()}", err_msg, status="unsupported")
+                    execution_steps.append({
+                        "step_number": step_count,
+                        "tool": tool_name,
+                        "status": "unsupported",
+                        "latency_ms": 0.0,
+                        "summary": step_desc,
+                        "error": err_msg
+                    })
+                    analysis_metadata["optical_sar_fusion"] = {
+                        "status": "unsupported",
+                        "analysis_status": "unsupported_validation",
+                        "answer": f"Optical-SAR cross-sensor fusion analysis rejected: {rejection_reason}",
+                        "cross_sensor_validation": cs_val,
+                        "confidence": None,
+                        "confidence_label": "Not available (Cross-Sensor Validation Rejected)",
+                        "water_pct": None,
+                        "urban_pct": None,
+                        "veg_pct": None,
+                        "limitations": cs_val.get("scientific_limitations", []),
+                        "warnings": cs_val.get("warnings", [])
+                    }
+                    continue
+
+                if cs_val.get("warnings"):
+                    for w in cs_val["warnings"]:
+                        trace.add_step(f"TOOL_{tool_name.upper()}_ADVISORY", w, status="completed")
+
                 tool_args["images"] = [opt_scene["array"], sar_scene["array"]]
                 tool_args["metadata"] = {
-                    "optical": opt_scene.get("raster_metadata") or opt_scene.get("metadata") or {},
-                    "sar": sar_scene.get("raster_metadata") or sar_scene.get("metadata") or {}
+                    "optical": opt_meta,
+                    "sar": sar_meta,
+                    "aoi_bbox": active_aoi,
+                    "cross_sensor_validation": cs_val
                 }
                 tool_args["query"] = query
 
@@ -795,7 +854,7 @@ class MultiStepOrchestrator:
             analysis_result=analysis_result
         )
 
-        # Step 5: Evidence Package Building & Deterministic Verification
+        # Step 5: Evidence Package Building & Deterministic Verification / Contradiction Detection
         analysis_dict = {
             "id": trace_id,
             "query": query,
@@ -806,14 +865,97 @@ class MultiStepOrchestrator:
         pkg = EvidencePackageBuilder.from_analysis_response(analysis_dict)
         trace.add_step("EVIDENCE_ASSEMBLED", f"Extracted {len(pkg.physical_measurements)} physical measurement(s) and {len(pkg.evidence_artifacts)} artifact(s)")
 
-        if overall_status == "success" and candidate_claims:
-            verifier_tool = self.tool_registry.get("deterministic_verifier")
-            v_out = verifier_tool.run(evidence_package=pkg, candidate_claims=candidate_claims, answer_text=answer)
-            det_passed = v_out["passed"]
-            confidence = 0.95 if det_passed else 0.40
-            confidence_label = "Deterministic Verified" if det_passed else "Verification Flagged"
-            trace.add_step("DETERMINISTIC_VERIFIED", f"Checks A-L: {'PASSED' if det_passed else 'VIOLATIONS DETECTED'} ({len(v_out['failures'])} violation(s))")
+        conflict_info = ConflictInfoSchema(conflict_detected=False)
+
+        if overall_status == "success":
+            # 5a. Cross-Evidence Contradiction Evaluation
+            conflict_eval = ConflictDetector.evaluate(
+                task=task,
+                query=query,
+                primary_result=analysis_result or {"answer": answer, "evidence": evidence_items},
+                metadata=analysis_metadata,
+                evidence_package=pkg,
+                candidate_claims=candidate_claims
+            )
+
+            # 5b. Deterministic Verification
+            v_out = None
+            if candidate_claims:
+                verifier_tool = self.tool_registry.get("deterministic_verifier")
+                v_out = verifier_tool.run(evidence_package=pkg, candidate_claims=candidate_claims, answer_text=answer)
+
+            contradictions = list(v_out.get("contradictions", [])) if v_out else []
+            det_passed = v_out.get("passed", True) if v_out else True
+
+            # If conflict detector detected conflict OR deterministic verifier found contradictions
+            if conflict_eval.conflict_detected or len(contradictions) > 0:
+                conf_type = conflict_eval.conflict_type or "DETERMINISTIC_CLAIM_CONTRADICTION"
+                conf_details = conflict_eval.reanalysis_reason or "; ".join(contradictions)
+                trace.add_step(
+                    "CONFLICT_DETECTED",
+                    f"Contradiction identified [{conf_type}]: {conf_details}"
+                )
+                conflict_info = ConflictInfoSchema(
+                    conflict_detected=True,
+                    conflict_type=conf_type,
+                    conflict_details=conf_details,
+                    reanalysis_performed=False,
+                    reanalysis_tool=conflict_eval.reanalysis_tool
+                )
+                overall_status = "contradicted"
+                confidence = 0.35
+                confidence_label = "Contradiction Detected"
+                answer += f"\n\n[CONTRADICTION DETECTED]: {conf_details}"
+                if v_out is None:
+                    v_out = {
+                        "passed": False,
+                        "deterministic_passed": False,
+                        "verification_status": "contradicted",
+                        "failures": [conf_details],
+                        "deterministic_failures": [conf_details],
+                        "claims": [c.dict() if hasattr(c, "dict") else c.model_dump() for c in candidate_claims],
+                        "contradictions": [conf_details],
+                        "unsupported_claims": [],
+                        "summary_explanation": f"Contradiction identified: {conf_details}",
+                        "missing_evidence": [],
+                        "scientific_limitations": getattr(pkg, "known_limitations", []) or [],
+                        "recommended_checks": []
+                    }
+                else:
+                    v_out["passed"] = False
+                    v_out["deterministic_passed"] = False
+                    v_out["verification_status"] = "contradicted"
+                    if conf_details not in v_out.get("contradictions", []):
+                        v_out.setdefault("contradictions", []).append(conf_details)
+            elif conflict_eval.status in ("unsupported", "insufficient_evidence"):
+                trace.add_step(
+                    "INSUFFICIENT_EVIDENCE",
+                    f"Cross-evidence evaluation uncertain: {conflict_eval.uncertainty_reason}"
+                )
+                conflict_info = ConflictInfoSchema(
+                    conflict_detected=False,
+                    conflict_details=conflict_eval.uncertainty_reason
+                )
+                if task in ("optical_sar", "optical_sar_fusion", "optical_sar_joint"):
+                    overall_status = "unsupported"
+                    confidence = None
+                    confidence_label = "Insufficient Evidence"
+                    if v_out:
+                        v_out["passed"] = False
+                        v_out["verification_status"] = "unsupported"
+            else:
+                # No conflict detected
+                conflict_info = ConflictInfoSchema(conflict_detected=False)
+                if v_out:
+                    confidence = 0.95 if det_passed else 0.40
+                    confidence_label = "Deterministic Verified" if det_passed else "Verification Flagged"
+                    trace.add_step("DETERMINISTIC_VERIFIED", f"Checks A-L: {'PASSED' if det_passed else 'VIOLATIONS DETECTED'} ({len(v_out['failures'])} violation(s))")
+                else:
+                    confidence = 0.95
+                    confidence_label = "Deterministic Verified"
         else:
+            # overall_status != "success" (e.g. failed, unsupported, budget_exhausted)
+            conflict_info = ConflictInfoSchema(conflict_detected=False)
             v_out = {
                 "passed": False,
                 "deterministic_passed": False,
@@ -828,9 +970,6 @@ class MultiStepOrchestrator:
                 "scientific_limitations": getattr(pkg, "known_limitations", []) or [],
                 "recommended_checks": []
             }
-            if overall_status == "success":
-                confidence = 0.95
-                confidence_label = "Deterministic Verified"
             trace.add_step("VERIFICATION_SKIPPED", f"Verification skipped for status '{overall_status}'", status="completed")
 
         # Step 6: Scientific Report Generation
@@ -856,6 +995,7 @@ class MultiStepOrchestrator:
             "evidence": evidence_items,
             "trace": trace_data,
             "metadata": analysis_metadata,
+            "conflict_info": conflict_info.dict() if hasattr(conflict_info, "dict") else conflict_info.model_dump(),
             "verification": v_out,
             "reproducible_report": report.dict() if hasattr(report, "dict") else report.model_dump(),
             "execution_time_ms": elapsed_total,

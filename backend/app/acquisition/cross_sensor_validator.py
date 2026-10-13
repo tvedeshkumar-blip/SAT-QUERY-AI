@@ -701,17 +701,33 @@ class CrossSensorValidator:
             return None
 
         res = meta.get("resolution")
+        if isinstance(res, (int, float)) and not isinstance(res, bool):
+            res = [float(res), float(res)]
+        elif not isinstance(res, (list, tuple)):
+            res = None
+
         if not res or len(res) < 2 or res[0] <= 0 or res[1] <= 0:
             transform = meta.get("transform")
             if transform and len(transform) >= 6:
                 try:
                     res = [abs(float(transform[0])), abs(float(transform[4]))]
                 except (ValueError, TypeError):
+                    res = None
+            if not res or len(res) < 2 or res[0] <= 0 or res[1] <= 0:
+                bounds = meta.get("bounds")
+                w = meta.get("width")
+                h = meta.get("height")
+                if bounds and len(bounds) >= 4 and w and h:
+                    try:
+                        w_f, h_f = float(w), float(h)
+                        if w_f > 0 and h_f > 0:
+                            res = [abs(float(bounds[2]) - float(bounds[0])) / w_f, abs(float(bounds[3]) - float(bounds[1])) / h_f]
+                    except (ValueError, TypeError, ZeroDivisionError):
+                        return None
+                else:
                     return None
-            else:
-                return None
 
-        if res[0] <= 0 or res[1] <= 0:
+        if res is None or res[0] <= 0 or res[1] <= 0:
             return None
 
         if crs_obj.is_projected:

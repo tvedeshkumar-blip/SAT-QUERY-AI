@@ -77,6 +77,14 @@ class AgentController:
                 transfer_budget_bytes=trace_dict.get("transfer_budget_bytes")
             )
 
+            conf_info = orch_res.get("conflict_info")
+            if isinstance(conf_info, dict):
+                conf_info_obj = ConflictInfoSchema(**conf_info)
+            elif isinstance(conf_info, ConflictInfoSchema):
+                conf_info_obj = conf_info
+            else:
+                conf_info_obj = ConflictInfoSchema(conflict_detected=False)
+
             return AnalysisResponseSchema(
                 id=orch_res["id"],
                 task=orch_res.get("task", "orchestration"),
@@ -93,6 +101,7 @@ class AgentController:
                 evidence=ev_list,
                 trace=trace_schema,
                 metadata=orch_res.get("metadata", {}),
+                conflict_info=conf_info_obj,
                 verification=orch_res.get("verification"),
                 reproducible_report=orch_res.get("reproducible_report"),
                 is_clarification_required=orch_res.get("is_clarification_required", False),
@@ -325,20 +334,36 @@ class AgentController:
             prov_opt = getattr(request.images[opt_idx], "provenance", {}) or {}
             prov_sar = getattr(request.images[sar_idx], "provenance", {}) or {}
 
-            # Check CRS & Spatial Overlap
+            # P1-1: Physical Cross-Sensor Validation via CrossSensorValidator
+            from app.acquisition.cross_sensor_validator import CrossSensorValidator
+            request_aoi = getattr(request, "aoi", None) or getattr(request, "bbox", None) or getattr(request, "aoi_bbox", None)
+            cs_val = CrossSensorValidator.validate_pair(
+                optical_input=parsed_arrays[opt_idx],
+                sar_input=parsed_arrays[sar_idx],
+                optical_filename=getattr(request.images[opt_idx], "filename", None),
+                sar_filename=getattr(request.images[sar_idx], "filename", None),
+                optical_provenance=prov_opt,
+                sar_provenance=prov_sar,
+                optical_metadata=meta_opt,
+                sar_metadata=meta_sar,
+                aoi_bbox=request_aoi
+            )
+
+            if not cs_val.get("is_compatible", True):
+                rejection_reason = cs_val.get("rejection_reason") or "Cross-sensor pair validation failed."
+                raise ValidationError(rejection_reason)
+
             crs_opt = meta_opt.get("crs")
             crs_sar = meta_sar.get("crs")
-            if crs_opt and crs_sar:
-                if crs_opt != crs_sar:
-                    raise ValidationError(
-                        f"CRS mismatch: Optical projection is '{crs_opt}' while SAR projection is '{crs_sar}'. "
-                        "Cross-sensor analysis requires identical coordinate reference systems."
-                    )
-                if spatial_overlap_pct <= 0.0:
-                    raise ValidationError(
-                        "Zero spatial overlap: Optical footprint and SAR footprint do not intersect. "
-                        "Cross-sensor analysis requires overlapping geographical coverage."
-                    )
+            spatial_overlap_pct = cs_val.get("spatial_overlap_pct", 0.0)
+            registration_valid = cs_val.get("co_registered", False)
+
+            # Store validated cross-sensor metadata
+            metadata_list[0]["cross_sensor_validation"] = cs_val
+            metadata_list[1]["cross_sensor_validation"] = cs_val
+            if cs_val.get("warnings"):
+                for w in cs_val["warnings"]:
+                    trace.add_step("CROSS_SENSOR_PAIR_ADVISORY", w, status="completed")
 
             # Inspect SAR product processing metadata
             sar_tags = meta_sar.get("tags", {}) or {}
