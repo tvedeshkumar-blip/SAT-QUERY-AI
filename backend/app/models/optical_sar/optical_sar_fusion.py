@@ -147,8 +147,75 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
         meta = metadata or {}
         meta_opt = meta.get("optical") or meta.get("primary", {})
         meta_sar = meta.get("sar") or meta.get("secondary", {})
+        aoi_bbox = meta.get("aoi_bbox") or meta.get("aoi")
 
         img_opt, img_sar = images[0], images[1]
+
+        # Step 0: Cross-Sensor Validation before fusion (P1-1 integration)
+        cs_val = meta.get("cross_sensor_validation")
+        if cs_val is None and (meta_opt or meta_sar):
+            from app.acquisition.cross_sensor_validator import CrossSensorValidator
+            cs_val = CrossSensorValidator.validate_pair(
+                optical_input=img_opt,
+                sar_input=img_sar,
+                optical_metadata=meta_opt,
+                sar_metadata=meta_sar,
+                optical_provenance=meta_opt.get("provenance") or meta_opt,
+                sar_provenance=meta_sar.get("provenance") or meta_sar,
+                aoi_bbox=aoi_bbox
+            )
+
+        if cs_val is not None and not cs_val.get("is_compatible", True):
+            rejection_reason = cs_val.get("rejection_reason") or "Cross-sensor validation rejected scene pair."
+            opt_u8, _ = robust_remote_sensing_preprocess(img_opt, meta_opt, target_modality="OPTICAL")
+            sar_u8, _ = robust_remote_sensing_preprocess(img_sar, meta_sar, target_modality="SAR")
+            opt_rgb = opt_u8[:, :, :3] if (opt_u8.ndim == 3 and opt_u8.shape[2] >= 3) else np.stack([opt_u8 if opt_u8.ndim == 2 else opt_u8[:, :, 0]]*3, axis=-1)
+            sar_gray = sar_u8 if sar_u8.ndim == 2 else sar_u8[:, :, 0]
+            opt_b64 = convert_array_to_base64_png(opt_rgb)
+            sar_b64 = convert_array_to_base64_png(sar_gray)
+
+            return {
+                "status": "unsupported",
+                "analysis_status": "unsupported_validation",
+                "answer": f"Optical + SAR joint analysis rejected: {rejection_reason}",
+                "model_type": "joint_analysis_baseline",
+                "model_name": self.model_name,
+                "primary_model": self.model_name,
+                "actual_model_used": self.model_name,
+                "fallback_used": False,
+                "confidence": None,
+                "confidence_label": "Not available (Cross-Sensor Validation Rejected)",
+                "water_pct": None,
+                "urban_pct": None,
+                "veg_pct": None,
+                "cross_sensor_validation": cs_val,
+                "evidence": [
+                    {
+                        "id": "ev_optical_reflectance",
+                        "type": "original",
+                        "title": "Optical Scene",
+                        "description": "Optical raster preview.",
+                        "data_base64": opt_b64,
+                        "statistics": {"modality": "OPTICAL"}
+                    },
+                    {
+                        "id": "ev_sar_backscatter",
+                        "type": "processed",
+                        "title": "SAR Scene",
+                        "description": "SAR microwave preview.",
+                        "data_base64": sar_b64,
+                        "statistics": {"modality": "SAR"}
+                    }
+                ],
+                "optical_evidence": opt_b64,
+                "sar_evidence": sar_b64,
+                "fused_evidence": None,
+                "limitations": cs_val.get("scientific_limitations", []) + [
+                    f"Cross-sensor validation rejected pair: {rejection_reason}"
+                ],
+                "warnings": cs_val.get("warnings", [])
+            }
+
         img_opt, img_sar_aligned, reg_info = align_image_pair(img_opt, img_sar, meta_opt, meta_sar)
 
         h, w = img_opt.shape[:2]
@@ -593,6 +660,7 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
             "total_pixels": total_pixels,
             "models": [self.model_name],
             "registration_info": reg_info,
+            "cross_sensor_validation": cs_val,
             "quality_screening": {
                 "optical": scl_eval,
                 "sar": sar_eval
@@ -601,7 +669,7 @@ class OpticalSARJointAnalysisProvider(BaseOpticalSARFusion):
             "optical_evidence": opt_b64,
             "sar_evidence": sar_b64,
             "fused_evidence": joint_b64,
-            "limitations": limitations,
+            "limitations": limitations + ([w for w in cs_val.get("warnings", []) if w not in limitations] if cs_val else []),
             "model_provenance": {
                 "primary_model": self.model_name,
                 "actual_model_used": self.model_name,

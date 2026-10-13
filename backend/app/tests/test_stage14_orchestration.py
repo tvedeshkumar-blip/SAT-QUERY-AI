@@ -716,3 +716,105 @@ def test_sentinel2_ndvi_explicitly_unsupported_outcome(monkeypatch):
     assert res["verification"]["passed"] is False
 
 
+# ============================================================================
+# Stage 4A P0-4 Regression Tests: Honest Unsupported Optical-SAR Status Propagation
+# ============================================================================
+
+def test_p0_4_claim_synthesis_unsupported_optical_sar_fusion():
+    """
+    P0-4 Unit Test: Directly feeds unsupported fusion result into _synthesize_claims().
+    Verifies:
+    1. overall_status is 'unsupported' (not falling through to 'success')
+    2. confidence is None
+    3. confidence_label reflects unsupported analysis reason
+    4. candidate_claims is empty (never emits 'Multimodal optical and SAR ... completed successfully')
+    5. truthful answer explanation is retained
+    """
+    orchestrator = MultiStepOrchestrator()
+
+    # Case A: Unsupported due to display-only alignment (unsupported_alignment)
+    fusion_unsupported_align = {
+        "status": "unsupported",
+        "analysis_status": "unsupported_alignment",
+        "answer": "Optical + SAR joint analysis rejected for geospatial calculation: Safe geospatial alignment could not be established."
+    }
+    meta = {"optical_sar_fusion": fusion_unsupported_align}
+    status, conf, conf_lbl, ans, claims = orchestrator._synthesize_claims(
+        task="optical_sar",
+        analysis_metadata=meta,
+        execution_steps=[]
+    )
+
+    assert status == "unsupported"
+    assert conf is None
+    assert conf_lbl == "Unsupported (Unsupported Alignment)"
+    assert "safe geospatial alignment could not be established" in ans.lower()
+    assert len(claims) == 0  # CRITICAL: No false success claims generated
+
+    # Case B: Unsupported due to zero valid intersecting pixels (unsupported_empty_intersection)
+    fusion_zero_px = {
+        "status": "unsupported",
+        "analysis_status": "unsupported_empty_intersection",
+        "answer": "Optical + SAR Multimodal Joint Analysis unsupported: The valid-data intersection between Optical and SAR rasters contains 0 pixels."
+    }
+    meta_zero = {"optical_sar_fusion": fusion_zero_px}
+    status2, conf2, conf_lbl2, ans2, claims2 = orchestrator._synthesize_claims(
+        task="optical_sar",
+        analysis_metadata=meta_zero,
+        execution_steps=[]
+    )
+
+    assert status2 == "unsupported"
+    assert conf2 is None
+    assert conf_lbl2 == "Unsupported (Unsupported Empty Intersection)"
+    assert "contains 0 pixels" in ans2
+    assert len(claims2) == 0
+
+
+def test_p0_4_orchestrate_end_to_end_unsupported_optical_sar_fusion(monkeypatch):
+    """
+    P0-4 Orchestrator Test: End-to-end orchestration when optical_sar_fusion returns unsupported.
+    Verifies that the entire workflow result propagates status='unsupported', verification fails
+    safely with verification_status='unsupported', and no success claims exist.
+    """
+    orchestrator = MultiStepOrchestrator()
+
+    class UnsupportedFusionTool:
+        def __init__(self):
+            self.name = "optical_sar_fusion"
+            self.description = "Mock unsupported optical-SAR fusion"
+            self.category = "fusion"
+
+        def run(self, **kwargs):
+            return {
+                "status": "unsupported",
+                "analysis_status": "unsupported_alignment",
+                "answer": "Optical + SAR joint analysis rejected for geospatial calculation: Safe geospatial alignment could not be established.",
+                "evidence": [
+                    {
+                        "id": "ev_fused_scene",
+                        "type": "fused",
+                        "title": "Display-Only Resized Preview",
+                        "description": "Display-only visual composite.",
+                        "data_base64": "fake_b64"
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(tool_registry, "_tools", {**tool_registry._tools, "optical_sar_fusion": UnsupportedFusionTool()})
+
+    res = orchestrator.orchestrate(
+        query="Perform joint optical and radar fusion for Mumbai [72.75, 18.88, 73.05, 19.30]"
+    )
+
+    assert res["task"] == "optical_sar"
+    assert res["status"] == "unsupported"
+    assert res["confidence"] is None
+    assert res["confidence_label"] == "Unsupported (Unsupported Alignment)"
+    assert "safe geospatial alignment could not be established" in res["answer"].lower()
+
+    # Verification must be unsupported / failed, not passed
+    assert res["verification"]["passed"] is False
+    assert res["verification"]["verification_status"] == "unsupported"
+    assert len(res["verification"]["claims"]) == 0
+

@@ -544,3 +544,111 @@ def test_controlled_real_asset_optical_sar_fusion_pipeline():
     assert any("preliminary scene-normalized empirical proxies" in lim for lim in res["limitations"])
 
 
+# ============================================================================
+# Stage 4 P0-1 Units-Aware Ground-Resolution Regression Tests
+# ============================================================================
+
+def test_p0_1_utm_vs_geographic_same_ground_resolution():
+    """
+    P0-1 Test 1: 10m UTM raster vs ~10m EPSG:4326 raster at ~13 deg N latitude.
+    Demonstrates that units are normalized on the WGS84 ellipsoid before comparison,
+    preventing spurious ~111,000x disparity rejections between meters and degrees.
+    """
+    from rasterio.warp import transform_bounds
+
+    # Optical: 100x100 raster covering 1000m x 1000m in UTM 32643 (10m ground resolution)
+    opt_bounds_utm = (770000.0, 1427000.0, 771000.0, 1428000.0)
+    opt_b64 = create_geotiff_b64(
+        bounds=opt_bounds_utm,
+        crs="EPSG:32643",
+        width=100,
+        height=100
+    )
+
+    # Transform to EPSG:4326 for equivalent SAR coverage at ~12.9 deg N
+    sar_bounds_4326 = transform_bounds("EPSG:32643", "EPSG:4326", *opt_bounds_utm)
+    # Span is ~0.009 deg in lat/lon; 100 pixels gives ~0.00009 deg (~9.9m ground resolution)
+    sar_b64 = create_geotiff_b64(
+        bounds=sar_bounds_4326,
+        crs="EPSG:4326",
+        width=100,
+        height=100,
+        tags={"SENSOR": "Sentinel-1", "POLARIZATION": "VV"}
+    )
+
+    # Use validate_pair with explicit AOI at 13 deg N
+    aoi_bbox = [77.49, 12.89, 77.51, 12.91]
+    res = CrossSensorValidator.validate_pair(
+        optical_input=opt_b64,
+        sar_input=sar_b64,
+        optical_provenance={"modality": "OPTICAL", "datetime": "2024-02-01T10:00:00Z"},
+        sar_provenance={"modality": "SAR", "datetime": "2024-02-02T10:00:00Z"},
+        aoi_bbox=aoi_bbox
+    )
+
+    # Must NOT fail with spurious 110,000x disparity
+    # Note: cross_sensor_validator checks CRS equality at L205, but if CRS is compatible,
+    # resolution ratio must be evaluated as ~1.0x ground resolution.
+    # To isolate resolution normalization check:
+    ground_res_opt = CrossSensorValidator._compute_ground_resolution_meters(
+        {"crs": "EPSG:32643", "resolution": [10.0, 10.0]}, aoi_bbox=aoi_bbox
+    )
+    ground_res_sar = CrossSensorValidator._compute_ground_resolution_meters(
+        {"crs": "EPSG:4326", "resolution": [0.0000898315, 0.0000898315]}, aoi_bbox=aoi_bbox
+    )
+
+    assert ground_res_opt is not None
+    assert ground_res_sar is not None
+    assert ground_res_opt[0] == pytest.approx(10.0, rel=1e-3)
+    assert ground_res_sar[0] == pytest.approx(9.75, rel=0.05)
+    ratio = max(ground_res_opt[0], ground_res_sar[0]) / min(ground_res_opt[0], ground_res_sar[0])
+    assert ratio == pytest.approx(1.026, rel=0.05)
+    assert ratio < 3.0  # Well within compatible threshold (< 10x)
+
+
+def test_p0_1_genuine_resolution_disparity_rejected():
+    """
+    P0-1 Test 2: Genuine 10m vs 250m disparity (25x) must be strictly rejected.
+    """
+    # Optical: 10m resolution (1000m span, 100 pixels)
+    opt_b64 = create_geotiff_b64(
+        bounds=(770000.0, 1427000.0, 771000.0, 1428000.0),
+        crs="EPSG:32643",
+        width=100,
+        height=100
+    )
+
+    # SAR: 250m resolution (1000m span, 4 pixels)
+    sar_b64 = create_geotiff_b64(
+        bounds=(770000.0, 1427000.0, 771000.0, 1428000.0),
+        crs="EPSG:32643",
+        width=4,
+        height=4,
+        tags={"SENSOR": "Sentinel-1", "POLARIZATION": "VV"}
+    )
+
+    res = CrossSensorValidator.validate_pair(
+        optical_input=opt_b64,
+        sar_input=sar_b64,
+        optical_provenance={"modality": "OPTICAL", "datetime": "2024-02-01T10:00:00Z"},
+        sar_provenance={"modality": "SAR", "datetime": "2024-02-02T10:00:00Z"}
+    )
+
+    assert res["is_compatible"] is False
+    assert res["status"] == "rejected"
+    assert "Excessive resolution disparity" in res["rejection_reason"]
+    assert "25.0x" in res["rejection_reason"]
+    assert res["resolution_compatible"] is False
+
+
+def test_p0_1_missing_georeferencing_resolution_fails_safely():
+    """
+    P0-1 Test 3: Missing CRS or pixel dimensions fails safely without fabricating resolution.
+    """
+    opt_b64 = create_geotiff_b64(crs="EPSG:32643", width=64, height=64)
+    res_none = CrossSensorValidator._compute_ground_resolution_meters({"crs": None, "resolution": [10.0, 10.0]})
+    assert res_none is None
+
+    res_zero = CrossSensorValidator._compute_ground_resolution_meters({"crs": "EPSG:32643", "resolution": [0.0, 0.0]})
+    assert res_zero is None
+

@@ -494,6 +494,7 @@ export interface STACRetrieveRequestPayload {
   asset_key: string;
   collection?: string;
   target_role?: 'primary' | 'secondary' | 'optical' | 'sar';
+  aoi_bbox?: [number, number, number, number] | number[];
 }
 
 export interface STACWindowedRetrieveRequestPayload {

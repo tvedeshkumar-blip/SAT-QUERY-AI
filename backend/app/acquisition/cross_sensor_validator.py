@@ -14,7 +14,7 @@ class CrossSensorValidator:
     """
     Physical Satellite Optical + SAR Cross-Sensor Validator (Stage 6).
     Validates cross-modal asset pairs before inference.
-    
+
     Strict Scientific Rules:
     1. Input completeness: Rejects if either optical or SAR payload is missing.
     2. Asset readability: Rejects corrupted or undecodable rasters.
@@ -64,11 +64,13 @@ class CrossSensorValidator:
         limitations: List[str] = []
 
         # 1. Missing Input Checks
-        if opt_data is None or sar_data is None:
+        has_opt = opt_data is not None or bool(opt_meta_in)
+        has_sar = sar_data is not None or bool(sar_meta_in)
+        if not has_opt or not has_sar:
             missing_parts = []
-            if opt_data is None:
+            if not has_opt:
                 missing_parts.append("Optical reflectance")
-            if sar_data is None:
+            if not has_sar:
                 missing_parts.append("SAR backscatter")
             missing_str = " and ".join(missing_parts)
             return cls._reject(
@@ -80,8 +82,42 @@ class CrossSensorValidator:
             )
 
         # 2. Physical Asset Validation for Each Scene
-        val_opt = AssetValidator.validate_asset(opt_data, filename=fname_opt, provenance=opt_prov)
-        val_sar = AssetValidator.validate_asset(sar_data, filename=fname_sar, provenance=sar_prov)
+        import numpy as np
+        if isinstance(opt_data, np.ndarray) or (opt_data is None and opt_meta_in):
+            opt_meta_dict = dict(opt_meta_in or {})
+            if isinstance(opt_data, np.ndarray):
+                h_o, w_o = opt_data.shape[:2]
+                opt_meta_dict.setdefault("width", w_o)
+                opt_meta_dict.setdefault("height", h_o)
+            val_opt = {
+                "status": "valid",
+                "asset_category": opt_meta_dict.get("asset_category", "scientific_raster"),
+                "raster_metadata": {
+                    "is_geotiff": opt_meta_dict.get("is_geotiff", True),
+                    "georeferenced": bool(opt_meta_dict.get("crs")),
+                    **opt_meta_dict
+                }
+            }
+        else:
+            val_opt = AssetValidator.validate_asset(opt_data, filename=fname_opt, provenance=opt_prov)
+
+        if isinstance(sar_data, np.ndarray) or (sar_data is None and sar_meta_in):
+            sar_meta_dict = dict(sar_meta_in or {})
+            if isinstance(sar_data, np.ndarray):
+                h_s, w_s = sar_data.shape[:2]
+                sar_meta_dict.setdefault("width", w_s)
+                sar_meta_dict.setdefault("height", h_s)
+            val_sar = {
+                "status": "valid",
+                "asset_category": sar_meta_dict.get("asset_category", "scientific_raster"),
+                "raster_metadata": {
+                    "is_geotiff": sar_meta_dict.get("is_geotiff", True),
+                    "georeferenced": bool(sar_meta_dict.get("crs")),
+                    **sar_meta_dict
+                }
+            }
+        else:
+            val_sar = AssetValidator.validate_asset(sar_data, filename=fname_sar, provenance=sar_prov)
 
         if val_opt.get("status") != "valid":
             err = val_opt.get("error") or "Unreadable optical raster binary"
@@ -181,8 +217,8 @@ class CrossSensorValidator:
             )
 
         # 5. Georeferencing & Coordinate Reference System (CRS)
-        meta_opt = val_opt.get("raster_metadata", {})
-        meta_sar = val_sar.get("raster_metadata", {})
+        meta_opt = {**val_opt.get("raster_metadata", {}), **opt_meta_in}
+        meta_sar = {**val_sar.get("raster_metadata", {}), **sar_meta_in}
 
         crs_opt = meta_opt.get("crs")
         crs_sar = meta_sar.get("crs")
@@ -202,38 +238,131 @@ class CrossSensorValidator:
                 limitations=["Unprojected scenes cannot be spatially co-registered."]
             )
 
-        if crs_opt != crs_sar:
-            return cls._reject(
-                reason=(
-                    f"CRS mismatch: Optical projection is '{crs_opt}' while SAR projection is '{crs_sar}'. "
-                    "Cross-sensor analysis requires identical coordinate reference systems to avoid geometric distortion."
-                ),
-                optical_val=val_opt,
-                sar_val=val_sar,
-                warnings=[f"CRS mismatch: {crs_opt} vs {crs_sar}"],
-                limitations=["Scenes exist in different spatial coordinate systems."]
-            )
+        # 6. Spatial Footprint & Requested AOI Overlap Calculation
+        aoi_coverage_pct: Optional[float] = None
+        optical_aoi_coverage_pct: Optional[float] = None
+        sar_aoi_coverage_pct: Optional[float] = None
+        aoi_intersection_valid = False
 
-        # 6. Spatial Footprint Overlap Calculation
-        bounds_opt = meta_opt.get("bounds")
-        bounds_sar = meta_sar.get("bounds")
-        overlap_pct = 0.0
+        if aoi_bbox is not None:
+            import math
+            # Validate bounding-box length, types, and ordering
+            if not isinstance(aoi_bbox, (list, tuple)) or len(aoi_bbox) != 4:
+                return cls._reject(
+                    reason="Invalid AOI bounding box: coordinates must be a 4-element sequence [min_x, min_y, max_x, max_y].",
+                    optical_val=val_opt,
+                    sar_val=val_sar,
+                    warnings=["Invalid AOI bounding box format."],
+                    limitations=["Requested AOI is malformed."]
+                )
 
-        if bounds_opt and bounds_sar:
-            overlap_pct = compute_bounds_overlap(bounds_opt, bounds_sar)
+            for idx, coord in enumerate(aoi_bbox):
+                if not isinstance(coord, (int, float)) or isinstance(coord, bool) or not math.isfinite(coord):
+                    return cls._reject(
+                        reason=f"Invalid AOI bounding box: coordinate at index {idx} ({coord}) is not a finite number.",
+                        optical_val=val_opt,
+                        sar_val=val_sar,
+                        warnings=["Non-numeric or non-finite AOI coordinates."],
+                        limitations=["Requested AOI contains non-finite numbers."]
+                    )
 
-            if overlap_pct <= 0.0:
+            if aoi_bbox[0] >= aoi_bbox[2] or aoi_bbox[1] >= aoi_bbox[3]:
                 return cls._reject(
                     reason=(
-                        "Zero spatial overlap: Optical footprint and SAR footprint do not intersect. "
-                        "Cross-sensor analysis requires overlapping geographical coverage for the active AOI."
+                        f"Invalid AOI bounding box: min coordinates must be strictly less than max coordinates "
+                        f"(got min_x={aoi_bbox[0]}, max_x={aoi_bbox[2]}, min_y={aoi_bbox[1]}, max_y={aoi_bbox[3]})."
+                    ),
+                    optical_val=val_opt,
+                    sar_val=val_sar,
+                    warnings=["Inverted or degenerate AOI bounding box coordinates."],
+                    limitations=["Requested AOI coordinates are geometrically invalid."]
+                )
+
+            bounds_opt = meta_opt.get("bounds")
+            bounds_sar = meta_sar.get("bounds")
+            if not bounds_opt or not bounds_sar or not crs_opt or not crs_sar:
+                return cls._reject(
+                    reason="AOI intersection could not be verified: spatial bounds or CRS metadata unavailable for one or both scenes.",
+                    optical_val=val_opt,
+                    sar_val=val_sar,
+                    warnings=["Spatial boundary vectors unavailable; cannot verify requested AOI coverage."],
+                    limitations=["Scene spatial footprint bounds unavailable for AOI verification."]
+                )
+
+            norm_opt = cls._normalize_bounds_to_crs(bounds_opt, crs_opt, "EPSG:4326")
+            norm_sar = cls._normalize_bounds_to_crs(bounds_sar, crs_sar, "EPSG:4326")
+
+            if norm_opt is None or norm_sar is None:
+                return cls._reject(
+                    reason="AOI intersection could not be computed: failed to transform scene bounds to common AOI CRS (EPSG:4326).",
+                    optical_val=val_opt,
+                    sar_val=val_sar,
+                    warnings=["Reprojection failure during AOI coordinate normalization."],
+                    limitations=["Coordinate transform error during AOI validation."]
+                )
+
+            opt_aoi_inter = cls._compute_box_intersection(norm_opt, aoi_bbox)
+            sar_aoi_inter = cls._compute_box_intersection(norm_sar, aoi_bbox)
+            scenes_inter = cls._compute_box_intersection(norm_opt, norm_sar)
+
+            opt_intersects = opt_aoi_inter is not None
+            sar_intersects = sar_aoi_inter is not None
+
+            if not opt_intersects and not sar_intersects:
+                return cls._reject(
+                    reason="Spatial coverage failure: Neither optical nor SAR scene intersects the requested AOI.",
+                    optical_val=val_opt,
+                    sar_val=val_sar,
+                    spatial_overlap_pct=0.0,
+                    warnings=["Both scene footprints lie entirely outside the target AOI."],
+                    limitations=["Disjoint footprints from requested AOI."]
+                )
+
+            if opt_intersects and not sar_intersects:
+                return cls._reject(
+                    reason="Spatial coverage failure: SAR scene footprint does not intersect the requested AOI.",
+                    optical_val=val_opt,
+                    sar_val=val_sar,
+                    spatial_overlap_pct=0.0,
+                    warnings=["SAR footprint does not intersect the target AOI."],
+                    limitations=["Missing SAR coverage over requested AOI."]
+                )
+
+            if sar_intersects and not opt_intersects:
+                return cls._reject(
+                    reason="Spatial coverage failure: Optical scene footprint does not intersect the requested AOI.",
+                    optical_val=val_opt,
+                    sar_val=val_sar,
+                    spatial_overlap_pct=0.0,
+                    warnings=["Optical footprint does not intersect the target AOI."],
+                    limitations=["Missing Optical coverage over requested AOI."]
+                )
+
+            joint_aoi_inter = cls._compute_box_intersection(scenes_inter, aoi_bbox) if scenes_inter else None
+            if joint_aoi_inter is None:
+                return cls._reject(
+                    reason=(
+                        "Spatial coverage failure: Scene footprints overlap each other but do not cover the requested AOI "
+                        "(joint intersection with AOI is empty)."
                     ),
                     optical_val=val_opt,
                     sar_val=val_sar,
                     spatial_overlap_pct=0.0,
-                    warnings=["No mutual spatial footprint exists between these two scenes."],
-                    limitations=["Disjoint scene footprints."]
+                    warnings=["Scene mutual overlap lies outside requested AOI."],
+                    limitations=["Zero joint multimodal coverage over target AOI."]
                 )
+
+            area_opt = cls._compute_box_area(norm_opt)
+            area_sar = cls._compute_box_area(norm_sar)
+            area_mutual = cls._compute_box_area(scenes_inter)
+            area_aoi = cls._compute_box_area(aoi_bbox)
+
+            min_scene_area = min(area_opt, area_sar)
+            overlap_pct = round((area_mutual / min_scene_area) * 100.0, 2) if min_scene_area > 0 else 0.0
+            aoi_coverage_pct = round((cls._compute_box_area(joint_aoi_inter) / area_aoi) * 100.0, 2) if area_aoi > 0 else 0.0
+            optical_aoi_coverage_pct = round((cls._compute_box_area(opt_aoi_inter) / area_aoi) * 100.0, 2) if area_aoi > 0 else 0.0
+            sar_aoi_coverage_pct = round((cls._compute_box_area(sar_aoi_inter) / area_aoi) * 100.0, 2) if area_aoi > 0 else 0.0
+            aoi_intersection_valid = True
 
             if overlap_pct < 10.0:
                 return cls._reject(
@@ -245,31 +374,107 @@ class CrossSensorValidator:
                     sar_val=val_sar,
                     spatial_overlap_pct=overlap_pct,
                     warnings=[f"Marginal spatial overlap ({overlap_pct:.1f}%)."],
-                    limitations=["Overlap area is too small for dependable cross-sensor joint interpretation."]
+                    limitations=["Mutual overlap area is too small for dependable cross-sensor joint interpretation."]
                 )
-        else:
-            warnings.append("Spatial boundary vectors unavailable; overlap percentage could not be geometrically calculated.")
 
-        # 7. Resolution & Dimension Compatibility
-        res_opt = meta_opt.get("resolution")
-        res_sar = meta_sar.get("resolution")
+            if crs_opt != crs_sar:
+                warnings.append(
+                    f"Different CRSs: Optical is '{crs_opt}' and SAR is '{crs_sar}'. "
+                    "Secondary raster will be reprojected onto primary grid during alignment."
+                )
+
+        else:
+            # aoi_bbox is None: preserve existing behavior
+            if crs_opt != crs_sar:
+                return cls._reject(
+                    reason=(
+                        f"CRS mismatch: Optical projection is '{crs_opt}' while SAR projection is '{crs_sar}'. "
+                        "Cross-sensor analysis requires identical coordinate reference systems to avoid geometric distortion."
+                    ),
+                    optical_val=val_opt,
+                    sar_val=val_sar,
+                    warnings=[f"CRS mismatch: {crs_opt} vs {crs_sar}"],
+                    limitations=["Scenes exist in different spatial coordinate systems."]
+                )
+
+            bounds_opt = meta_opt.get("bounds")
+            bounds_sar = meta_sar.get("bounds")
+            overlap_pct = 0.0
+
+            if bounds_opt and bounds_sar:
+                overlap_pct = compute_bounds_overlap(bounds_opt, bounds_sar)
+
+                if overlap_pct <= 0.0:
+                    return cls._reject(
+                        reason=(
+                            "Zero spatial overlap: Optical footprint and SAR footprint do not intersect. "
+                            "Cross-sensor analysis requires overlapping geographical coverage for the active AOI."
+                        ),
+                        optical_val=val_opt,
+                        sar_val=val_sar,
+                        spatial_overlap_pct=0.0,
+                        warnings=["No mutual spatial footprint exists between these two scenes."],
+                        limitations=["Disjoint scene footprints."]
+                    )
+
+                if overlap_pct < 10.0:
+                    return cls._reject(
+                        reason=(
+                            f"Insufficient spatial overlap: Scenes share only {overlap_pct:.1f}% mutual footprint "
+                            "(minimum required is 10.0%)."
+                        ),
+                        optical_val=val_opt,
+                        sar_val=val_sar,
+                        spatial_overlap_pct=overlap_pct,
+                        warnings=[f"Marginal spatial overlap ({overlap_pct:.1f}%)."],
+                        limitations=["Overlap area is too small for dependable cross-sensor joint interpretation."]
+                    )
+            else:
+                warnings.append("Spatial boundary vectors unavailable; overlap percentage could not be geometrically calculated.")
+
+        # 7. Resolution & Dimension Compatibility (Ground-Resolution Normalized)
+        ground_res_opt = cls._compute_ground_resolution_meters(meta_opt, aoi_bbox)
+        ground_res_sar = cls._compute_ground_resolution_meters(meta_sar, aoi_bbox)
         res_compatible = True
 
-        if res_opt and res_sar:
-            try:
-                ratio_x = max(res_opt[0], res_sar[0]) / max(1e-6, min(res_opt[0], res_sar[0]))
-                ratio_y = max(res_opt[1], res_sar[1]) / max(1e-6, min(res_opt[1], res_sar[1]))
-                ratio = max(ratio_x, ratio_y)
-                if ratio > 10.0:
-                    res_compatible = False
-                    warnings.append(
-                        f"Significant resolution disparity ({ratio:.1f}x) between Optical and SAR rasters. "
-                        "Extreme resampling will smooth microwave scattering details or blur optical features."
-                    )
-                elif ratio > 3.0:
-                    warnings.append(f"Moderate resolution disparity ({ratio:.1f}x) between sensors. Secondary raster will be resampled to matching pixel grid.")
-            except Exception:
-                res_compatible = True
+        if ground_res_opt is None or ground_res_sar is None:
+            missing_target = "Optical" if ground_res_opt is None and ground_res_sar is not None else (
+                "SAR" if ground_res_sar is None and ground_res_opt is not None else "both scenes"
+            )
+            return cls._reject(
+                reason=(
+                    f"Resolution metadata missing or invalid: {missing_target} ground pixel resolution "
+                    "could not be determined from raster georeferencing or affine transform."
+                ),
+                optical_val=val_opt,
+                sar_val=val_sar,
+                warnings=["Pixel ground dimensions unavailable or invalid."],
+                limitations=["Ground pixel scale could not be verified."]
+            )
+
+        ratio_x = max(ground_res_opt[0], ground_res_sar[0]) / max(1e-6, min(ground_res_opt[0], ground_res_sar[0]))
+        ratio_y = max(ground_res_opt[1], ground_res_sar[1]) / max(1e-6, min(ground_res_opt[1], ground_res_sar[1]))
+        ratio = max(ratio_x, ratio_y)
+
+        if ratio > 10.0:
+            res_compatible = False
+            return cls._reject(
+                reason=(
+                    f"Excessive resolution disparity ({ratio:.1f}x) between Optical "
+                    f"({max(ground_res_opt):.1f}m) and SAR ({max(ground_res_sar):.1f}m) rasters. "
+                    "Resampling across disparity exceeding 10.0x causes unacceptable spatial distortion or feature smoothing."
+                ),
+                optical_val=val_opt,
+                sar_val=val_sar,
+                warnings=[f"Severe ground resolution disparity ({ratio:.1f}x) exceeds 10.0x maximum limit."],
+                limitations=["Extreme resolution disparity precludes valid joint interpretation."]
+            )
+        elif ratio > 3.0:
+            warnings.append(
+                f"Moderate resolution disparity ({ratio:.1f}x) between sensors "
+                f"(Optical ~{max(ground_res_opt):.1f}m vs SAR ~{max(ground_res_sar):.1f}m). "
+                "Secondary raster will be resampled to matching pixel grid."
+            )
 
         # 8. Acquisition Times & Temporal Separation
         dt_opt_str = opt_prov.get("datetime") or opt_meta_in.get("datetime")
@@ -300,16 +505,16 @@ class CrossSensorValidator:
         # 9. SAR Product Processing Metadata Inspection
         sar_tags = meta_sar.get("tags", {}) or {}
         sar_polarization = (
-            sar_prov.get("polarization") 
-            or sar_meta_in.get("polarization") 
-            or sar_tags.get("POLARIZATION") 
-            or sar_tags.get("polarisation") 
+            sar_prov.get("polarization")
+            or sar_meta_in.get("polarization")
+            or sar_tags.get("POLARIZATION")
+            or sar_tags.get("polarisation")
             or "VV"
         )
         sar_sensor = (
-            sar_prov.get("sensor") 
-            or sar_meta_in.get("sensor") 
-            or sar_tags.get("SENSOR") 
+            sar_prov.get("sensor")
+            or sar_meta_in.get("sensor")
+            or sar_tags.get("SENSOR")
             or "Sentinel-1 C-Band SAR"
         )
 
@@ -366,6 +571,10 @@ class CrossSensorValidator:
             "temporal_delta_days": delta_days,
             "spatial_overlap_pct": overlap_pct,
             "overlap_detected": bool(overlap_pct > 0.0),
+            "aoi_coverage_pct": aoi_coverage_pct,
+            "aoi_intersection_valid": aoi_intersection_valid,
+            "optical_aoi_coverage_pct": optical_aoi_coverage_pct,
+            "sar_aoi_coverage_pct": sar_aoi_coverage_pct,
             "crs_compatible": True,
             "resolution_compatible": res_compatible,
             "modality_compatible": True,
@@ -420,6 +629,135 @@ class CrossSensorValidator:
         return None, target_fname
 
     @classmethod
+    def _normalize_bounds_to_crs(
+        cls,
+        bounds: Optional[List[float]],
+        src_crs: Optional[str],
+        dst_crs: str = "EPSG:4326"
+    ) -> Optional[List[float]]:
+        """Transforms bounding box [min_x, min_y, max_x, max_y] to dst_crs using rasterio.warp.transform_bounds."""
+        if not bounds or len(bounds) != 4 or not src_crs:
+            return None
+        try:
+            from rasterio.crs import CRS
+            from rasterio.warp import transform_bounds
+            src_c = CRS.from_user_input(src_crs)
+            dst_c = CRS.from_user_input(dst_crs)
+            if src_c == dst_c:
+                return [float(b) for b in bounds]
+            tb = list(transform_bounds(src_c, dst_c, *bounds))
+            if tb[0] < tb[2] and tb[1] < tb[3]:
+                return [float(x) for x in tb]
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to transform bounds {bounds} from {src_crs} to {dst_crs}: {e}")
+            return None
+
+    @classmethod
+    def _compute_box_intersection(
+        cls,
+        b1: Optional[List[float]],
+        b2: Optional[List[float]]
+    ) -> Optional[List[float]]:
+        """Computes rectangular bounding box intersection [min_x, min_y, max_x, max_y]."""
+        if not b1 or not b2 or len(b1) != 4 or len(b2) != 4:
+            return None
+        left = max(b1[0], b2[0])
+        bottom = max(b1[1], b2[1])
+        right = min(b1[2], b2[2])
+        top = min(b1[3], b2[3])
+        if right > left and top > bottom:
+            return [left, bottom, right, top]
+        return None
+
+    @classmethod
+    def _compute_box_area(cls, b: Optional[List[float]]) -> float:
+        """Computes bounding box area in units squared."""
+        if not b or len(b) != 4:
+            return 0.0
+        return max(0.0, float(b[2] - b[0]) * float(b[3] - b[1]))
+
+    @classmethod
+    def _compute_ground_resolution_meters(
+        cls,
+        meta: Dict[str, Any],
+        aoi_bbox: Optional[List[float]] = None
+    ) -> Optional[Tuple[float, float]]:
+        """
+        Computes effective ground pixel resolution (res_x_m, res_y_m) in meters.
+        Accounts for projected vs geographic CRS and central latitude scale on the WGS84 ellipsoid.
+        Returns None if CRS, resolution, or georeferencing is missing or invalid.
+        """
+        import math
+        from rasterio.crs import CRS
+
+        crs_val = meta.get("crs")
+        if not crs_val:
+            return None
+
+        try:
+            crs_obj = CRS.from_user_input(crs_val)
+        except Exception:
+            return None
+
+        res = meta.get("resolution")
+        if not res or len(res) < 2 or res[0] <= 0 or res[1] <= 0:
+            transform = meta.get("transform")
+            if transform and len(transform) >= 6:
+                try:
+                    res = [abs(float(transform[0])), abs(float(transform[4]))]
+                except (ValueError, TypeError):
+                    return None
+            else:
+                return None
+
+        if res[0] <= 0 or res[1] <= 0:
+            return None
+
+        if crs_obj.is_projected:
+            factor = 1.0
+            if crs_obj.linear_units_factor:
+                try:
+                    factor = float(crs_obj.linear_units_factor[1])
+                except (IndexError, TypeError, ValueError):
+                    factor = 1.0
+            return (float(res[0]) * factor, float(res[1]) * factor)
+
+        elif crs_obj.is_geographic:
+            lat = 0.0
+            if aoi_bbox and len(aoi_bbox) == 4:
+                try:
+                    lat = (float(aoi_bbox[1]) + float(aoi_bbox[3])) / 2.0
+                except (ValueError, TypeError):
+                    lat = 0.0
+            elif meta.get("bounds") and len(meta["bounds"]) == 4:
+                try:
+                    lat = (float(meta["bounds"][1]) + float(meta["bounds"][3])) / 2.0
+                except (ValueError, TypeError):
+                    lat = 0.0
+
+            lat = max(-89.0, min(89.0, lat))
+            lat_rad = math.radians(lat)
+
+            # WGS84 ellipsoid constants
+            a = 6378137.0
+            b = 6356752.314245
+            e2 = 1.0 - (b * b) / (a * a)
+
+            denom = math.sqrt(1.0 - e2 * (math.sin(lat_rad) ** 2))
+            M = a * (1.0 - e2) / (denom ** 3)
+            N = a / denom
+
+            m_per_deg_lat = (math.pi / 180.0) * M
+            m_per_deg_lon = (math.pi / 180.0) * N * math.cos(lat_rad)
+
+            res_x_m = float(res[0]) * m_per_deg_lon
+            res_y_m = float(res[1]) * m_per_deg_lat
+            return (res_x_m, res_y_m)
+
+        return None
+
+    @classmethod
     def _parse_iso_datetime(cls, dt_str: str) -> Optional[datetime]:
         """Parses ISO 8601 datetime string."""
         try:
@@ -442,7 +780,9 @@ class CrossSensorValidator:
         temporal_delta_days: Optional[float] = None,
         spatial_overlap_pct: Optional[float] = None,
         warnings: Optional[List[str]] = None,
-        limitations: Optional[List[str]] = None
+        limitations: Optional[List[str]] = None,
+        aoi_coverage_pct: Optional[float] = None,
+        aoi_intersection_valid: bool = False
     ) -> Dict[str, Any]:
         """Builds a structured rejection response for cross-sensor validation."""
         cand = ["OpticalSARJointAnalysisProvider", "OpticalSARVisualizationBaseline"]
@@ -462,6 +802,8 @@ class CrossSensorValidator:
             "temporal_delta_days": temporal_delta_days,
             "spatial_overlap_pct": spatial_overlap_pct,
             "overlap_detected": bool(spatial_overlap_pct is not None and spatial_overlap_pct > 0),
+            "aoi_coverage_pct": aoi_coverage_pct,
+            "aoi_intersection_valid": aoi_intersection_valid,
             "crs_compatible": False,
             "resolution_compatible": False,
             "modality_compatible": False,

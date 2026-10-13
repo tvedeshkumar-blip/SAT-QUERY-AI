@@ -207,6 +207,202 @@ class MultiStepOrchestrator:
     def __init__(self):
         self.tool_registry = tool_registry
 
+    def _synthesize_claims(
+        self,
+        task: str,
+        analysis_metadata: Dict[str, Any],
+        execution_steps: Optional[List[Dict[str, Any]]] = None,
+        max_bytes: int = MAX_CUMULATIVE_TRANSFER_BYTES,
+        analysis_result: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[str, Optional[float], str, str, List[ClaimVerificationItem]]:
+        """Synthesize answer text, confidence metadata, and candidate verification claims."""
+        candidate_claims: List[ClaimVerificationItem] = []
+        execution_steps = execution_steps or []
+        is_budget_exhausted = analysis_metadata.get("budget_exhausted", False)
+        overall_status = "success"
+        confidence: Optional[float] = 0.95
+        confidence_label = "Deterministic Verified"
+
+        if is_budget_exhausted:
+            overall_status = "budget_exhausted"
+            answer = f"Analysis halted: Cumulative STAC transfer budget of {max_bytes} bytes was exhausted before all required satellite assets could be retrieved."
+            confidence = None
+            confidence_label = "Budget Exhausted"
+
+        elif task == "temporal_optical_change":
+            chg = analysis_metadata.get("temporal_optical_change", {})
+            chg_status = chg.get("status")
+            if chg_status in ("blocked", "failed", "error") or not chg:
+                overall_status = "failed"
+                err_detail = chg.get("error", "Upstream Sentinel-2 optical scenes could not be retrieved.")
+                answer = f"Temporal Sentinel-2 optical change analysis failed: {err_detail}"
+                confidence = None
+                confidence_label = "Acquisition Failed"
+            elif chg_status == "unsupported_zero_valid_pixels":
+                overall_status = "unsupported"
+                answer = chg.get("summary")
+                confidence = None
+                confidence_label = "Zero Valid Pixels"
+            else:
+                d_mean = chg.get("delta_ndvi_mean", 0.0)
+                v_loss = chg.get("vegetation_loss_pct", 0.0)
+                v_gain = chg.get("vegetation_gain_pct", 0.0)
+                px_count = chg.get("joint_valid_pixel_count", 0)
+                answer = (
+                    f"Temporal Sentinel-2 optical change analysis computed across {px_count:,} joint clear pixels. "
+                    f"Mean Delta-NDVI is {d_mean:+.4f}. Observed vegetation loss: {v_loss}%, vegetation gain: {v_gain}%."
+                )
+                candidate_claims.append(ClaimVerificationItem(
+                    claim_text=f"Mean Delta-NDVI is {d_mean:.4f} across joint clear pixels.",
+                    claim_type="measurement",
+                    status="supported"
+                ))
+
+        elif task == "temporal_sar_change":
+            chg = analysis_metadata.get("temporal_sar_change", {})
+            chg_status = chg.get("status")
+            if chg_status in ("blocked", "failed", "error") or not chg:
+                overall_status = "failed"
+                err_detail = chg.get("error", "Upstream Sentinel-1 RTC SAR scenes could not be retrieved.")
+                answer = f"Temporal Sentinel-1 RTC SAR change analysis failed: {err_detail}"
+                confidence = None
+                confidence_label = "Acquisition Failed"
+            elif chg_status == "unsupported_zero_valid_pixels":
+                overall_status = "unsupported"
+                answer = chg.get("summary")
+                confidence = None
+                confidence_label = "Zero Valid Pixels"
+            else:
+                d_mean = chg.get("delta_dprvi_mean", 0.0)
+                c_loss = chg.get("radar_canopy_loss_pct", 0.0)
+                c_gain = chg.get("radar_canopy_gain_pct", 0.0)
+                px_count = chg.get("joint_valid_pixel_count", 0)
+                answer = (
+                    f"Temporal Sentinel-1 RTC dual-polarization change analysis computed across {px_count:,} joint valid pixels. "
+                    f"Mean Delta-DpRVI is {d_mean:+.4f}. Radar canopy loss: {c_loss}%, radar canopy gain: {c_gain}%."
+                )
+                candidate_claims.append(ClaimVerificationItem(
+                    claim_text=f"Mean Delta-DpRVI is {d_mean:.4f} across valid radar pixels.",
+                    claim_type="measurement",
+                    status="supported"
+                ))
+
+        elif task == "optical_sar":
+            fusion = analysis_metadata.get("optical_sar_fusion", {})
+            f_status = fusion.get("status")
+            if f_status in ("blocked", "failed", "error") or not fusion:
+                overall_status = "failed"
+                err_detail = fusion.get("error", "Upstream optical or SAR scene could not be retrieved.")
+                answer = f"Optical-SAR cross-sensor fusion analysis failed: {err_detail}"
+                confidence = None
+                confidence_label = "Acquisition Failed"
+            elif f_status == "unsupported" or (isinstance(f_status, str) and f_status.startswith("unsupported")):
+                overall_status = "unsupported"
+                answer = fusion.get("answer") or "Optical-SAR cross-sensor fusion analysis unsupported."
+                confidence = None
+                ana_status = fusion.get("analysis_status") or f_status
+                confidence_label = f"Unsupported ({ana_status.replace('_', ' ').title()})"
+            else:
+                ans_text = fusion.get("answer") or fusion.get("summary") or "Optical and SAR multimodal cross-sensor analysis completed successfully."
+                answer = ans_text
+                candidate_claims.append(ClaimVerificationItem(
+                    claim_text="Multimodal optical and SAR cross-sensor alignment and fusion analysis completed successfully.",
+                    claim_type="general",
+                    status="supported"
+                ))
+
+        elif task == "sentinel1_rtc_dprvi":
+            dprvi = analysis_metadata.get("dprvi_result", {})
+            d_val = dprvi.get("dprvi_mean")
+            q_db = dprvi.get("cross_pol_ratio_db")
+            if d_val is not None:
+                answer = (
+                    f"Calibrated Sentinel-1 RTC dual-polarization backscatter computed across {dprvi.get('valid_pixel_count', 0):,} valid pixels. "
+                    f"Mean DpRVI is {d_val:.4f} (cross-polarization ratio: {q_db:.1f} dB)."
+                )
+                candidate_claims.append(ClaimVerificationItem(
+                    claim_text=f"Sentinel-1 DpRVI is {d_val:.4f}.",
+                    claim_type="measurement",
+                    status="supported"
+                ))
+            else:
+                d_status = dprvi.get("status") if dprvi else None
+                if not d_status:
+                    for step in reversed(execution_steps):
+                        s_status = step.get("status")
+                        s_err = (step.get("error") or "").lower()
+                        if s_status == "unsupported" or (s_err and "unsupported" in s_err and "acquisition" not in s_err):
+                            d_status = "unsupported"
+                            break
+                if d_status == "unsupported_zero_valid_pixels":
+                    overall_status = "unsupported"
+                    answer = dprvi.get("summary") or "No valid radar pixels found. DpRVI calculation unsupported."
+                    confidence = None
+                    confidence_label = "Zero Valid Pixels"
+                elif d_status and d_status.startswith("unsupported"):
+                    overall_status = "unsupported"
+                    answer = dprvi.get("summary") or dprvi.get("error") or "Sentinel-1 RTC dual-polarization analysis unsupported."
+                    confidence = None
+                    confidence_label = "Unsupported Analysis"
+                else:
+                    overall_status = "failed"
+                    confidence = None
+                    confidence_label = "Acquisition Failed"
+                    err_detail = dprvi.get("error")
+                    if not err_detail and execution_steps:
+                        for s in reversed(execution_steps):
+                            if s.get("status") in ("failed", "blocked") and s.get("error"):
+                                err_detail = s["error"]
+                                break
+                    err_msg = err_detail or "Radar imagery unavailable or STAC retrieval failed."
+                    answer = f"Sentinel-1 RTC dual-polarization analysis failed: {err_msg}"
+
+        elif task == "sentinel2_ndvi":
+            ndvi = analysis_metadata.get("ndvi_result", {})
+            n_val = ndvi.get("ndvi_mean")
+            if n_val is not None:
+                answer = f"Calibrated Sentinel-2 surface reflectance NDVI is {n_val:.4f} across valid SCL-screened pixels."
+                candidate_claims.append(ClaimVerificationItem(
+                    claim_text=f"Mean Sentinel-2 NDVI is {n_val:.4f}.",
+                    claim_type="measurement",
+                    status="supported"
+                ))
+            else:
+                n_status = ndvi.get("status") if ndvi else None
+                if not n_status:
+                    for step in reversed(execution_steps):
+                        s_status = step.get("status")
+                        s_err = (step.get("error") or "").lower()
+                        if s_status == "unsupported" or (s_err and "unsupported" in s_err and "acquisition" not in s_err):
+                            n_status = "unsupported"
+                            break
+                if n_status == "unsupported_zero_valid_pixels":
+                    overall_status = "unsupported"
+                    answer = ndvi.get("summary") or "No valid clear-sky pixels found after applying SCL quality mask. NDVI calculation unsupported."
+                    confidence = None
+                    confidence_label = "Zero Valid Pixels"
+                elif n_status and n_status.startswith("unsupported"):
+                    overall_status = "unsupported"
+                    answer = ndvi.get("summary") or ndvi.get("error") or "Sentinel-2 NDVI analysis unsupported."
+                    confidence = None
+                    confidence_label = "Unsupported Analysis"
+                else:
+                    overall_status = "failed"
+                    confidence = None
+                    confidence_label = "Acquisition Failed"
+                    err_detail = ndvi.get("error")
+                    if not err_detail and execution_steps:
+                        for s in reversed(execution_steps):
+                            if s.get("status") in ("failed", "blocked") and s.get("error"):
+                                err_detail = s["error"]
+                                break
+                    err_msg = err_detail or "Optical imagery unavailable or STAC retrieval failed."
+                    answer = f"Sentinel-2 NDVI analysis failed: {err_msg}"
+        else:
+            answer = (analysis_result or {}).get("answer", f"Multi-step analysis for '{task}' completed successfully.")
+
+        return overall_status, confidence, confidence_label, answer, candidate_claims
+
     def orchestrate(
         self,
         query: str,
@@ -452,7 +648,7 @@ class MultiStepOrchestrator:
                     tool_out = tool.run(**tool_args)
                     t_latency = round((time.time() - t_start) * 1000, 2)
 
-                    if tool_out.get("status") in ("success", None):
+                    if tool_out.get("status") in ("success", "unsupported", None) or str(tool_out.get("status", "")).startswith("unsupported"):
                         step_status = "completed"
                         step_error = None
                         if attempt > 1:
@@ -591,183 +787,13 @@ class MultiStepOrchestrator:
         ]
 
         # Step 4: Synthesize Answer Text & Formulate Claims
-        candidate_claims = []
-        is_budget_exhausted = analysis_metadata.get("budget_exhausted", False)
-        overall_status = "success"
-        confidence = 0.95
-        confidence_label = "Deterministic Verified"
-
-        if is_budget_exhausted:
-            overall_status = "budget_exhausted"
-            answer = f"Analysis halted: Cumulative STAC transfer budget of {max_bytes} bytes was exhausted before all required satellite assets could be retrieved."
-            confidence = None
-            confidence_label = "Budget Exhausted"
-
-        elif task == "temporal_optical_change":
-            chg = analysis_metadata.get("temporal_optical_change", {})
-            chg_status = chg.get("status")
-            if chg_status in ("blocked", "failed", "error") or not chg:
-                overall_status = "failed"
-                err_detail = chg.get("error", "Upstream Sentinel-2 optical scenes could not be retrieved.")
-                answer = f"Temporal Sentinel-2 optical change analysis failed: {err_detail}"
-                confidence = None
-                confidence_label = "Acquisition Failed"
-            elif chg_status == "unsupported_zero_valid_pixels":
-                overall_status = "unsupported"
-                answer = chg.get("summary")
-                confidence = None
-                confidence_label = "Zero Valid Pixels"
-            else:
-                d_mean = chg.get("delta_ndvi_mean", 0.0)
-                v_loss = chg.get("vegetation_loss_pct", 0.0)
-                v_gain = chg.get("vegetation_gain_pct", 0.0)
-                px_count = chg.get("joint_valid_pixel_count", 0)
-                answer = (
-                    f"Temporal Sentinel-2 optical change analysis computed across {px_count:,} joint clear pixels. "
-                    f"Mean Delta-NDVI is {d_mean:+.4f}. Observed vegetation loss: {v_loss}%, vegetation gain: {v_gain}%."
-                )
-                candidate_claims.append(ClaimVerificationItem(
-                    claim_text=f"Mean Delta-NDVI is {d_mean:.4f} across joint clear pixels.",
-                    claim_type="measurement",
-                    status="supported"
-                ))
-
-        elif task == "temporal_sar_change":
-            chg = analysis_metadata.get("temporal_sar_change", {})
-            chg_status = chg.get("status")
-            if chg_status in ("blocked", "failed", "error") or not chg:
-                overall_status = "failed"
-                err_detail = chg.get("error", "Upstream Sentinel-1 RTC SAR scenes could not be retrieved.")
-                answer = f"Temporal Sentinel-1 RTC SAR change analysis failed: {err_detail}"
-                confidence = None
-                confidence_label = "Acquisition Failed"
-            elif chg_status == "unsupported_zero_valid_pixels":
-                overall_status = "unsupported"
-                answer = chg.get("summary")
-                confidence = None
-                confidence_label = "Zero Valid Pixels"
-            else:
-                d_mean = chg.get("delta_dprvi_mean", 0.0)
-                c_loss = chg.get("radar_canopy_loss_pct", 0.0)
-                c_gain = chg.get("radar_canopy_gain_pct", 0.0)
-                px_count = chg.get("joint_valid_pixel_count", 0)
-                answer = (
-                    f"Temporal Sentinel-1 RTC dual-polarization change analysis computed across {px_count:,} joint valid pixels. "
-                    f"Mean Delta-DpRVI is {d_mean:+.4f}. Radar canopy loss: {c_loss}%, radar canopy gain: {c_gain}%."
-                )
-                candidate_claims.append(ClaimVerificationItem(
-                    claim_text=f"Mean Delta-DpRVI is {d_mean:.4f} across valid radar pixels.",
-                    claim_type="measurement",
-                    status="supported"
-                ))
-
-        elif task == "optical_sar":
-            fusion = analysis_metadata.get("optical_sar_fusion", {})
-            f_status = fusion.get("status")
-            if f_status in ("blocked", "failed", "error") or not fusion:
-                overall_status = "failed"
-                err_detail = fusion.get("error", "Upstream optical or SAR scene could not be retrieved.")
-                answer = f"Optical-SAR cross-sensor fusion analysis failed: {err_detail}"
-                confidence = None
-                confidence_label = "Acquisition Failed"
-            else:
-                ans_text = fusion.get("answer") or fusion.get("summary") or "Optical and SAR multimodal cross-sensor analysis completed successfully."
-                answer = ans_text
-                candidate_claims.append(ClaimVerificationItem(
-                    claim_text="Multimodal optical and SAR cross-sensor alignment and fusion analysis completed successfully.",
-                    claim_type="general",
-                    status="supported"
-                ))
-
-        elif task == "sentinel1_rtc_dprvi":
-            dprvi = analysis_metadata.get("dprvi_result", {})
-            d_val = dprvi.get("dprvi_mean")
-            q_db = dprvi.get("cross_pol_ratio_db")
-            if d_val is not None:
-                answer = (
-                    f"Calibrated Sentinel-1 RTC dual-polarization backscatter computed across {dprvi.get('valid_pixel_count', 0):,} valid pixels. "
-                    f"Mean DpRVI is {d_val:.4f} (cross-polarization ratio: {q_db:.1f} dB)."
-                )
-                candidate_claims.append(ClaimVerificationItem(
-                    claim_text=f"Sentinel-1 DpRVI is {d_val:.4f}.",
-                    claim_type="measurement",
-                    status="supported"
-                ))
-            else:
-                d_status = dprvi.get("status") if dprvi else None
-                if not d_status:
-                    for step in reversed(execution_steps):
-                        s_status = step.get("status")
-                        s_err = (step.get("error") or "").lower()
-                        if s_status == "unsupported" or (s_err and "unsupported" in s_err and "acquisition" not in s_err):
-                            d_status = "unsupported"
-                            break
-                if d_status == "unsupported_zero_valid_pixels":
-                    overall_status = "unsupported"
-                    answer = dprvi.get("summary") or "No valid radar pixels found. DpRVI calculation unsupported."
-                    confidence = None
-                    confidence_label = "Zero Valid Pixels"
-                elif d_status and d_status.startswith("unsupported"):
-                    overall_status = "unsupported"
-                    answer = dprvi.get("summary") or dprvi.get("error") or "Sentinel-1 RTC dual-polarization analysis unsupported."
-                    confidence = None
-                    confidence_label = "Unsupported Analysis"
-                else:
-                    overall_status = "failed"
-                    confidence = None
-                    confidence_label = "Acquisition Failed"
-                    err_detail = dprvi.get("error")
-                    if not err_detail and execution_steps:
-                        for s in reversed(execution_steps):
-                            if s.get("status") in ("failed", "blocked") and s.get("error"):
-                                err_detail = s["error"]
-                                break
-                    err_msg = err_detail or "Radar imagery unavailable or STAC retrieval failed."
-                    answer = f"Sentinel-1 RTC dual-polarization analysis failed: {err_msg}"
-
-        elif task == "sentinel2_ndvi":
-            ndvi = analysis_metadata.get("ndvi_result", {})
-            n_val = ndvi.get("ndvi_mean")
-            if n_val is not None:
-                answer = f"Calibrated Sentinel-2 surface reflectance NDVI is {n_val:.4f} across valid SCL-screened pixels."
-                candidate_claims.append(ClaimVerificationItem(
-                    claim_text=f"Mean Sentinel-2 NDVI is {n_val:.4f}.",
-                    claim_type="measurement",
-                    status="supported"
-                ))
-            else:
-                n_status = ndvi.get("status") if ndvi else None
-                if not n_status:
-                    for step in reversed(execution_steps):
-                        s_status = step.get("status")
-                        s_err = (step.get("error") or "").lower()
-                        if s_status == "unsupported" or (s_err and "unsupported" in s_err and "acquisition" not in s_err):
-                            n_status = "unsupported"
-                            break
-                if n_status == "unsupported_zero_valid_pixels":
-                    overall_status = "unsupported"
-                    answer = ndvi.get("summary") or "No valid clear-sky pixels found after applying SCL quality mask. NDVI calculation unsupported."
-                    confidence = None
-                    confidence_label = "Zero Valid Pixels"
-                elif n_status and n_status.startswith("unsupported"):
-                    overall_status = "unsupported"
-                    answer = ndvi.get("summary") or ndvi.get("error") or "Sentinel-2 NDVI analysis unsupported."
-                    confidence = None
-                    confidence_label = "Unsupported Analysis"
-                else:
-                    overall_status = "failed"
-                    confidence = None
-                    confidence_label = "Acquisition Failed"
-                    err_detail = ndvi.get("error")
-                    if not err_detail and execution_steps:
-                        for s in reversed(execution_steps):
-                            if s.get("status") in ("failed", "blocked") and s.get("error"):
-                                err_detail = s["error"]
-                                break
-                    err_msg = err_detail or "Optical imagery unavailable or STAC retrieval failed."
-                    answer = f"Sentinel-2 NDVI analysis failed: {err_msg}"
-        else:
-            answer = (analysis_result or {}).get("answer", f"Multi-step analysis for '{task}' completed successfully.")
+        overall_status, confidence, confidence_label, answer, candidate_claims = self._synthesize_claims(
+            task=task,
+            analysis_metadata=analysis_metadata,
+            execution_steps=execution_steps,
+            max_bytes=max_bytes,
+            analysis_result=analysis_result
+        )
 
         # Step 5: Evidence Package Building & Deterministic Verification
         analysis_dict = {

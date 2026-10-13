@@ -308,8 +308,9 @@ class STACAcquisitionService:
             max_mb = self.MAX_DOWNLOAD_BYTES / (1024 * 1024)
             size_mb = reported_size / (1024 * 1024)
 
-            # Check if AOI is available to safely transition to existing windowed COG retrieval workflow
-            aoi_to_use = getattr(req, "aoi_bbox", None) or (cached.get("search_bbox") if cached else None)
+            # Check if AOI is explicitly available on this request to safely transition to existing windowed COG retrieval workflow
+            # Note: Do NOT fallback to cached search_bbox to avoid stateful AOI pollution across requests
+            aoi_to_use = getattr(req, "aoi_bbox", None)
             is_cog_candidate = (
                 "image/tiff" in mime_type
                 or "geotiff" in mime_type
@@ -391,7 +392,8 @@ class STACAcquisitionService:
                     if expected_content_length is not None and expected_content_length > self.MAX_DOWNLOAD_BYTES:
                         max_mb = self.MAX_DOWNLOAD_BYTES / (1024 * 1024)
                         size_mb = expected_content_length / (1024 * 1024)
-                        aoi_to_use = getattr(req, "aoi_bbox", None) or (cached.get("search_bbox") if cached else None)
+                        # Note: Do NOT fallback to cached search_bbox to avoid stateful AOI pollution across requests
+                        aoi_to_use = getattr(req, "aoi_bbox", None)
                         is_cog_candidate = (
                             "image/tiff" in mime_type
                             or "geotiff" in mime_type

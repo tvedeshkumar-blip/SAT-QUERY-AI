@@ -249,7 +249,8 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
         scene_id: scene.id,
         asset_key: assetKey,
         collection: scene.collection,
-        target_role: scene.modality === 'SAR' ? 'sar' : 'primary'
+        target_role: scene.modality === 'SAR' ? 'sar' : 'primary',
+        ...(selectedAOI ? { aoi_bbox: selectedAOI } : {})
       });
 
       if (resp.status === 'error') {

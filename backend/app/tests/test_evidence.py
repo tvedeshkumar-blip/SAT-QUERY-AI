@@ -38,7 +38,13 @@ def test_optical_sar_fusion_evidence_generation():
     sar = np.full((100, 100), 80, dtype=np.uint8)
     sar[10:40, 10:40] = 20  # Specular water
     sar[60:90, 60:90] = 240 # Double bounce urban
-    res = analyzer.predict([opt, sar], query="Identify built-up and water.")
+    meta = {
+        "crs": "EPSG:4326",
+        "bounds": [77.5, 12.9, 77.6, 13.0],
+        "width": 100,
+        "height": 100
+    }
+    res = analyzer.predict([opt, sar], query="Identify built-up and water.", metadata={"optical": meta, "sar": meta})
     assert "evidence" in res
     types = [e["type"] for e in res["evidence"]]
     assert "fused" in types
