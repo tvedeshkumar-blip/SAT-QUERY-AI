@@ -134,7 +134,7 @@ def test_http_range_416_not_satisfiable_rejected_safely():
     mock_client = MagicMock()
     mock_client.__enter__.return_value = mock_client
     mock_client.head.return_value = mock_head
-    mock_client.get.return_value = mock_range
+    mock_client.stream.return_value.__enter__.return_value = mock_range
 
     with patch("httpx.Client", return_value=mock_client):
         with pytest.raises(WindowedRetrievalError, match="HTTP 416"):
@@ -158,7 +158,7 @@ def test_http_range_server_error_rejected_safely():
     mock_client = MagicMock()
     mock_client.__enter__.return_value = mock_client
     mock_client.head.return_value = mock_head
-    mock_client.get.return_value = mock_range
+    mock_client.stream.return_value.__enter__.return_value = mock_range
 
     with patch("httpx.Client", return_value=mock_client):
         with pytest.raises(WindowedRetrievalError, match="HTTP 501"):
@@ -184,7 +184,7 @@ def test_http_range_missing_content_range_header_rejected():
     mock_client = MagicMock()
     mock_client.__enter__.return_value = mock_client
     mock_client.head.return_value = mock_head
-    mock_client.get.return_value = mock_range
+    mock_client.stream.return_value.__enter__.return_value = mock_range
 
     with patch("httpx.Client", return_value=mock_client):
         with pytest.raises(WindowedRetrievalError, match="omitted mandatory 'Content-Range' response header"):
@@ -209,7 +209,7 @@ def test_http_range_malformed_content_range_header_rejected():
     mock_client = MagicMock()
     mock_client.__enter__.return_value = mock_client
     mock_client.head.return_value = mock_head
-    mock_client.get.return_value = mock_range
+    mock_client.stream.return_value.__enter__.return_value = mock_range
 
     with patch("httpx.Client", return_value=mock_client):
         with pytest.raises(WindowedRetrievalError, match="invalid 'Content-Range' header format"):
@@ -338,3 +338,157 @@ def test_download_corrupt_payload_validation_fails_and_returns_error_status():
         assert "Retrieved asset payload validation failed" in resp.error
         assert resp.validation is not None
         assert resp.validation.status == "invalid"
+
+
+def test_http_range_probe_streaming_200_rejected_without_consuming_body():
+    """
+    Step 1A Regression Test:
+    Proves that an HTTP 200 response to a range probe is rejected immediately
+    via streaming probe without consuming or buffering the response body.
+    """
+    test_url = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/large_cog.tif"
+
+    mock_head = MagicMock()
+    mock_head.status_code = 200
+    mock_head.headers = {"content-length": "250000000", "accept-ranges": "bytes"}
+
+    mock_stream = MagicMock()
+    mock_stream.status_code = 200  # Server ignored Range header and attempted full transfer
+    mock_stream.read = MagicMock()
+    mock_stream.iter_bytes = MagicMock()
+
+    mock_stream_cm = MagicMock()
+    mock_stream_cm.__enter__.return_value = mock_stream
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.head.return_value = mock_head
+    mock_client.stream.return_value = mock_stream_cm
+
+    with patch("httpx.Client", return_value=mock_client):
+        with pytest.raises(WindowedRetrievalError, match="returned HTTP 200 instead of 206"):
+            SafeWindowedCOGReader.read_cog_window(
+                url=test_url,
+                bbox_wgs84=[77.58, 12.96, 77.60, 12.98]
+            )
+
+        # Assert stream was opened with GET and Range header
+        assert mock_client.stream.called
+        call_args = mock_client.stream.call_args
+        assert call_args[0][0] == "GET"
+        assert call_args[1]["headers"] == {"Range": "bytes=0-1023"}
+
+        # PROOF: Response body was NEVER consumed or read
+        assert not mock_stream.read.called
+        assert not mock_stream.iter_bytes.called
+
+        # PROOF: Stream was closed immediately
+        assert mock_stream_cm.__exit__.called
+
+
+def test_oversized_http_206_response_rejected_during_streaming_before_full_consumption():
+    """
+    Step 1B Regression Test:
+    Verifies that when a remote server returns HTTP 206 with an oversized payload
+    (> 64 KiB), the streaming reader aborts immediately during chunk iteration
+    BEFORE consuming or buffering the full response body.
+    """
+    test_url = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/large_cog.tif"
+
+    mock_head = MagicMock()
+    mock_head.status_code = 200
+    mock_head.headers = {"content-length": "250000000", "accept-ranges": "bytes"}
+
+    mock_stream = MagicMock()
+    mock_stream.status_code = 206
+    mock_stream.headers = {"content-range": "bytes 0-1023/250000000"}
+
+    # Track how many chunks are actually generated/yielded by the stream
+    chunks_yielded = []
+
+    def chunk_generator(chunk_size=1024):
+        # Server attempts to send 200 chunks of 1024 bytes (total 200 KiB > 64 KiB cap)
+        for i in range(200):
+            chunks_yielded.append(i)
+            yield b"X" * 1024
+
+    mock_stream.iter_bytes = chunk_generator
+
+    mock_stream_cm = MagicMock()
+    mock_stream_cm.__enter__.return_value = mock_stream
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.head.return_value = mock_head
+    mock_client.stream.return_value = mock_stream_cm
+
+    with patch("httpx.Client", return_value=mock_client):
+        with pytest.raises(WindowedRetrievalError, match="excessively large payload"):
+            SafeWindowedCOGReader.read_cog_window(
+                url=test_url,
+                bbox_wgs84=[77.58, 12.96, 77.60, 12.98]
+            )
+
+        # PROOF OF EARLY TERMINATION:
+        # The generator must have been stopped after exceeding 64 KiB (65 chunks * 1024 = 66560 bytes).
+        # It must NOT have consumed all 200 chunks!
+        assert len(chunks_yielded) < 200, "Stream was NOT terminated early; full oversized body was consumed!"
+        assert len(chunks_yielded) == 65, f"Expected abort on chunk 65 (>64 KiB), got {len(chunks_yielded)}"
+
+        # PROOF: Stream context manager was closed immediately
+        assert mock_stream_cm.__exit__.called
+
+
+def test_http_range_probe_valid_206_with_content_range_succeeds():
+    """
+    Step 1B Regression Test:
+    Verifies that a valid HTTP 206 response with an RFC 7233 compliant Content-Range
+    header is accepted and the bounded probe payload is read safely.
+    """
+    test_url = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/test_cog.tif"
+
+    mock_head = MagicMock()
+    mock_head.status_code = 200
+    mock_head.headers = {"content-length": "10000000", "accept-ranges": "bytes"}
+
+    mock_stream = MagicMock()
+    mock_stream.status_code = 206
+    mock_stream.headers = {"content-range": "bytes 0-1023/10000000"}
+    mock_stream.iter_bytes = MagicMock(return_value=[b"R" * 1024])
+
+    mock_stream_cm = MagicMock()
+    mock_stream_cm.__enter__.return_value = mock_stream
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.head.return_value = mock_head
+    mock_client.stream.return_value = mock_stream_cm
+
+    # Mock rasterio DatasetReader to avoid actual vsicurl network access in this unit test
+    import rasterio
+    from rasterio.transform import Affine
+
+    mock_ds = MagicMock()
+    mock_ds.__enter__.return_value = mock_ds
+    mock_ds.crs = "EPSG:4326"
+    mock_ds.width = 512
+    mock_ds.height = 512
+    mock_ds.count = 1
+    mock_ds.dtypes = ["uint16"]
+    mock_ds.nodata = 0
+    mock_ds.bounds = MagicMock(left=77.5, bottom=12.9, right=77.7, top=13.1)
+    mock_ds.transform = Affine(0.0002, 0.0, 77.5, 0.0, -0.0002, 13.1)
+    mock_ds.read.return_value = np.zeros((1, 100, 100), dtype=np.uint16)
+
+    with patch("httpx.Client", return_value=mock_client), \
+         patch("rasterio.open", return_value=mock_ds):
+        data, meta = SafeWindowedCOGReader.read_cog_window(
+            url=test_url,
+            bbox_wgs84=[77.58, 12.96, 77.60, 12.98]
+        )
+
+        assert mock_client.stream.called
+        assert mock_stream.iter_bytes.called
+        assert mock_stream_cm.__exit__.called
+        assert meta["crs"] == "EPSG:4326"
+        assert meta["retrieval_method"] == "http_range_windowed_cog"

@@ -43,6 +43,7 @@ class SafeWindowedCOGReader:
 
     DEFAULT_CUMULATIVE_BYTE_LIMIT = int(os.getenv("MAX_WINDOW_TRANSFER_BYTES", str(20 * 1024 * 1024)))  # 20 MB default
     MAX_WINDOW_DIMENSION_PIXELS = 1024
+    MAX_PROBE_BYTES = 64 * 1024  # 64 KiB maximum allowed for probe response payload
     REQUEST_TIMEOUT_SECONDS = 15.0
 
     @staticmethod
@@ -129,84 +130,125 @@ class SafeWindowedCOGReader:
                     f"Remote server does not advertise 'Accept-Ranges: bytes'. Windowed retrieval unsupported."
                 )
 
-            # Test an explicit byte range probe to ensure 206 is actually honored
+            # Test an explicit byte range probe using a streaming request so status can be checked before reading body
+            stream_cm = None
             try:
-                test_range = client.get(current_url, headers={"Range": "bytes=0-1023"})
+                stream_cm = client.stream("GET", current_url, headers={"Range": "bytes=0-1023"})
+                test_range = stream_cm.__enter__()
             except Exception as e:
                 raise WindowedRetrievalError(f"Failed range probe request: {e}")
 
-            # Check if range request triggered another redirect
-            if test_range.status_code in (301, 302, 303, 307, 308):
-                loc = test_range.headers.get("Location")
-                if loc:
-                    import urllib.parse
-                    next_url = urllib.parse.urljoin(current_url, loc)
-                    cls.validate_url_security(next_url)
-                    current_url = next_url
-                    test_range = client.get(current_url, headers={"Range": "bytes=0-1023"})
+            try:
+                # Check if range request triggered another redirect
+                if test_range.status_code in (301, 302, 303, 307, 308):
+                    loc = test_range.headers.get("Location")
+                    if loc:
+                        import urllib.parse
+                        next_url = urllib.parse.urljoin(current_url, loc)
+                        cls.validate_url_security(next_url)
+                        current_url = next_url
+                        if stream_cm is not None:
+                            try:
+                                stream_cm.__exit__(None, None, None)
+                            except Exception:
+                                pass
+                            stream_cm = None
+                        stream_cm = client.stream("GET", current_url, headers={"Range": "bytes=0-1023"})
+                        test_range = stream_cm.__enter__()
 
-            if test_range.status_code == 200:
-                raise WindowedRetrievalError(
-                    f"Server returned HTTP 200 instead of 206 Partial Content during range probe. "
-                    "Aborting to prevent unintentional full-file download."
-                )
-            elif test_range.status_code == 416:
-                raise WindowedRetrievalError(
-                    "Server returned HTTP 416 (Range Not Satisfiable). Range request is unsupported or byte range is invalid."
-                )
-            elif test_range.status_code in (500, 501, 502, 503):
-                raise WindowedRetrievalError(
-                    f"Server failed to fulfill range probe request (HTTP {test_range.status_code}). Range requests may be unsupported."
-                )
-            elif test_range.status_code != 206:
-                raise WindowedRetrievalError(
-                    f"Server returned HTTP {test_range.status_code} instead of 206 Partial Content during range probe. "
-                    "Aborting to prevent unintentional full-file download."
-                )
-
-            # Verify Content-Range header when headers are provided (RFC 7233 compliance)
-            cr_header = None
-            if hasattr(test_range, "headers") and test_range.headers is not None:
-                cr_header = test_range.headers.get("content-range")
-
-            if isinstance(test_range.headers, (dict, httpx.Headers)) or isinstance(cr_header, str):
-                if not cr_header or not isinstance(cr_header, str):
+                if test_range.status_code == 200:
                     raise WindowedRetrievalError(
-                        "Server returned HTTP 206 Partial Content but omitted mandatory 'Content-Range' response header."
+                        f"Server returned HTTP 200 instead of 206 Partial Content during range probe. "
+                        "Aborting to prevent unintentional full-file download."
                     )
-                import re
-                cr_clean = cr_header.strip()
-                cr_match = re.match(r"^bytes\s+(\d+)-(\d+)/(\d+|\*)$", cr_clean, re.IGNORECASE)
-                if not cr_match:
+                elif test_range.status_code == 416:
                     raise WindowedRetrievalError(
-                        f"Server returned invalid 'Content-Range' header format ('{cr_clean}'). Expected 'bytes START-END/TOTAL'."
+                        "Server returned HTTP 416 (Range Not Satisfiable). Range request is unsupported or byte range is invalid."
                     )
-                range_start = int(cr_match.group(1))
-                range_end = int(cr_match.group(2))
-                total_from_cr = cr_match.group(3)
-
-                if range_start != 0:
+                elif test_range.status_code in (500, 501, 502, 503):
                     raise WindowedRetrievalError(
-                        f"Content-Range start offset mismatch: requested 0, received {range_start}."
+                        f"Server failed to fulfill range probe request (HTTP {test_range.status_code}). Range requests may be unsupported."
                     )
-                if range_end < range_start:
+                elif test_range.status_code != 206:
                     raise WindowedRetrievalError(
-                        f"Content-Range end offset ({range_end}) is less than start offset ({range_start})."
+                        f"Server returned HTTP {test_range.status_code} instead of 206 Partial Content during range probe. "
+                        "Aborting to prevent unintentional full-file download."
                     )
-                if total_from_cr != "*" and total_file_size == 0:
-                    total_file_size = int(total_from_cr)
 
-            probe_bytes = len(test_range.content) if hasattr(test_range, "content") and test_range.content else 1024
-            if hasattr(test_range, "content") and test_range.content and len(test_range.content) > 65536:
-                raise WindowedRetrievalError(
-                    f"Server returned excessively large payload ({len(test_range.content)} bytes) for range probe (bytes=0-1023)."
-                )
+                # Verify Content-Range header when headers are provided (RFC 7233 compliance)
+                cr_header = None
+                if hasattr(test_range, "headers") and test_range.headers is not None:
+                    cr_header = test_range.headers.get("content-range")
 
-            cumulative_bytes += probe_bytes
-            if cumulative_bytes > budget:
-                raise WindowedRetrievalError(
-                    f"Cumulative transfer limit of {budget} bytes exceeded during initial range probe."
-                )
+                if isinstance(test_range.headers, (dict, httpx.Headers)) or isinstance(cr_header, str):
+                    if not cr_header or not isinstance(cr_header, str):
+                        raise WindowedRetrievalError(
+                            "Server returned HTTP 206 Partial Content but omitted mandatory 'Content-Range' response header."
+                        )
+                    import re
+                    cr_clean = cr_header.strip()
+                    cr_match = re.match(r"^bytes\s+(\d+)-(\d+)/(\d+|\*)$", cr_clean, re.IGNORECASE)
+                    if not cr_match:
+                        raise WindowedRetrievalError(
+                            f"Server returned invalid 'Content-Range' header format ('{cr_clean}'). Expected 'bytes START-END/TOTAL'."
+                        )
+                    range_start = int(cr_match.group(1))
+                    range_end = int(cr_match.group(2))
+                    total_from_cr = cr_match.group(3)
+
+                    if range_start != 0:
+                        raise WindowedRetrievalError(
+                            f"Content-Range start offset mismatch: requested 0, received {range_start}."
+                        )
+                    if range_end < range_start:
+                        raise WindowedRetrievalError(
+                            f"Content-Range end offset ({range_end}) is less than start offset ({range_start})."
+                        )
+                    if total_from_cr != "*" and total_file_size == 0:
+                        total_file_size = int(total_from_cr)
+
+                # Incremental, strictly bounded consumption of the probe response payload
+                # Enforces hard 64 KiB maximum while reading chunks; aborts immediately without buffering full body
+                max_probe_allowed = cls.MAX_PROBE_BYTES
+                probe_bytes_read = 0
+                if hasattr(test_range, "iter_bytes") and callable(test_range.iter_bytes):
+                    for chunk in test_range.iter_bytes(chunk_size=1024):
+                        if not chunk:
+                            continue
+                        probe_bytes_read += len(chunk)
+                        if probe_bytes_read > max_probe_allowed:
+                            raise WindowedRetrievalError(
+                                f"Server returned excessively large payload (>{probe_bytes_read} bytes) for range probe (bytes=0-1023)."
+                            )
+                elif hasattr(test_range, "read") and callable(test_range.read):
+                    raw = test_range.read()
+                    if isinstance(raw, (bytes, bytearray)):
+                        probe_bytes_read = len(raw)
+                        if probe_bytes_read > max_probe_allowed:
+                            raise WindowedRetrievalError(
+                                f"Server returned excessively large payload ({probe_bytes_read} bytes) for range probe (bytes=0-1023)."
+                            )
+                elif hasattr(test_range, "content"):
+                    raw = getattr(test_range, "content", None)
+                    if isinstance(raw, (bytes, bytearray)):
+                        probe_bytes_read = len(raw)
+                        if probe_bytes_read > max_probe_allowed:
+                            raise WindowedRetrievalError(
+                                f"Server returned excessively large payload ({probe_bytes_read} bytes) for range probe (bytes=0-1023)."
+                            )
+
+                probe_bytes = probe_bytes_read if probe_bytes_read > 0 else 1024
+                cumulative_bytes += probe_bytes
+                if cumulative_bytes > budget:
+                    raise WindowedRetrievalError(
+                        f"Cumulative transfer limit of {budget} bytes exceeded during initial range probe."
+                    )
+            finally:
+                if stream_cm is not None:
+                    try:
+                        stream_cm.__exit__(None, None, None)
+                    except Exception:
+                        pass
 
         # 3. Rasterio / GDAL Windowed Read with Tight vsicurl Environment
         import rasterio

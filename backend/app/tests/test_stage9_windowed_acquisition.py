@@ -115,7 +115,7 @@ def test_04_missing_or_failed_206_range_rejected():
     mock_client = MagicMock()
     mock_client.__enter__.return_value = mock_client
     mock_client.head.return_value = mock_head
-    mock_client.get.return_value = mock_range
+    mock_client.stream.return_value.__enter__.return_value = mock_range
 
     with patch("httpx.Client", return_value=mock_client):
         with pytest.raises(WindowedRetrievalError, match="instead of 206 Partial Content"):
@@ -417,12 +417,13 @@ def test_11_cumulative_transfer_limit_enforced():
 
     mock_range = MagicMock()
     mock_range.status_code = 206
-    mock_range.content = b"0" * 2048  # 2048 bytes
+    mock_range.headers = {"content-range": "bytes 0-2047/50000000"}
+    mock_range.iter_bytes.return_value = [b"0" * 2048]
 
     mock_client = MagicMock()
     mock_client.__enter__.return_value = mock_client
     mock_client.head.return_value = mock_head
-    mock_client.get.return_value = mock_range
+    mock_client.stream.return_value.__enter__.return_value = mock_range
 
     with patch("httpx.Client", return_value=mock_client):
         with pytest.raises(WindowedRetrievalError, match="Cumulative transfer limit of 1024 bytes exceeded"):
@@ -443,12 +444,13 @@ def test_12_empty_spatial_intersection_remote_rejected():
 
     mock_range = MagicMock()
     mock_range.status_code = 206
-    mock_range.content = b"0" * 1024
+    mock_range.headers = {"content-range": "bytes 0-1023/50000000"}
+    mock_range.iter_bytes.return_value = [b"0" * 1024]
 
     mock_client = MagicMock()
     mock_client.__enter__.return_value = mock_client
     mock_client.head.return_value = mock_head
-    mock_client.get.return_value = mock_range
+    mock_client.stream.return_value.__enter__.return_value = mock_range
 
     # Mock rasterio DatasetReader with bounds covering Bengaluru [77.5, 12.9, 77.7, 13.1]
     mock_src = MagicMock()
@@ -482,11 +484,12 @@ def test_13_missing_or_identity_crs_rejected():
     # 2. Windowed COG Reader rejects missing CRS
     test_url = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/test.tif"
     mock_head = MagicMock(status_code=200, headers={"content-length": "1000", "accept-ranges": "bytes"})
-    mock_range = MagicMock(status_code=206, content=b"0" * 1024)
+    mock_range = MagicMock(status_code=206, headers={"content-range": "bytes 0-1023/1000"})
+    mock_range.iter_bytes.return_value = [b"0" * 1024]
     mock_client = MagicMock()
     mock_client.__enter__.return_value = mock_client
     mock_client.head.return_value = mock_head
-    mock_client.get.return_value = mock_range
+    mock_client.stream.return_value.__enter__.return_value = mock_range
 
     mock_src_nocrs = MagicMock()
     mock_src_nocrs.__enter__.return_value = mock_src_nocrs

@@ -1,3 +1,10 @@
+import os
+import sys
+
+backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
 import pytest
 import numpy as np
 import httpx
@@ -36,22 +43,41 @@ def test_server_without_accept_ranges_rejected():
             )
 
 def test_server_returning_200_instead_of_206_aborts_immediately():
-    with patch("httpx.Client.head") as mock_head, patch("httpx.Client.get") as mock_get:
-        mock_head_resp = MagicMock()
-        mock_head_resp.status_code = 200
-        mock_head_resp.headers = {"accept-ranges": "bytes", "content-length": "1000000"}
-        mock_head.return_value = mock_head_resp
+    """
+    Verifies that when a remote server ignores the Range request and returns HTTP 200,
+    the streaming probe rejects the response and closes the stream without reading/consuming the body.
+    """
+    mock_head_resp = MagicMock()
+    mock_head_resp.status_code = 200
+    mock_head_resp.headers = {"accept-ranges": "bytes", "content-length": "100000000"}  # 100 MB file
 
-        # Server ignores Range header and returns full object (HTTP 200)
-        mock_get_resp = MagicMock()
-        mock_get_resp.status_code = 200  # Not 206!
-        mock_get.return_value = mock_get_resp
+    mock_stream_resp = MagicMock()
+    mock_stream_resp.status_code = 200  # Server ignores Range: bytes=0-1023
+    mock_stream_resp.headers = {"content-length": "100000000"}
+    mock_stream_resp.read = MagicMock()
+    mock_stream_resp.iter_bytes = MagicMock()
+
+    mock_stream_cm = MagicMock()
+    mock_stream_cm.__enter__.return_value = mock_stream_resp
+
+    with patch("httpx.Client.head", return_value=mock_head_resp), \
+         patch("httpx.Client.stream", return_value=mock_stream_cm) as mock_stream_call:
 
         with pytest.raises(WindowedRetrievalError, match="returned HTTP 200 instead of 206"):
             SafeWindowedCOGReader.read_cog_window(
                 url="https://sentinel-cogs.s3.us-west-2.amazonaws.com/test.tif",
                 bbox_wgs84=[77.5, 12.9, 77.6, 13.0]
             )
+
+        # PROOF: Verify streaming probe was invoked
+        assert mock_stream_call.called
+
+        # PROOF: Verify response body was NOT consumed or read
+        assert not mock_stream_resp.read.called
+        assert not mock_stream_resp.iter_bytes.called
+
+        # PROOF: Verify stream context manager was properly exited/closed
+        assert mock_stream_cm.__exit__.called
 
 def test_live_s2_scientific_b04_window_retrieval():
     """
