@@ -250,6 +250,8 @@ class ScientificReportBuilder:
             b08_asset_id=b08_id,
             scl_asset_id=scl_id,
             ndvi_status=ndvi_status,
+            aoi_containment_status=metadata.get("aoi_containment_status"),
+            actual_fixture_bounds_wgs84=metadata.get("actual_fixture_bounds_wgs84"),
         )
 
         # Extract calibrated Sentinel-1 RTC dual-pol DpRVI provenance
@@ -534,6 +536,8 @@ def generate_scientific_markdown(report: ScientificReportSchema) -> str:
         lines.append(f"| **Quality Screening** | `Applied` | **Clear Quality Pixels** | `{prov.quality_clearance_percentage or 'N/A'}%` (Excluded: `{prov.excluded_quality_pixel_count or 0}` px) |")
     lines.append(f"| **Provider Engine** | `{prov.provider_name}` | **Model Status** | `{prov.model_status or 'baseline'}` (Fallback: `{prov.fallback_used}`) |")
     lines.append(f"| **Sensor Identities** | `{', '.join(prov.sensor_identities) or 'None'}` | **Acquisition Datetimes** | `{', '.join(prov.acquisition_timestamps) or 'None'}` |")
+    if prov.aoi_containment_status == "out_of_bounds_clamped":
+        lines.append(f"| **AOI Containment** | `Out of Bounds (Clamped Demonstration Fixture)` | **Actual Fixture Bounds (WGS84)** | `{prov.actual_fixture_bounds_wgs84 or 'N/A'}` |")
 
     if prov.ndvi_mean is not None or prov.ndvi_status:
         lines.append("")

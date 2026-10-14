@@ -1532,20 +1532,28 @@ class STACAcquisitionService:
             with rasterio.open(sample_path) as src:
                 if str(src.crs) != "EPSG:4326":
                     target_bounds = transform_bounds("EPSG:4326", src.crs, *req.aoi_bbox)
+                    src_wgs84 = list(transform_bounds(src.crs, "EPSG:4326", *src.bounds))
                 else:
                     target_bounds = req.aoi_bbox
+                    src_wgs84 = [float(b) for b in src.bounds]
+
+                actual_fixture_bounds_wgs84 = [round(float(b), 6) for b in src_wgs84]
 
                 inter_minx = max(src.bounds.left, target_bounds[0])
                 inter_maxx = min(src.bounds.right, target_bounds[2])
                 inter_miny = max(src.bounds.bottom, target_bounds[1])
                 inter_maxy = min(src.bounds.top, target_bounds[3])
 
-                if inter_minx >= inter_maxx or inter_miny >= inter_maxy:
+                is_out_of_bounds = (inter_minx >= inter_maxx or inter_miny >= inter_maxy)
+                if is_out_of_bounds:
+                    aoi_containment_status = "out_of_bounds_clamped"
                     # For local demonstration samples, clamp window to sample raster extent
                     inter_minx = src.bounds.left
                     inter_maxx = src.bounds.left + min(src.bounds.right - src.bounds.left, 1000.0)
                     inter_miny = src.bounds.bottom
                     inter_maxy = src.bounds.bottom + min(src.bounds.top - src.bounds.bottom, 1000.0)
+                else:
+                    aoi_containment_status = "contained"
 
                 raw_win = from_bounds(inter_minx, inter_miny, inter_maxx, inter_maxy, transform=src.transform)
                 col_off = max(0, min(src.width - 1, int(np.floor(raw_win.col_off))))
@@ -1566,14 +1574,49 @@ class STACAcquisitionService:
                     "tags": dict(src.tags()) if hasattr(src, "tags") else {}
                 }
 
-            is_sar = (
-                (req.collection and any(s in req.collection.lower() for s in ["sentinel-1", "sar", "rtc"]))
-                or req.compute_dprvi
-                or any(b.lower() in ("vv", "vh") for b in req.bands)
-                or any(s in req.scene_id.lower() for s in ["sar", "risat", "sentinel-1"])
+            aoi_limitation = (
+                "Local demonstration fixture does not intersect requested AOI coordinates and was clamped to raster extent for offline demonstration purposes only."
             )
 
-            if is_sar:
+            # Strict fixture modality guard
+            fname_lower = name_part.lower()
+            is_sar_fixture = "sar" in fname_lower or "risat" in fname_lower
+            is_optical_fixture = not is_sar_fixture
+
+            # Determine requested modality from request parameters (collection, bands, algorithms)
+            is_sar_req = (
+                (req.collection and any(s in req.collection.lower() for s in ["sentinel-1", "sar", "rtc", "risat"]))
+                or req.compute_dprvi
+                or (req.bands and any(b.lower() in ("vv", "vh") for b in req.bands))
+            )
+
+            # Never interpret an optical raster as SAR or a SAR raster as optical
+            if is_sar_req and is_optical_fixture:
+                return STACCompositeRetrieveResponse(
+                    status="error",
+                    scene_id=req.scene_id,
+                    collection=req.collection or "sentinel-1-rtc",
+                    category="unsupported",
+                    filename=name_part,
+                    mime_type="image/tiff",
+                    size_bytes=0,
+                    data_base64="",
+                    error=f"Modality mismatch: Local demonstration fixture '{name_part}' is an optical raster and cannot be used as a microwave SAR observation."
+                )
+            if not is_sar_req and is_sar_fixture:
+                return STACCompositeRetrieveResponse(
+                    status="error",
+                    scene_id=req.scene_id,
+                    collection=req.collection or "sentinel-2-l2a",
+                    category="unsupported",
+                    filename=name_part,
+                    mime_type="image/tiff",
+                    size_bytes=0,
+                    data_base64="",
+                    error=f"Modality mismatch: Local demonstration fixture '{name_part}' is a SAR raster and cannot be used as an optical multispectral observation."
+                )
+
+            if is_sar_req:
                 if data.shape[0] == 1:
                     vv = np.maximum(0.001, data[0].astype(np.float32) / 1000.0)
                     vh = vv * 0.25
@@ -1610,10 +1653,14 @@ class STACAcquisitionService:
                     "catalog_url": "local://data/samples",
                     "scene_id": req.scene_id,
                     "modality": "SAR",
+                    "sensor": "RISAT-style synthetic demonstration SAR scene",
+                    "is_synthetic_demonstration": True,
                     "polarization": "DUAL_VV_VH",
                     "bands_acquired": ["VV", "VH"],
                     "windowed_crop": True,
                     "aoi_bbox": req.aoi_bbox,
+                    "aoi_containment_status": aoi_containment_status,
+                    "actual_fixture_bounds_wgs84": actual_fixture_bounds_wgs84,
                     "target_role": req.target_role or "secondary",
                     "retrieval_method": "local_sample_composite_windowed",
                     "calibration_quantity": "gamma0",
@@ -1636,6 +1683,9 @@ class STACAcquisitionService:
                 all_limitations = list(sar_screen.get("scientific_limitations", [])) + list(validation_report.get("scientific_limitations", []))
                 if dprvi_result:
                     all_limitations += list(dprvi_result.get("scientific_limitations", []))
+                all_limitations.append("Synthetic demonstration fixture: not authentic calibrated Sentinel-1 RTC telemetry.")
+                if is_out_of_bounds:
+                    all_limitations.append(aoi_limitation)
 
                 return STACCompositeRetrieveResponse(
                     status="success",
@@ -1688,14 +1738,19 @@ class STACAcquisitionService:
                 f.write(raw_bytes)
 
             full_b64 = "data:image/tiff;base64," + base64.b64encode(raw_bytes).decode("utf-8")
+            sensor_label = "Cartosat-style synthetic demonstration optical scene" if "cartosat" in fname_lower else "Bi-temporal synthetic demonstration optical scene"
             prov_data = {
                 "provider": "Local In-Repository GeoTIFF Catalog (Offline Fallback)",
                 "catalog_url": "local://data/samples",
                 "scene_id": req.scene_id,
                 "modality": "OPTICAL",
+                "sensor": sensor_label,
+                "is_synthetic_demonstration": True,
                 "bands_acquired": ["B04", "B08", "SCL"],
                 "windowed_crop": True,
                 "aoi_bbox": req.aoi_bbox,
+                "aoi_containment_status": aoi_containment_status,
+                "actual_fixture_bounds_wgs84": actual_fixture_bounds_wgs84,
                 "target_role": req.target_role or "primary",
                 "retrieval_method": "local_sample_composite_windowed",
                 "reflectance_scale_factor": 10000.0,
@@ -1714,6 +1769,11 @@ class STACAcquisitionService:
             if scl_eval:
                 raster_meta["quality_screening"] = scl_eval
 
+            opt_limitations = list(validation_report.get("scientific_limitations", []))
+            opt_limitations.append("Synthetic demonstration fixture: not authentic calibrated Sentinel-2 L2A telemetry.")
+            if is_out_of_bounds:
+                opt_limitations.append(aoi_limitation)
+
             return STACCompositeRetrieveResponse(
                 status="success",
                 scene_id=req.scene_id,
@@ -1724,7 +1784,7 @@ class STACAcquisitionService:
                 size_bytes=len(raw_bytes),
                 data_base64=full_b64,
                 metadata=raster_meta,
-                scientific_limitations=validation_report.get("scientific_limitations", []),
+                scientific_limitations=list(dict.fromkeys(opt_limitations)),
                 provenance=prov_data,
                 bands_retrieved=["B04", "B08", "SCL"],
                 ndvi_result=ndvi_result,

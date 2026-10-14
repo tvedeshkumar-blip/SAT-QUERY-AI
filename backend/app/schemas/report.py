@@ -90,6 +90,8 @@ class ReportProvenanceSchema(BaseModel):
     temporal_t2_datetime: Optional[str] = Field(None, description="Post-event acquisition timestamp (T2)")
     joint_valid_pixel_count: Optional[int] = Field(None, description="Number of joint valid screened pixels across temporal pair")
     dprvi_assumption_violations_count: Optional[int] = Field(None, description="Count of pixels where q > 1.0 violating co-pol dominance assumption")
+    aoi_containment_status: Optional[str] = Field(None, description="AOI containment status: 'contained', 'out_of_bounds_clamped', or None")
+    actual_fixture_bounds_wgs84: Optional[List[float]] = Field(None, description="Actual geographic bounds [min_lon, min_lat, max_lon, max_lat] in WGS84")
 
 
 class ReportVerificationSummarySchema(BaseModel):

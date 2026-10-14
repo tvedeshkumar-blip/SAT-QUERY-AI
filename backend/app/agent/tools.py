@@ -124,6 +124,7 @@ class STACCompositeRetrieveTool(AgentTool):
             "data_base64": resp.data_base64,
             "array": parsed_arr,
             "raster_metadata": parsed_meta,
+            "scientific_limitations": resp.scientific_limitations,
             "error": resp.error
         }
 

@@ -637,11 +637,15 @@ class MultiStepOrchestrator:
                 opt_prov = opt_scene.get("provenance") or opt_meta
                 sar_prov = sar_scene.get("provenance") or sar_meta
 
-                is_local_demo_sample = (
-                    str(opt_scene.get("scene_id", "")).startswith("local_sample_") or
-                    str(sar_scene.get("scene_id", "")).startswith("local_sample_")
-                )
-                validation_aoi = None if is_local_demo_sample else active_aoi
+                validation_aoi = active_aoi
+
+                if (opt_prov.get("aoi_containment_status") == "out_of_bounds_clamped" or
+                    sar_prov.get("aoi_containment_status") == "out_of_bounds_clamped"):
+                    trace.add_step(
+                        "AOI_CONTAINMENT_ADVISORY",
+                        "Local demonstration fixture does not intersect requested AOI coordinates; clamped to raster extent for offline demonstration.",
+                        status="completed"
+                    )
 
                 # Validate pair using CrossSensorValidator before execution (P1-1 integration)
                 from app.acquisition.cross_sensor_validator import CrossSensorValidator
@@ -654,6 +658,41 @@ class MultiStepOrchestrator:
                     sar_provenance=sar_prov,
                     aoi_bbox=validation_aoi
                 )
+
+                # Construct structured independent optical + SAR provenance for metadata & UI
+                analysis_metadata["optical_sar_provenance"] = {
+                    "optical": {
+                        "catalog_id": opt_scene.get("scene_id"),
+                        "collection": opt_scene.get("collection") or "cartosat-optical-l2",
+                        "asset_key": "B04_B08_SCL",
+                        "crs": opt_meta.get("crs_display") or opt_meta.get("crs"),
+                        "dimensions": f"{opt_meta.get('width', 0)}x{opt_meta.get('height', 0)}",
+                        "validation_status": "validated" if opt_scene.get("status") == "success" else "unsupported"
+                    },
+                    "sar": {
+                        "catalog_id": sar_scene.get("scene_id"),
+                        "collection": sar_scene.get("collection") or "risat-c-band-sar",
+                        "asset_key": "VV_VH",
+                        "sensor": sar_prov.get("sensor") or "RISAT-style synthetic demonstration SAR scene",
+                        "polarization": sar_prov.get("polarization") or "DUAL_VV_VH",
+                        "calibration_status": sar_prov.get("calibration_quantity") or "linear_power",
+                        "terrain_correction_status": sar_prov.get("sar_terrain_layover_shadow_mask") or "unavailable",
+                        "crs": sar_meta.get("crs_display") or sar_meta.get("crs"),
+                        "dimensions": f"{sar_meta.get('width', 0)}x{sar_meta.get('height', 0)}",
+                        "validation_status": "validated" if sar_scene.get("status") == "success" else "unsupported"
+                    },
+                    "cross_sensor_verification": {
+                        "spatial_overlap_pct": cs_val.get("spatial_overlap_pct", 0.0),
+                        "crs_matching": bool(opt_meta.get("crs") and sar_meta.get("crs") and opt_meta.get("crs") == sar_meta.get("crs")),
+                        "temporal_delta_days": cs_val.get("temporal_delta_days"),
+                        "co_registered": cs_val.get("co_registered", False)
+                    },
+                    "scientific_distinction": {
+                        "optical_measurement": "Solar spectral surface reflectance (albedo across visible and NIR wavelengths).",
+                        "sar_measurement": "Coherent microwave electromagnetic backscatter (dielectric permittivity, moisture, and surface roughness).",
+                        "physical_assertion": "Optical reflectance and SAR backscatter are non-interchangeable remote sensing measurements."
+                    }
+                }
 
                 if not cs_val.get("is_compatible", True):
                     rejection_reason = cs_val.get("rejection_reason") or "Cross-sensor validation failed."
@@ -772,6 +811,15 @@ class MultiStepOrchestrator:
 
                 if tool_name == "stac_composite_retrieve":
                     retrieved_scenes.append(tool_out)
+                    scene_prov = tool_out.get("provenance") or {}
+                    if scene_prov.get("aoi_containment_status") == "out_of_bounds_clamped":
+                        analysis_metadata["aoi_containment_status"] = "out_of_bounds_clamped"
+                        analysis_metadata["actual_fixture_bounds_wgs84"] = scene_prov.get("actual_fixture_bounds_wgs84")
+                    if "scientific_limitations" in tool_out:
+                        lims = analysis_metadata.setdefault("scientific_limitations", [])
+                        for l in tool_out.get("scientific_limitations", []):
+                            if l not in lims:
+                                lims.append(l)
 
                 # Integrate tool outputs into orchestration state
                 if "ndvi_result" in tool_out and tool_out["ndvi_result"]:
@@ -1085,31 +1133,31 @@ class MultiStepOrchestrator:
                 "description": "Compute bi-temporal Sentinel-1 RTC SAR backscatter and DpRVI change"
             })
         elif task == "optical_sar":
-            # For local samples, retrieve optical and SAR from local_sample_temporal_t1_pre_monsoon
-            # so both assets share the identical coordinate reference system and bounding box
-            sample_id = "local_sample_temporal_t1_pre_monsoon"
+            # Disentangled sensor-appropriate local fixtures:
+            # Optical: local_sample_cartosat_optical_bengaluru (optical raster)
+            # SAR: local_sample_risat_sar_mumbai (SAR raster)
             steps.append({
                 "tool": "stac_composite_retrieve",
                 "args": {
-                    "scene_id": sample_id if not has_images else "workspace_img_1",
+                    "scene_id": "local_sample_cartosat_optical_bengaluru" if not has_images else "workspace_img_1",
                     "aoi_bbox": bbox,
-                    "collection": "sentinel-2-l2a",
+                    "collection": "cartosat-optical-l2" if not has_images else "sentinel-2-l2a",
                     "bands": ["b04", "b08", "scl"],
                     "include_scl": True,
                     "compute_ndvi": True
                 },
-                "description": "Acquire Sentinel-2 L2A optical composite for cross-sensor fusion"
+                "description": "Acquire optical composite for cross-sensor fusion"
             })
             steps.append({
                 "tool": "stac_composite_retrieve",
                 "args": {
-                    "scene_id": sample_id if not has_images else "workspace_img_2",
+                    "scene_id": "local_sample_risat_sar_mumbai" if not has_images else "workspace_img_2",
                     "aoi_bbox": bbox,
-                    "collection": "sentinel-1-rtc",
+                    "collection": "risat-c-band-sar" if not has_images else "sentinel-1-rtc",
                     "bands": ["vv", "vh"],
                     "compute_dprvi": True
                 },
-                "description": "Acquire Sentinel-1 RTC dual-pol composite for cross-sensor fusion"
+                "description": "Acquire SAR composite for cross-sensor fusion"
             })
             steps.append({
                 "tool": "optical_sar_fusion",

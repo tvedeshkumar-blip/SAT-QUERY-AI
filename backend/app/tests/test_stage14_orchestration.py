@@ -440,23 +440,32 @@ def test_cumulative_transfer_budget_exhaustion_halts_cleanly():
 
 
 def test_optical_sar_joint_fusion_orchestration_flow():
-    """Verify end-to-end plan formulation and execution for optical + SAR cross-sensor query."""
+    """Verify end-to-end plan formulation and disentangled execution for optical + SAR cross-sensor query."""
     orchestrator = MultiStepOrchestrator()
     res = orchestrator.orchestrate(
         query="Perform joint optical and radar fusion for Mumbai [72.75, 18.88, 73.05, 19.30]"
     )
 
     assert res["task"] == "optical_sar"
-    assert res["status"] == "success"
-    assert res["confidence"] is not None
+    assert res["status"] == "unsupported"
+    assert res["confidence"] is None
     assert "optical_sar_fusion" in res["trace"]["models_selected"]
 
-    # Verify execution DAG contains optical, SAR, and fusion steps
+    # Verify execution DAG contains separate optical and SAR steps, and unsupported fusion step
     steps = res["trace"]["execution_steps"]
-    assert any(s["tool"] == "optical_sar_fusion" and s["status"] == "completed" for s in steps)
+    assert len(steps) == 3
+    assert steps[0]["tool"] == "stac_composite_retrieve"
+    assert steps[1]["tool"] == "stac_composite_retrieve"
+    assert steps[2]["tool"] == "optical_sar_fusion"
+    assert steps[2]["status"] == "unsupported"
 
-    # Verify evidence items contain fused composite
-    assert any(e["type"] == "fused" for e in res["evidence"])
+    # Verify honest reporting: no fabricated fused composite evidence
+    assert not any(e.get("type") == "fused" for e in res["evidence"])
+
+    # Verify separate fixture IDs in report provenance
+    source_ids = res["reproducible_report"]["provenance"]["source_asset_ids"]
+    assert "local_sample_cartosat_optical_bengaluru" in source_ids
+    assert "local_sample_risat_sar_mumbai" in source_ids
 
 
 def test_orchestrator_bounded_retry_loop(monkeypatch):
@@ -771,6 +780,33 @@ def test_p0_4_claim_synthesis_unsupported_optical_sar_fusion():
     assert len(claims2) == 0
 
 
+class MockCompatibleRetrieveTool:
+    def __init__(self):
+        self.name = "stac_composite_retrieve"
+        self.description = "Mock compatible retrieve tool"
+        self.category = "acquisition"
+        self.call_count = 0
+
+    def run(self, **kwargs):
+        self.call_count += 1
+        meta = {
+            "crs": "EPSG:4326",
+            "bounds": [72.75, 18.88, 73.05, 19.30],
+            "width": 64,
+            "height": 64,
+            "modality": "OPTICAL" if self.call_count == 1 else "SAR",
+            "resolution": [10.0, 10.0]
+        }
+        return {
+            "status": "success",
+            "collection": "sentinel-2-l2a" if self.call_count == 1 else "sentinel-1-rtc",
+            "scene_id": "opt_scene_1" if self.call_count == 1 else "sar_scene_1",
+            "array": np.full((64, 64, 3), 100, dtype=np.uint8) if self.call_count == 1 else np.full((64, 64, 2), 80, dtype=np.uint8),
+            "raster_metadata": meta,
+            "provenance": {"modality": "OPTICAL" if self.call_count == 1 else "SAR", "aoi_containment_status": "contained"}
+        }
+
+
 def test_p0_4_orchestrate_end_to_end_unsupported_optical_sar_fusion(monkeypatch):
     """
     P0-4 Orchestrator Test: End-to-end orchestration when optical_sar_fusion returns unsupported.
@@ -801,7 +837,11 @@ def test_p0_4_orchestrate_end_to_end_unsupported_optical_sar_fusion(monkeypatch)
                 ]
             }
 
-    monkeypatch.setattr(tool_registry, "_tools", {**tool_registry._tools, "optical_sar_fusion": UnsupportedFusionTool()})
+    monkeypatch.setattr(tool_registry, "_tools", {
+        **tool_registry._tools,
+        "stac_composite_retrieve": MockCompatibleRetrieveTool(),
+        "optical_sar_fusion": UnsupportedFusionTool()
+    })
 
     res = orchestrator.orchestrate(
         query="Perform joint optical and radar fusion for Mumbai [72.75, 18.88, 73.05, 19.30]"
@@ -944,7 +984,11 @@ def test_orchestrator_contradiction_detection_e2e_blocks_success(monkeypatch):
                 ]
             }
 
-    monkeypatch.setattr(tool_registry, "_tools", {**tool_registry._tools, "optical_sar_fusion": ContradictoryFusionTool()})
+    monkeypatch.setattr(tool_registry, "_tools", {
+        **tool_registry._tools,
+        "stac_composite_retrieve": MockCompatibleRetrieveTool(),
+        "optical_sar_fusion": ContradictoryFusionTool()
+    })
 
     res = orchestrator.orchestrate(
         query="Perform joint optical and radar fusion for water body lake in Mumbai [72.75, 18.88, 73.05, 19.30]"
@@ -1008,7 +1052,11 @@ def test_orchestrator_insufficient_evidence_unaligned_propagation(monkeypatch):
                 "evidence": []
             }
 
-    monkeypatch.setattr(tool_registry, "_tools", {**tool_registry._tools, "optical_sar_fusion": UnalignedFusionTool()})
+    monkeypatch.setattr(tool_registry, "_tools", {
+        **tool_registry._tools,
+        "stac_composite_retrieve": MockCompatibleRetrieveTool(),
+        "optical_sar_fusion": UnalignedFusionTool()
+    })
 
     res = orchestrator.orchestrate(
         query="Analyze open water lake with optical and SAR in Mumbai [72.75, 18.88, 73.05, 19.30]"
@@ -1059,7 +1107,11 @@ def test_orchestrator_insufficient_evidence_zero_valid_pixels_propagation(monkey
                 "evidence": []
             }
 
-    monkeypatch.setattr(tool_registry, "_tools", {**tool_registry._tools, "optical_sar_fusion": ZeroPixelFusionTool()})
+    monkeypatch.setattr(tool_registry, "_tools", {
+        **tool_registry._tools,
+        "stac_composite_retrieve": MockCompatibleRetrieveTool(),
+        "optical_sar_fusion": ZeroPixelFusionTool()
+    })
 
     res = orchestrator.orchestrate(
         query="Analyze open water lake with optical and SAR in Mumbai [72.75, 18.88, 73.05, 19.30]"

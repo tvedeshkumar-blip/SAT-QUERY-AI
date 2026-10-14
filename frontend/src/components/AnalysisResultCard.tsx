@@ -27,6 +27,7 @@ import { API_BASE } from '../services/api';
 import { MetadataInspectorModal } from './MetadataInspectorModal';
 import { ReportPreviewModal } from './ReportPreviewModal';
 import { ScientificVerificationPanel } from './ScientificVerificationPanel';
+import { detectLocalFixtureProvenance } from '../utils/provenanceDisclosure';
 
 interface AnalysisResultCardProps {
   response: AnalysisResponse;
@@ -134,6 +135,8 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
      (response.reproducible_report?.provenance as any)?.radar_canopy_loss_pct !== undefined ?
       response.reproducible_report?.provenance : null);
 
+  const fixtureDisclosure = detectLocalFixtureProvenance(response);
+
   return (
     <div className="glass-panel rounded-2xl p-6 border border-slate-800 bg-slate-900/60 shadow-xl space-y-4">
       
@@ -193,6 +196,42 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
             <span className="font-mono text-slate-400 font-semibold uppercase tracking-wider">User Query: </span>
             <span className="text-slate-200 font-medium font-sans">"{response.query}"</span>
           </div>
+        </div>
+      )}
+
+      {/* Offline Demonstration Mode Fixture Disclosure Warning Banner */}
+      {fixtureDisclosure.isOfflineFixture && (
+        <div
+          data-testid="offline-fixture-warning"
+          className="p-4 rounded-xl bg-amber-950/70 border border-amber-500/80 space-y-2 text-xs font-mono shadow-lg shadow-amber-950/30"
+        >
+          <div className="flex items-center gap-2 text-amber-300 font-bold uppercase tracking-wider">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>OFFLINE DEMONSTRATION MODE (PRE-PACKAGED FIXTURE)</span>
+          </div>
+          <p className="text-amber-100/90 text-xs font-sans leading-relaxed">
+            Offline Demonstration Mode: This analysis uses pre-packaged local raster fixtures. It is not a live satellite acquisition, and the imagery may not cover the requested AOI.
+          </p>
+          {fixtureDisclosure.fixtureIds.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[11px] font-mono text-amber-300/80">
+              <span className="text-slate-400 text-[10px] uppercase tracking-wider">Source Fixtures:</span>
+              {fixtureDisclosure.fixtureIds.map((id, idx) => (
+                <span key={idx} className="px-2 py-0.5 rounded bg-slate-950 border border-amber-900/60 text-amber-300 text-[10px]">
+                  {id}
+                </span>
+              ))}
+            </div>
+          )}
+          {fixtureDisclosure.isOutOfBoundsClamped && (
+            <div className="pt-1 flex flex-wrap items-center gap-2 text-[11px] font-mono text-amber-200">
+              <span className="px-2 py-0.5 rounded bg-rose-950/80 border border-rose-700/80 text-rose-300 text-[10px] font-bold uppercase tracking-wider">
+                AOI MISMATCH: CLAMPED EXTENT
+              </span>
+              <span className="text-amber-200/90 text-xs font-sans">
+                The requested AOI lies outside this demonstration fixture's bounds. The window was clamped to the sample raster extent.
+              </span>
+            </div>
+          )}
         </div>
       )}
 

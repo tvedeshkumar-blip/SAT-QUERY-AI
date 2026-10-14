@@ -2,6 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { DEMO_PRESETS } from '../utils/demoPresets.ts';
 import type { AnalyzePayload } from '../services/api.ts';
+import type { AnalysisMode } from '../types/index.ts';
 
 describe('Demo Presets: Dynamic Orchestration & Preset Verification', () => {
 
@@ -40,12 +41,14 @@ describe('Demo Presets: Dynamic Orchestration & Preset Verification', () => {
     assert.deepEqual(config.files, []);
 
     // Ensure no synthetic canvas PNGs or pretend GeoTIFFs were generated
-    const hasCanvasPng = config.files.some(
+    const files = config.files as (typeof config.files[number])[];
+    assert.equal(files.length, 0);
+    const hasCanvasPng = (config.files as any[]).some(
       (f) => f.dataUrl && f.dataUrl.startsWith('data:image/png')
     );
     assert.equal(hasCanvasPng, false);
 
-    const hasFabricatedTif = config.files.some(
+    const hasFabricatedTif = (config.files as any[]).some(
       (f) => f.filename === 'cartosat_optical_bengaluru.tif' || f.filename === 'risat_sar_mumbai.tif'
     );
     assert.equal(hasFabricatedTif, false);
@@ -148,21 +151,25 @@ describe('Demo Presets: Dynamic Orchestration & Preset Verification', () => {
   });
 
   test('simulates fallback synthetic preset injection for single mode when files are empty', () => {
-    const mode = 'single';
-    const query = 'Analyze scene';
-    const imagePayloads: AnalyzePayload['images'] = [];
-
-    if (imagePayloads.length === 0 && mode !== 'orchestration' && mode !== 'temporal') {
-      imagePayloads.push({
-        data: 'dummy_image_data',
-        mimeType: 'image/png',
-        filename: 'dummy.png',
-        role: 'primary'
-      });
+    function injectFallbackIfEmpty(m: AnalysisMode, payloads: AnalyzePayload['images']) {
+      if (payloads.length === 0 && m !== 'orchestration' && m !== 'temporal') {
+        payloads.push({
+          data: 'dummy_image_data',
+          mimeType: 'image/png',
+          filename: 'dummy.png',
+          role: 'primary'
+        });
+      }
     }
 
-    assert.equal(imagePayloads.length, 1);
-    assert.equal(imagePayloads[0].role, 'primary');
+    const singlePayloads: AnalyzePayload['images'] = [];
+    injectFallbackIfEmpty('single', singlePayloads);
+    assert.equal(singlePayloads.length, 1);
+    assert.equal(singlePayloads[0].role, 'primary');
+
+    const orchPayloads: AnalyzePayload['images'] = [];
+    injectFallbackIfEmpty('orchestration', orchPayloads);
+    assert.equal(orchPayloads.length, 0);
   });
 
 });
