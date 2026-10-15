@@ -389,7 +389,7 @@ describe('Step 5E: Offline Fixture Provenance Disclosure Tests', () => {
   test('Step 6D: disentangled optical and SAR fixtures report offline demo truthfully without fabricated fusion evidence', () => {
     const disentangledResp: AnalysisResponse = {
       ...baseResponse,
-      status: 'unsupported' as any,
+      implementation_status: 'unsupported',
       confidence: null as any,
       confidence_label: 'Cross-Sensor Mismatch',
       verification: {
@@ -443,7 +443,7 @@ describe('Step 5E: Offline Fixture Provenance Disclosure Tests', () => {
     ]);
     assert.equal(result.warningMessage, OFFLINE_FIXTURE_WARNING_TEXT);
     assert.equal(disentangledResp.verification?.verification_status, 'unsupported');
-    assert.equal(disentangledResp.verification?.claims.length, 0);
+    assert.equal(disentangledResp.verification?.claims?.length, 0);
     assert.equal(disentangledResp.confidence, null);
   });
 

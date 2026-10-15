@@ -61,20 +61,23 @@ class STACSearchTool(AgentTool):
             limit=limit
         )
         resp = stac_service.search(req)
+        scenes_list = getattr(resp, "scenes", getattr(resp, "results", []))
         return {
             "status": resp.status,
-            "scenes_found": len(resp.results),
+            "scenes_found": len(scenes_list),
             "scenes": [
                 {
-                    "scene_id": s.scene_id,
-                    "datetime": s.datetime,
-                    "cloud_cover": s.cloud_cover,
-                    "collection": s.collection,
-                    "sensor": s.sensor
+                    "scene_id": getattr(s, "id", getattr(s, "scene_id", None)),
+                    "datetime": getattr(s, "datetime", None),
+                    "cloud_cover": getattr(s, "cloud_cover", None),
+                    "collection": getattr(s, "collection", None),
+                    "sensor": getattr(s, "sensor", None),
+                    "bbox": getattr(s, "bbox", None)
                 }
-                for s in resp.results
+                for s in scenes_list
             ],
-            "catalog_url": resp.catalog_url
+            "provider": getattr(resp, "provider", "STAC Catalog"),
+            "catalog_url": getattr(resp, "catalog_url", None)
         }
 
 
@@ -114,6 +117,8 @@ class STACCompositeRetrieveTool(AgentTool):
         return {
             "status": resp.status,
             "scene_id": resp.scene_id,
+            "collection": resp.collection,
+            "temporal_role": kwargs.get("temporal_role") or kwargs.get("target_role"),
             "category": resp.category,
             "bands_retrieved": resp.bands_retrieved,
             "size_bytes": resp.size_bytes,
@@ -171,19 +176,22 @@ class Sentinel1RTCDpRVIPipelineTool(AgentTool):
 
 
 class TemporalOpticalChangeTool(AgentTool):
-    """Tool for bi-temporal Sentinel-2 surface reflectance NDVI change detection with SCL screening."""
+    """Tool for bi-temporal Sentinel-2 surface reflectance NDVI change detection with multi-scene SCL screening."""
     def __init__(self):
         super().__init__(
             name="temporal_optical_change",
-            description="Compute calibrated bi-temporal Sentinel-2 Delta-NDVI and physical vegetation change.",
+            description="Compute calibrated bi-temporal Sentinel-2 Delta-NDVI and physical vegetation change with multi-scene SCL composites.",
             category="temporal"
         )
 
-    def run(self, t1_b04: Any, t1_b08: Any, t2_b04: Any, t2_b08: Any,
+    def run(self, t1_b04: Any = None, t1_b08: Any = None, t2_b04: Any = None, t2_b08: Any = None,
             t1_scl: Optional[Any] = None, t2_scl: Optional[Any] = None,
             t1_meta: Optional[Dict[str, Any]] = None, t2_meta: Optional[Dict[str, Any]] = None,
             t1_datetime: Optional[str] = None, t2_datetime: Optional[str] = None,
-            loss_threshold: float = -0.15, gain_threshold: float = 0.15, **kwargs) -> Dict[str, Any]:
+            t1_scenes: Optional[List[Dict[str, Any]]] = None, t2_scenes: Optional[List[Dict[str, Any]]] = None,
+            composite_method: str = "median",
+            loss_threshold: float = -0.15, gain_threshold: float = 0.15,
+            cloud_threshold: Optional[float] = None, **kwargs) -> Dict[str, Any]:
         return compute_temporal_optical_change(
             t1_b04=t1_b04,
             t1_b08=t1_b08,
@@ -195,8 +203,13 @@ class TemporalOpticalChangeTool(AgentTool):
             t2_meta=t2_meta,
             t1_datetime=t1_datetime,
             t2_datetime=t2_datetime,
+            t1_scenes=t1_scenes,
+            t2_scenes=t2_scenes,
+            composite_method=composite_method,
             loss_threshold=loss_threshold,
-            gain_threshold=gain_threshold
+            gain_threshold=gain_threshold,
+            cloud_threshold=cloud_threshold,
+            **kwargs
         )
 
 

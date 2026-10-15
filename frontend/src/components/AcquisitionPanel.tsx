@@ -44,6 +44,13 @@ import {
 
 import { UploadedFileState } from './ImageUploader';
 import { formatBBox } from '../utils/geoBounds';
+import { 
+  isSarCollection, 
+  SUPPORTED_STAC_COLLECTIONS, 
+  getCollectionProvider 
+} from '../utils/stacCollections';
+
+export { isSarCollection };
 
 export interface AcquisitionPanelProps {
   selectedAOI: AOIBounds | null;
@@ -137,7 +144,7 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
         start_date: startDate,
         end_date: endDate,
         collection,
-        max_cloud_cover: collection === 'sentinel-1-grd' ? undefined : maxCloudCover,
+        max_cloud_cover: isSarCollection(collection) ? undefined : maxCloudCover,
         limit: searchLimit
       });
 
@@ -173,7 +180,7 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
         t2_start_date: t2StartDate,
         t2_end_date: t2EndDate,
         collection,
-        max_cloud_cover: collection === 'sentinel-1-grd' ? undefined : maxCloudCover,
+        max_cloud_cover: isSarCollection(collection) ? undefined : maxCloudCover,
         limit: searchLimit
       });
 
@@ -387,7 +394,7 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
       isGeoTIFF: t1Retrieved.validation?.file_format === 'GeoTIFF' || t1Retrieved.category !== 'visual_preview',
       assetCategory: t1Retrieved.validation?.asset_category || t1Retrieved.category,
       stacProvenance: {
-        provider: searchResponse?.provider || 'Element84 Earth Search (AWS)',
+        provider: selectedT1Scene.provenance?.catalog || t1SearchResponse?.provider || searchResponse?.provider || (isSarCollection(selectedT1Scene.collection) ? 'Microsoft Planetary Computer' : 'Element84 Earth Search (AWS)'),
         collection: selectedT1Scene.collection,
         scene_id: selectedT1Scene.id,
         datetime: selectedT1Scene.datetime,
@@ -408,7 +415,7 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
       isGeoTIFF: t2Retrieved.validation?.file_format === 'GeoTIFF' || t2Retrieved.category !== 'visual_preview',
       assetCategory: t2Retrieved.validation?.asset_category || t2Retrieved.category,
       stacProvenance: {
-        provider: searchResponse?.provider || 'Element84 Earth Search (AWS)',
+        provider: selectedT2Scene.provenance?.catalog || t2SearchResponse?.provider || searchResponse?.provider || (isSarCollection(selectedT2Scene.collection) ? 'Microsoft Planetary Computer' : 'Element84 Earth Search (AWS)'),
         collection: selectedT2Scene.collection,
         scene_id: selectedT2Scene.id,
         datetime: selectedT2Scene.datetime,
@@ -503,7 +510,7 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
       isGeoTIFF: optRetrieved.validation?.file_format === 'GeoTIFF' || optRetrieved.category !== 'visual_preview',
       assetCategory: optRetrieved.validation?.asset_category || optRetrieved.category,
       stacProvenance: {
-        provider: searchResponse?.provider || 'Element84 Earth Search (AWS)',
+        provider: selectedOpticalScene.provenance?.catalog || opticalSearchResponse?.provider || 'Element84 Earth Search (AWS)',
         collection: selectedOpticalScene.collection,
         scene_id: selectedOpticalScene.id,
         datetime: selectedOpticalScene.datetime,
@@ -524,7 +531,7 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
       isGeoTIFF: sarRetrieved.validation?.file_format === 'GeoTIFF' || sarRetrieved.category !== 'visual_preview',
       assetCategory: sarRetrieved.validation?.asset_category || sarRetrieved.category,
       stacProvenance: {
-        provider: searchResponse?.provider || 'Element84 Earth Search (AWS)',
+        provider: selectedSARScene.provenance?.catalog || sarSearchResponse?.provider || 'Microsoft Planetary Computer',
         collection: selectedSARScene.collection,
         scene_id: selectedSARScene.id,
         datetime: selectedSARScene.datetime,
@@ -562,7 +569,7 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
       isGeoTIFF: retrieved.validation?.file_format === 'GeoTIFF' || retrieved.category !== 'visual_preview',
       assetCategory: retrieved.validation?.asset_category || retrieved.category,
       stacProvenance: retrieved.provenance || {
-        provider: searchResponse?.provider || 'Element84 Earth Search (AWS)',
+        provider: scene.provenance?.catalog || searchResponse?.provider || (isSarCollection(scene.collection) ? 'Microsoft Planetary Computer' : 'Element84 Earth Search (AWS)'),
         collection: scene.collection,
         scene_id: scene.id,
         datetime: scene.datetime,
@@ -637,11 +644,11 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
             <div className="absolute top-2 right-2 z-10">
               {scene.modality === 'SAR' ? (
                 <span className="px-2 py-0.5 rounded bg-purple-950/90 border border-purple-700 text-[10px] font-mono font-bold text-purple-300">
-                  C-Band SAR
+                  {scene.collection === 'sentinel-1-rtc' ? 'RTC SAR' : 'C-Band SAR'}
                 </span>
               ) : (
                 <span className="px-2 py-0.5 rounded bg-cyan-950/90 border border-cyan-700 text-[10px] font-mono font-bold text-cyan-300">
-                  Optical RGB
+                  Optical BOA
                 </span>
               )}
             </div>
@@ -669,9 +676,12 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
               {scene.id}
             </h5>
 
-            <p className="text-[10px] text-slate-400">
-              Collection: {scene.collection}
-            </p>
+            <div className="flex items-center justify-between text-[10px] text-slate-400">
+              <span>Collection: {scene.collection}</span>
+              <span className="text-[9px] text-slate-500 font-mono">
+                {scene.provenance?.catalog || (isSarCollection(scene.collection) ? 'Planetary Computer' : 'Element84')}
+              </span>
+            </div>
 
             {/* Asset Selection Buttons */}
             <div className="space-y-1 pt-1 border-t border-slate-900">
@@ -879,7 +889,11 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
             <h3 className="text-xs font-mono font-bold text-slate-100 uppercase tracking-wider flex items-center gap-2">
               SATELLITE IMAGERY ACQUISITION & STAC CATALOG SEARCH
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-teal-950 text-teal-300 border border-teal-800 font-mono">
-                Earth Search (AWS)
+                {panelMode === 'optical_sar_pair'
+                  ? 'Earth Search (AWS) & MPC'
+                  : isSarCollection(collection)
+                  ? 'Planetary Computer'
+                  : 'Earth Search (AWS)'}
               </span>
             </h3>
             <p className="text-[11px] text-slate-400">
@@ -966,7 +980,7 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
               </label>
               {panelMode === 'optical_sar_pair' ? (
                 <div className="w-full text-xs font-mono px-3 py-2 rounded-lg bg-slate-900 border border-purple-800/60 text-purple-300 flex items-center gap-2">
-                  <span className="font-bold">Sentinel-2 (Opt) + Sentinel-1 (SAR)</span>
+                  <span className="font-bold">Sentinel-2 (Opt) + Sentinel-1 RTC (SAR)</span>
                 </div>
               ) : (
                 <select
@@ -974,14 +988,16 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
                   onChange={(e) => setCollection(e.target.value)}
                   className="w-full text-xs font-mono px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-200 focus:outline-none focus:border-cyan-500"
                 >
-                  <option value="sentinel-2-l2a">Sentinel-2 L2A (Optical)</option>
-                  <option value="sentinel-1-grd">Sentinel-1 GRD (SAR C-Band)</option>
+                  <option value="sentinel-2-l2a">Sentinel-2 L2A (Optical BOA Reflectance)</option>
+                  <option value="sentinel-1-rtc">Sentinel-1 RTC (Terrain-Corrected SAR)</option>
                 </select>
               )}
               <p className="text-[10px] text-slate-500 font-mono">
                 {panelMode === 'optical_sar_pair'
                   ? 'Stage 6: Multi-sensor optical reflectance & SAR backscatter'
-                  : 'Stage 5: Bi-temporal analysis requires matching modalities'}
+                  : isSarCollection(collection)
+                  ? 'Planetary Computer (Microsoft) — Terrain-Corrected Backscatter'
+                  : 'Element84 Earth Search (AWS) — BOA Surface Reflectance'}
               </p>
             </div>
 
@@ -998,12 +1014,12 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
                   max="100"
                   step="5"
                   value={maxCloudCover}
-                  disabled={collection === 'sentinel-1-grd' && panelMode !== 'optical_sar_pair'}
+                  disabled={isSarCollection(collection) && panelMode !== 'optical_sar_pair'}
                   onChange={(e) => setMaxCloudCover(Number(e.target.value))}
                   className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-400 disabled:opacity-30"
                 />
                 <span className="text-xs font-mono font-bold text-cyan-300 w-9 text-right">
-                  {collection === 'sentinel-1-grd' && panelMode !== 'optical_sar_pair' ? 'N/A' : `${maxCloudCover}%`}
+                  {isSarCollection(collection) && panelMode !== 'optical_sar_pair' ? 'N/A' : `${maxCloudCover}%`}
                 </span>
               </div>
               <p className="text-[10px] text-slate-500 font-mono">Threshold for optical scenes</p>
@@ -1069,6 +1085,41 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
             </div>
 
           </div>
+
+          {/* Single Scene Date Window Configuration (Visible in Single Mode) */}
+          {panelMode === 'single' && (
+            <div className="bg-slate-950/40 p-4 rounded-xl border border-slate-800/80">
+              <div className="space-y-2 p-3 rounded-lg bg-slate-900/60 border border-teal-900/40">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-mono font-bold text-teal-300 flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-teal-400" />
+                    ACQUISITION DATE WINDOW
+                  </span>
+                  <span className="text-[10px] font-mono text-slate-400">Search Date Range</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                  <div>
+                    <label className="text-[10px] text-slate-400 block mb-1">START DATE</label>
+                    <input 
+                      type="date"
+                      value={startDate}
+                      onChange={(e) => setStartDate(e.target.value)}
+                      className="w-full px-2 py-1.5 rounded bg-slate-950 border border-slate-800 text-slate-200 focus:outline-none focus:border-teal-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-400 block mb-1">END DATE</label>
+                    <input 
+                      type="date"
+                      value={endDate}
+                      onChange={(e) => setEndDate(e.target.value)}
+                      className="w-full px-2 py-1.5 rounded bg-slate-950 border border-slate-800 text-slate-200 focus:outline-none focus:border-teal-500"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Temporal Windows Configuration (Visible in Bi-Temporal Mode) */}
           {panelMode === 'temporal_pair' && (
@@ -1171,14 +1222,14 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
                 </div>
               </div>
 
-              {/* Window 2: SAR (Sentinel-1 GRD) */}
+              {/* Window 2: SAR (Sentinel-1 RTC) */}
               <div className="space-y-2 p-3 rounded-lg bg-slate-900/60 border border-purple-900/40">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-mono font-bold text-purple-300 flex items-center gap-1.5">
                     <Radio className="w-3.5 h-3.5 text-purple-400" />
-                    SAR TIME WINDOW (SENTINEL-1 GRD)
+                    SAR TIME WINDOW (SENTINEL-1 RTC)
                   </span>
-                  <span className="text-[10px] font-mono text-slate-400">C-Band Microwave Backscatter</span>
+                  <span className="text-[10px] font-mono text-slate-400">Terrain-Corrected C-Band Backscatter</span>
                 </div>
                 <div className="grid grid-cols-2 gap-2 text-xs font-mono">
                   <div>
@@ -1431,7 +1482,7 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
                 {/* SAR Summary */}
                 <div className="p-2.5 rounded-lg bg-slate-900 border border-purple-900/50 space-y-1">
                   <div className="flex items-center justify-between text-purple-400 font-bold">
-                    <span>SAR SENSOR (SENTINEL-1 GRD)</span>
+                    <span>SAR SENSOR (SENTINEL-1 RTC)</span>
                     <span className="text-[10px] text-slate-400">{selectedSARScene?.datetime ? new Date(selectedSARScene.datetime).toLocaleDateString() : 'Not Selected'}</span>
                   </div>
                   <p className="text-slate-300 truncate" title={selectedSARScene?.id}>
@@ -1635,12 +1686,12 @@ export const AcquisitionPanel: React.FC<AcquisitionPanelProps> = ({
                   )}
                 </div>
 
-                {/* Column 2: SAR Scenes (Sentinel-1 GRD) */}
+                {/* Column 2: SAR Scenes (Sentinel-1 RTC) */}
                 <div className="space-y-3">
                   <div className="flex items-center justify-between border-b border-slate-800 pb-2">
                     <h4 className="text-xs font-mono font-bold text-purple-300 flex items-center gap-1.5">
                       <Radio className="w-3.5 h-3.5 text-purple-400" />
-                      SAR CANDIDATES (SENTINEL-1 GRD)
+                      SAR CANDIDATES (SENTINEL-1 RTC)
                       <span className="text-[10px] text-slate-400 font-normal">
                         ({sarSearchResponse?.total_results || 0} scenes)
                       </span>

@@ -27,12 +27,31 @@ export interface UploadedFileState {
   scientificLimitations?: string[];
 }
 
+export interface AOIAnalysisConfig {
+  startDate: string;
+  endDate: string;
+  t1StartDate: string;
+  t1EndDate: string;
+  t2StartDate: string;
+  t2EndDate: string;
+  maxCloudCover: number;
+}
+
 export interface AnalysisRequest {
   query: string;
   images?: any[];
   mode?: AnalysisMode;
   target_role?: string;
   user_model_preference?: string;
+  aoi_bbox?: number[];
+  start_date?: string;
+  end_date?: string;
+  t1_start_date?: string;
+  t1_end_date?: string;
+  t2_start_date?: string;
+  t2_end_date?: string;
+  max_cloud_cover?: number;
+  metadata?: Record<string, any>;
 }
 
 export interface BoundingBox {

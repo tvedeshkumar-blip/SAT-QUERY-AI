@@ -25,6 +25,14 @@ class AnalysisRequest(BaseModel):
     images: List[ImageInput] = Field(default_factory=list, description="List of input satellite images")
     query: str = Field(..., description="Natural language prompt / question")
     mode: str = Field(default="auto", description="Operational mode: auto, single, optical_sar, bitemporal, orchestration, temporal")
+    aoi_bbox: Optional[List[float]] = Field(default=None, description="Optional AOI bounding box [min_lon, min_lat, max_lon, max_lat] in EPSG:4326")
+    start_date: Optional[str] = Field(default=None, description="Optional start date (YYYY-MM-DD or ISO 8601)")
+    end_date: Optional[str] = Field(default=None, description="Optional end date (YYYY-MM-DD or ISO 8601)")
+    t1_start_date: Optional[str] = Field(default=None, description="Pre-event (T1) start date (YYYY-MM-DD)")
+    t1_end_date: Optional[str] = Field(default=None, description="Pre-event (T1) end date (YYYY-MM-DD)")
+    t2_start_date: Optional[str] = Field(default=None, description="Post-event (T2) start date (YYYY-MM-DD)")
+    t2_end_date: Optional[str] = Field(default=None, description="Post-event (T2) end date (YYYY-MM-DD)")
+    max_cloud_cover: Optional[float] = Field(default=20.0, description="Maximum allowable optical cloud cover percentage (0-100)")
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 class BoundingBoxSchema(BaseModel):

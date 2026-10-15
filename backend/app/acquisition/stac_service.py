@@ -40,6 +40,8 @@ class STACAcquisitionService:
     """
 
     DEFAULT_CATALOG_URL = "https://earth-search.aws.element84.com/v1"
+    DEFAULT_MPC_CATALOG_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
+    MPC_SAS_TOKEN_URL = "https://planetarycomputer.microsoft.com/api/sas/v1/token"
     MAX_DOWNLOAD_BYTES = int(os.getenv("MAX_RETRIEVAL_BYTES", str(35 * 1024 * 1024)))  # 35 MB configurable limit
     REQUEST_TIMEOUT_SECONDS = 20.0
 
@@ -58,6 +60,7 @@ class STACAcquisitionService:
 
     def __init__(self, catalog_url: Optional[str] = None):
         self.catalog_url = catalog_url or os.getenv("STAC_CATALOG_URL", self.DEFAULT_CATALOG_URL).rstrip("/")
+        self.mpc_catalog_url = os.getenv("MPC_STAC_CATALOG_URL", self.DEFAULT_MPC_CATALOG_URL).rstrip("/")
         # In-memory session cache of recently discovered scenes to prevent arbitrary URL injection
         self._scene_cache: Dict[str, Dict[str, Any]] = {}
         
@@ -67,9 +70,35 @@ class STACAcquisitionService:
         self.samples_dir = os.path.join(base_dir, "data", "samples")
         os.makedirs(self.retrieval_dir, exist_ok=True)
 
+    def _sign_url_if_needed(self, url: str, collection: Optional[str] = None) -> str:
+        """
+        Signs Planetary Computer Azure Blob URLs with a SAS token if needed.
+        Supports optional PC_SDK_SUBSCRIPTION_KEY or PLANETARY_COMPUTER_API_KEY from environment.
+        """
+        if "blob.core.windows.net" in url or "planetarycomputer.microsoft.com" in url:
+            if "?" not in url:
+                try:
+                    col = collection or "sentinel-1-rtc"
+                    token_url = f"{self.MPC_SAS_TOKEN_URL}/{col}"
+                    headers = {}
+                    api_key = os.getenv("PC_SDK_SUBSCRIPTION_KEY") or os.getenv("PLANETARY_COMPUTER_API_KEY")
+                    if api_key:
+                        headers["Ocp-Apim-Subscription-Key"] = api_key
+                    with httpx.Client(timeout=10.0) as pc_client:
+                        token_resp = pc_client.get(token_url, headers=headers)
+                        if token_resp.status_code == 200:
+                            token = token_resp.json().get("token")
+                            if token:
+                                return f"{url}?{token}"
+                except Exception as pc_err:
+                    logger.warning(f"Planetary Computer SAS signing attempt warning: {pc_err}")
+        return url
+
+
     def search(self, req: STACSearchRequest) -> STACSearchResponse:
         """
         Executes a spatial-temporal search against the configured STAC catalog.
+        Intelligently routes optical to Earth Search AWS and SAR to Planetary Computer RTC.
         """
         # 1. Validate Bounding Box
         min_lon, min_lat, max_lon, max_lat = req.bbox
@@ -83,19 +112,8 @@ class STACAcquisitionService:
                 error="Invalid bounding box: min_lat cannot be greater than max_lat."
             )
 
-        # 2. Map collection filter
-        collections = []
         col_req = (req.collection or "").lower().strip()
-        if col_req in ("sentinel-2", "sentinel-2-l2a", "optical"):
-            collections = ["sentinel-2-l2a"]
-        elif col_req in ("sentinel-1", "sentinel-1-grd", "sar"):
-            collections = ["sentinel-1-grd"]
-        elif col_req == "all":
-            collections = ["sentinel-2-l2a", "sentinel-1-grd"]
-        else:
-            collections = [req.collection] if req.collection else ["sentinel-2-l2a"]
-
-        # 3. Format temporal window
+        custom_catalog = getattr(req, "catalog_url", None)
         datetime_str = None
         if req.start_date and req.end_date:
             datetime_str = f"{req.start_date}T00:00:00Z/{req.end_date}T23:59:59Z"
@@ -104,7 +122,24 @@ class STACAcquisitionService:
         elif req.end_date:
             datetime_str = f"../{req.end_date}T23:59:59Z"
 
-        # 4. Construct STAC payload
+        if col_req == "all" and not custom_catalog:
+            return self._search_dual_catalogs(req, datetime_str)
+
+        # 2. Map collection filter and target catalog
+        target_catalog = custom_catalog or self.catalog_url
+        if col_req in ("sentinel-1-rtc", "rtc", "sar-rtc", "sentinel-1", "sar"):
+            collections = ["sentinel-1-rtc"]
+            target_catalog = custom_catalog or self.mpc_catalog_url
+        elif col_req in ("sentinel-1-grd", "grd"):
+            collections = ["sentinel-1-grd"]
+            target_catalog = custom_catalog or self.catalog_url
+        elif col_req in ("sentinel-2", "sentinel-2-l2a", "optical"):
+            collections = ["sentinel-2-l2a"]
+            target_catalog = custom_catalog or self.catalog_url
+        else:
+            collections = [req.collection] if req.collection else ["sentinel-2-l2a"]
+
+        # 3. Construct STAC payload
         payload: Dict[str, Any] = {
             "collections": collections,
             "bbox": [min_lon, min_lat, max_lon, max_lat],
@@ -119,18 +154,18 @@ class STACAcquisitionService:
                 "eo:cloud_cover": {"lte": float(req.max_cloud_cover)}
             }
 
-        # 5. Query Live Catalog
+        # 4. Query Live Catalog
         try:
-            search_url = f"{self.catalog_url}/search"
+            search_url = f"{target_catalog}/search"
             with httpx.Client(timeout=self.REQUEST_TIMEOUT_SECONDS) as client:
                 resp = client.post(search_url, json=payload)
                 if resp.status_code == 200:
                     data = resp.json()
                     features = data.get("features", [])
-                    return self._process_stac_features(features, req, datetime_str)
+                    return self._process_stac_features(features, req, datetime_str, catalog_url=target_catalog)
                 else:
                     logger.warning(f"STAC search returned HTTP {resp.status_code}: {resp.text}")
-                    return self._handle_catalog_error(req, f"STAC server error HTTP {resp.status_code}", datetime_str)
+                    return self._handle_catalog_error(req, f"STAC server error HTTP {resp.status_code}", datetime_str, catalog_url=target_catalog)
 
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.NetworkError) as ne:
             logger.info(f"External STAC connection unavailable ({ne}). Checking offline sample catalog fallback.")
@@ -139,19 +174,87 @@ class STACAcquisitionService:
             logger.warning(f"Error querying STAC catalog ({e}). Falling back to offline verified sample catalog.")
             return self._fallback_local_search(req, datetime_str, reason=str(e))
 
+    def _search_dual_catalogs(self, req: STACSearchRequest, datetime_str: Optional[str]) -> STACSearchResponse:
+        """
+        Executes parallel optical (Earth Search) and SAR RTC (Planetary Computer) searches
+        when 'all' collections are requested.
+        """
+        min_lon, min_lat, max_lon, max_lat = req.bbox
+        all_features: List[Dict[str, Any]] = []
+        errors: List[str] = []
+
+        # 1. Optical (Earth Search)
+        opt_payload: Dict[str, Any] = {
+            "collections": ["sentinel-2-l2a"],
+            "bbox": [min_lon, min_lat, max_lon, max_lat],
+            "limit": req.limit or 6
+        }
+        if datetime_str:
+            opt_payload["datetime"] = datetime_str
+        if req.max_cloud_cover is not None:
+            opt_payload["query"] = {"eo:cloud_cover": {"lte": float(req.max_cloud_cover)}}
+
+        try:
+            with httpx.Client(timeout=self.REQUEST_TIMEOUT_SECONDS) as client:
+                r_opt = client.post(f"{self.catalog_url}/search", json=opt_payload)
+                if r_opt.status_code == 200:
+                    all_features.extend(r_opt.json().get("features", []))
+        except Exception as e:
+            errors.append(f"Earth Search: {e}")
+
+        # 2. SAR RTC (Planetary Computer)
+        sar_payload: Dict[str, Any] = {
+            "collections": ["sentinel-1-rtc"],
+            "bbox": [min_lon, min_lat, max_lon, max_lat],
+            "limit": req.limit or 6
+        }
+        if datetime_str:
+            sar_payload["datetime"] = datetime_str
+
+        try:
+            with httpx.Client(timeout=self.REQUEST_TIMEOUT_SECONDS) as client:
+                r_sar = client.post(f"{self.mpc_catalog_url}/search", json=sar_payload)
+                if r_sar.status_code == 200:
+                    all_features.extend(r_sar.json().get("features", []))
+        except Exception as e:
+            errors.append(f"Planetary Computer: {e}")
+
+        combined_catalog = f"{self.catalog_url} + {self.mpc_catalog_url}"
+        if all_features:
+            return self._process_stac_features(all_features, req, datetime_str, catalog_url=combined_catalog)
+
+        if len(errors) == 2:
+            return self._fallback_local_search(req, datetime_str, reason="; ".join(errors))
+
+        return STACSearchResponse(
+            status="zero_results",
+            catalog_url=combined_catalog,
+            provider="Element84 Earth Search + Microsoft Planetary Computer",
+            search_bbox=req.bbox,
+            search_datetime=datetime_str,
+            collection_requested="all",
+            total_results=0,
+            message="No satellite acquisitions matched the specified spatial and temporal filters.",
+            scenes=[]
+        )
+
+
     def _process_stac_features(
         self, 
         features: List[Dict[str, Any]], 
         req: STACSearchRequest, 
-        datetime_str: Optional[str]
+        datetime_str: Optional[str],
+        catalog_url: Optional[str] = None
     ) -> STACSearchResponse:
         """
         Parses genuine STAC GeoJSON features into verified STACSceneSummary objects.
         """
+        cat_url = catalog_url or self.catalog_url
         if not features:
             return STACSearchResponse(
                 status="zero_results",
-                catalog_url=self.catalog_url,
+                catalog_url=cat_url,
+                provider="Microsoft Planetary Computer" if "planetarycomputer" in cat_url else "Element84 Earth Search (AWS)",
                 search_bbox=req.bbox,
                 search_datetime=datetime_str,
                 collection_requested=req.collection or "all",
@@ -169,9 +272,9 @@ class STACAcquisitionService:
             bbox = feat.get("bbox") or req.bbox
 
             # Detect modality
-            is_sar = "sentinel-1" in col.lower() or "sar" in col.lower()
+            is_sar = "sentinel-1" in col.lower() or "sar" in col.lower() or "rtc" in col.lower()
             modality = "SAR" if is_sar else "OPTICAL"
-            sensor = props.get("platform") or ("Sentinel-1" if is_sar else "Sentinel-2")
+            sensor = props.get("platform") or ("Sentinel-1 RTC" if "rtc" in col.lower() else ("Sentinel-1" if is_sar else "Sentinel-2"))
             cloud_cover = None if is_sar else props.get("eo:cloud_cover")
 
             # Assets extraction
@@ -188,7 +291,7 @@ class STACAcquisitionService:
 
                 # Classify category
                 category = "unsupported"
-                if "thumbnail" in roles or key in ("thumbnail", "preview", "quick-look"):
+                if "thumbnail" in roles or "overview" in roles or key in ("thumbnail", "preview", "quick-look", "rendered_preview"):
                     category = "visual_preview"
                     if not thumbnail_url and href:
                         thumbnail_url = self._format_accessible_href(href)
@@ -207,6 +310,9 @@ class STACAcquisitionService:
                     size_bytes=val.get("file:size")
                 )
 
+            scene_catalog = "Microsoft Planetary Computer" if ("planetarycomputer" in cat_url or "rtc" in col.lower() or "blob.core.windows.net" in str(raw_assets)) else "Element84 Earth Search"
+            scene_catalog_url = self.mpc_catalog_url if scene_catalog == "Microsoft Planetary Computer" else self.catalog_url
+
             scene_summary = STACSceneSummary(
                 id=scene_id,
                 collection=col,
@@ -220,9 +326,9 @@ class STACAcquisitionService:
                 thumbnail_url=thumbnail_url,
                 assets=assets_dict,
                 provenance={
-                    "catalog": "Element84 Earth Search",
+                    "catalog": scene_catalog,
                     "license": "Copernicus Open Access / CC-BY-4.0",
-                    "provider_url": self.catalog_url
+                    "provider_url": scene_catalog_url
                 }
             )
 
@@ -231,19 +337,32 @@ class STACAcquisitionService:
                 "summary": scene_summary,
                 "raw_assets": raw_assets,
                 "properties": props,
-                "search_bbox": req.bbox
+                "search_bbox": req.bbox,
+                "collection": col,
+                "provider": scene_catalog,
+                "catalog_url": scene_catalog_url,
+                "modality": modality,
+                "sensor": sensor
             }
             scenes.append(scene_summary)
 
+        provider_name = "Element84 Earth Search (AWS)"
+        if "planetarycomputer" in cat_url and "earth-search" in cat_url:
+            provider_name = "Element84 Earth Search + Microsoft Planetary Computer"
+        elif "planetarycomputer" in cat_url or any("rtc" in s.collection.lower() for s in scenes):
+            provider_name = "Microsoft Planetary Computer"
+
         return STACSearchResponse(
             status="success",
-            catalog_url=self.catalog_url,
+            catalog_url=cat_url,
+            provider=provider_name,
             search_bbox=req.bbox,
             search_datetime=datetime_str,
             collection_requested=req.collection or "all",
             total_results=len(scenes),
             scenes=scenes
         )
+
 
     def retrieve(self, req: STACRetrieveRequest) -> STACRetrieveResponse:
         """
@@ -287,7 +406,9 @@ class STACAcquisitionService:
 
         href = asset_info.get("href", "")
         clean_url = self._format_accessible_href(href)
+        clean_url = self._sign_url_if_needed(clean_url, collection=cached.get("collection") or req.collection)
         mime_type = asset_info.get("type", "application/octet-stream")
+
 
         provenance_data = {
             "provider": cached.get("provider", "Element84 Earth Search (AWS)"),
@@ -299,7 +420,7 @@ class STACAcquisitionService:
             "platform": cached.get("platform"),
             "modality": cached.get("modality", "OPTICAL"),
             "asset_key": req.asset_key,
-            "asset_href": clean_url
+            "asset_href": SafeWindowedCOGReader._sanitize_url(clean_url)
         }
 
         # Check if asset metadata reports file size exceeding the safety cap
@@ -482,7 +603,7 @@ class STACAcquisitionService:
                 )
 
         except Exception as dl_err:
-            logger.error(f"Error downloading asset from {clean_url}: {dl_err}")
+            logger.error(f"Error downloading asset from {SafeWindowedCOGReader._sanitize_url(clean_url)}: {dl_err}")
             return STACRetrieveResponse(
                 status="error",
                 scene_id=req.scene_id,
@@ -633,23 +754,10 @@ class STACAcquisitionService:
             )
 
         clean_url = self._format_accessible_href(asset_info.get("href", ""))
-
-        # Handle Planetary Computer SAS token if needed
-        if "blob.core.windows.net" in clean_url or "planetarycomputer.microsoft.com" in clean_url:
-            if "?" not in clean_url:
-                try:
-                    col = req.collection or (cached.get("collection") if cached else "sentinel-1-rtc")
-                    token_url = f"https://planetarycomputer.microsoft.com/api/sas/v1/token/{col}"
-                    with httpx.Client(timeout=10.0) as pc_client:
-                        token_resp = pc_client.get(token_url)
-                        if token_resp.status_code == 200:
-                            token = token_resp.json().get("token")
-                            if token:
-                                clean_url = f"{clean_url}?{token}"
-                except Exception as pc_err:
-                    logger.warning(f"Planetary Computer SAS signing attempt warning: {pc_err}")
+        clean_url = self._sign_url_if_needed(clean_url, collection=req.collection or (cached.get("collection") if cached else "sentinel-1-rtc"))
 
         # Execute safe windowed COG read
+
         try:
             arr, meta = SafeWindowedCOGReader.read_cog_window(
                 url=clean_url,
@@ -669,7 +777,7 @@ class STACAcquisitionService:
                 error=f"Windowed retrieval failed: {str(wre)}"
             )
         except Exception as err:
-            logger.error(f"Error during windowed COG read for {clean_url}: {err}")
+            logger.error(f"Error during windowed COG read for {SafeWindowedCOGReader._sanitize_url(clean_url)}: {err}")
             return STACRetrieveResponse(
                 status="error",
                 scene_id=req.scene_id,
@@ -711,15 +819,15 @@ class STACAcquisitionService:
         # Build provenance
         prov_summary = cached.get("summary") if cached else None
         provenance_data = {
-            "provider": cached.get("provider", "Element84 Earth Search (AWS)") if cached else "STAC Provider",
-            "catalog_url": self.catalog_url,
+            "provider": cached.get("provider") or ("Microsoft Planetary Computer" if "rtc" in str(cached.get("collection", "")).lower() else "Element84 Earth Search (AWS)") if cached else "STAC Provider",
+            "catalog_url": cached.get("catalog_url") or self.catalog_url if cached else self.catalog_url,
             "collection": req.collection or (cached.get("collection") if cached else "unknown"),
             "scene_id": req.scene_id,
             "datetime": getattr(prov_summary, "datetime", None) or (cached.get("datetime") if cached else None),
             "sensor": getattr(prov_summary, "sensor", None) or (cached.get("sensor") if cached else meta.get("tags", {}).get("SENSOR")),
             "modality": getattr(prov_summary, "modality", None) or (cached.get("modality") if cached else ("SAR" if "vv" in req.asset_key.lower() or "rtc" in req.asset_key.lower() else "OPTICAL")),
             "asset_key": req.asset_key,
-            "asset_href": clean_url,
+            "asset_href": SafeWindowedCOGReader._sanitize_url(clean_url),
             "windowed_crop": True,
             "aoi_bbox": req.aoi_bbox,
             "target_role": req.target_role or "primary",
@@ -738,6 +846,8 @@ class STACAcquisitionService:
         category = "scientific_raster" if raw_cat in ("scientific_raster", "rgb_visual_raster", "single_band_spectral", "multispectral_cube") else raw_cat
         limitations = list(validation_report.get("scientific_limitations", []))
         raster_meta = validation_report.get("raster_metadata", {})
+        if "transfer_telemetry" in meta:
+            raster_meta["transfer_telemetry"] = meta["transfer_telemetry"]
 
         # Stage 10: Radiometric Quality Screening Evaluation
         quality_screening_data = None
@@ -889,8 +999,9 @@ class STACAcquisitionService:
             total_budget = req.max_bytes if req.max_bytes is not None else 20 * 1024 * 1024
             cumulative_transferred = 0
 
-            vv_url = self._format_accessible_href(vv_info.get("href", ""))
-            vh_url = self._format_accessible_href(vh_info.get("href", ""))
+            vv_url = self._sign_url_if_needed(self._format_accessible_href(vv_info.get("href", "")), collection=req.collection or (cached.get("collection") if cached else "sentinel-1-rtc"))
+            vh_url = self._sign_url_if_needed(self._format_accessible_href(vh_info.get("href", "")), collection=req.collection or (cached.get("collection") if cached else "sentinel-1-rtc"))
+
 
             # Execute safe windowed read for VV
             try:
@@ -1075,8 +1186,8 @@ class STACAcquisitionService:
 
             prov_summary = cached.get("summary") if cached else None
             provenance_data = {
-                "provider": cached.get("provider", "STAC Provider") if cached else "STAC Provider",
-                "catalog_url": self.catalog_url,
+                "provider": cached.get("provider", "Microsoft Planetary Computer") if cached else "Microsoft Planetary Computer",
+                "catalog_url": cached.get("catalog_url") or self.mpc_catalog_url,
                 "collection": req.collection or (cached.get("collection") if cached else "sentinel-1-rtc"),
                 "scene_id": req.scene_id,
                 "datetime": getattr(prov_summary, "datetime", None) or (cached.get("datetime") if cached else None),
@@ -1084,8 +1195,8 @@ class STACAcquisitionService:
                 "modality": "SAR",
                 "polarization": "DUAL_VV_VH",
                 "bands_acquired": ["VV", "VH"],
-                "vv_href": vv_url,
-                "vh_href": vh_url,
+                "vv_href": SafeWindowedCOGReader._sanitize_url(vv_url),
+                "vh_href": SafeWindowedCOGReader._sanitize_url(vh_url),
                 "windowed_crop": True,
                 "aoi_bbox": req.aoi_bbox,
                 "target_role": req.target_role or "secondary",
@@ -1180,9 +1291,10 @@ class STACAcquisitionService:
         total_budget = req.max_bytes if req.max_bytes is not None else 20 * 1024 * 1024
         cumulative_transferred = 0
 
-        b04_url = self._format_accessible_href(b04_info.get("href", ""))
-        b08_url = self._format_accessible_href(b08_info.get("href", ""))
-        scl_url = self._format_accessible_href(scl_info.get("href", "")) if scl_info else None
+        b04_url = self._sign_url_if_needed(self._format_accessible_href(b04_info.get("href", "")), collection=req.collection or (cached.get("collection") if cached else "sentinel-2-l2a"))
+        b08_url = self._sign_url_if_needed(self._format_accessible_href(b08_info.get("href", "")), collection=req.collection or (cached.get("collection") if cached else "sentinel-2-l2a"))
+        scl_url = self._sign_url_if_needed(self._format_accessible_href(scl_info.get("href", "")), collection=req.collection or (cached.get("collection") if cached else "sentinel-2-l2a")) if scl_info else None
+
 
         # Execute safe windowed read for B04 (Red)
         try:
@@ -1432,17 +1544,17 @@ class STACAcquisitionService:
 
         prov_summary = cached.get("summary") if cached else None
         provenance_data = {
-            "provider": cached.get("provider", "Element84 Earth Search (AWS)") if cached else "STAC Provider",
-            "catalog_url": self.catalog_url,
+            "provider": cached.get("provider", "Element84 Earth Search (AWS)") if cached else "Element84 Earth Search (AWS)",
+            "catalog_url": cached.get("catalog_url") or self.catalog_url,
             "collection": req.collection or (cached.get("collection") if cached else "sentinel-2-l2a"),
             "scene_id": req.scene_id,
             "datetime": getattr(prov_summary, "datetime", None) or (cached.get("datetime") if cached else None),
             "sensor": getattr(prov_summary, "sensor", None) or (cached.get("sensor") if cached else b04_meta.get("tags", {}).get("SENSOR", "Sentinel-2")),
             "modality": "OPTICAL",
             "bands_acquired": ["B04", "B08"] + (["SCL"] if aligned_scl is not None else []),
-            "b04_href": b04_url,
-            "b08_href": b08_url,
-            "scl_href": scl_url,
+            "b04_href": SafeWindowedCOGReader._sanitize_url(b04_url),
+            "b08_href": SafeWindowedCOGReader._sanitize_url(b08_url),
+            "scl_href": SafeWindowedCOGReader._sanitize_url(scl_url) if scl_url else None,
             "windowed_crop": True,
             "aoi_bbox": req.aoi_bbox,
             "target_role": req.target_role or "primary",
@@ -1562,6 +1674,24 @@ class STACAcquisitionService:
                 h_px = max(1, min(src.height - row_off, int(np.ceil(raw_win.height))))
 
                 clamped_win = rasterio.windows.Window(col_off, row_off, w_px, h_px)
+
+                # Transfer budget check on expected read buffer
+                item_bytes = np.dtype(src.dtypes[0]).itemsize if src.dtypes else 2
+                expected_read_bytes = int(w_px * h_px * src.count * item_bytes)
+                budget = req.max_cumulative_bytes if getattr(req, "max_cumulative_bytes", None) is not None else 20 * 1024 * 1024
+                if expected_read_bytes > budget:
+                    return STACCompositeRetrieveResponse(
+                        status="error",
+                        scene_id=req.scene_id,
+                        collection=req.collection or "sentinel-2-l2a",
+                        category="unsupported",
+                        filename=name_part,
+                        mime_type="image/tiff",
+                        size_bytes=0,
+                        data_base64="",
+                        error=f"Cumulative transfer limit of {budget} bytes exceeded: window read requires {expected_read_bytes} bytes."
+                    )
+
                 data = src.read(window=clamped_win)
                 win_transform = src.window_transform(clamped_win)
                 meta = {
@@ -1859,6 +1989,24 @@ class STACAcquisitionService:
                 h_px = max(1, min(src.height - row_off, int(np.ceil(raw_win.height))))
 
                 clamped_win = rasterio.windows.Window(col_off, row_off, w_px, h_px)
+
+                # Transfer budget check on expected read buffer
+                item_bytes = np.dtype(src.dtypes[0]).itemsize if src.dtypes else 2
+                expected_read_bytes = int(w_px * h_px * src.count * item_bytes)
+                budget = req.max_bytes if getattr(req, "max_bytes", None) is not None else 20 * 1024 * 1024
+                if expected_read_bytes > budget:
+                    return STACRetrieveResponse(
+                        status="error",
+                        scene_id=req.scene_id,
+                        asset_key=req.asset_key,
+                        category="unsupported",
+                        filename=name_part,
+                        mime_type="image/tiff",
+                        size_bytes=0,
+                        data_base64="",
+                        error=f"Cumulative transfer limit of {budget} bytes exceeded: window read requires {expected_read_bytes} bytes."
+                    )
+
                 data = src.read(window=clamped_win)
                 if src.count == 1:
                     data = data[0]
@@ -2132,10 +2280,12 @@ class STACAcquisitionService:
         hostname = urlparse(url).hostname or ""
         return any(hostname == allowed or hostname.endswith("." + allowed) for allowed in self.ALLOWED_DOWNLOAD_HOSTS)
 
-    def _handle_catalog_error(self, req: STACSearchRequest, error_msg: str, dt_str: Optional[str]) -> STACSearchResponse:
+    def _handle_catalog_error(self, req: STACSearchRequest, error_msg: str, dt_str: Optional[str], catalog_url: Optional[str] = None) -> STACSearchResponse:
+        cat_url = catalog_url or self.catalog_url
         return STACSearchResponse(
             status="error",
-            catalog_url=self.catalog_url,
+            catalog_url=cat_url,
+            provider="Microsoft Planetary Computer" if "planetarycomputer" in cat_url else "Element84 Earth Search (AWS)",
             search_bbox=req.bbox,
             search_datetime=dt_str,
             collection_requested=req.collection or "all",
@@ -2143,6 +2293,7 @@ class STACAcquisitionService:
             error=error_msg,
             scenes=[]
         )
+
 
 # Global Acquisition Service Instance
 stac_service = STACAcquisitionService()

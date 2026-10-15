@@ -20,6 +20,14 @@ export interface AnalyzePayload {
   }[];
   query: string;
   mode: AnalysisMode | 'auto';
+  aoi_bbox?: number[];
+  start_date?: string;
+  end_date?: string;
+  t1_start_date?: string;
+  t1_end_date?: string;
+  t2_start_date?: string;
+  t2_end_date?: string;
+  max_cloud_cover?: number;
   metadata?: Record<string, any>;
 }
 

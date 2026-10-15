@@ -12,7 +12,7 @@ class STACSearchRequest(BaseModel):
     end_date: Optional[str] = Field(None, description="End date (YYYY-MM-DD or ISO 8601)")
     collection: Optional[str] = Field(
         default="sentinel-2-l2a", 
-        description="Collection ID: 'sentinel-2-l2a' (Optical), 'sentinel-1-grd' (SAR), or 'all'"
+        description="Collection ID: 'sentinel-2-l2a' (Optical), 'sentinel-1-rtc' (SAR RTC), 'sentinel-1-grd' (SAR GRD), or 'all'"
     )
     max_cloud_cover: Optional[float] = Field(
         default=30.0, 
@@ -21,6 +21,8 @@ class STACSearchRequest(BaseModel):
         description="Maximum cloud cover percentage (0-100) for optical acquisitions"
     )
     limit: Optional[int] = Field(default=10, ge=1, le=50, description="Maximum number of scenes to return")
+    catalog_url: Optional[str] = Field(default=None, description="Optional custom STAC catalog URL override")
+
 
 class STACAssetSummary(BaseModel):
     key: str = Field(..., description="Asset key, e.g. thumbnail, visual, red, vv, etc.")
@@ -368,6 +370,9 @@ class STACOpticalSARSearchRequest(BaseModel):
     sar_end_date: Optional[str] = None
     max_cloud_cover: Optional[float] = Field(default=25.0, ge=0.0, le=100.0)
     limit: Optional[int] = Field(default=6, ge=1, le=20)
+    optical_collection: Optional[str] = Field(default="sentinel-2-l2a", description="Optical collection ID")
+    sar_collection: Optional[str] = Field(default="sentinel-1-rtc", description="SAR collection ID (default sentinel-1-rtc)")
+
 
 
 class STACOpticalSARSearchResponse(BaseModel):

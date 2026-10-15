@@ -12,9 +12,16 @@ import {
   Loader2, 
   Compass, 
   Maximize2,
-  Info
+  Info,
+  Calendar,
+  Cloud,
+  Clock,
+  ChevronDown,
+  ChevronUp,
+  Sliders,
+  CheckCircle2
 } from 'lucide-react';
-import { AOIBounds } from '../types';
+import { AOIBounds, AOIAnalysisConfig } from '../types';
 import { 
   DEMO_REGIONS, 
   DemoRegion, 
@@ -23,10 +30,13 @@ import {
   normalizeLongitude,
   calculateSphericalAreaKm2 
 } from '../utils/geoBounds';
+import { validateBiTemporalDateRanges } from '../utils/dateValidation';
 
 export interface MapViewerProps {
   selectedAOI: AOIBounds | null;
   onAOIChange: (aoi: AOIBounds | null) => void;
+  aoiConfig?: AOIAnalysisConfig;
+  onAOIConfigChange?: (config: AOIAnalysisConfig) => void;
   className?: string;
 }
 
@@ -55,6 +65,8 @@ const BASEMAP_CONFIGS = {
 export const MapViewer: React.FC<MapViewerProps> = ({
   selectedAOI,
   onAOIChange,
+  aoiConfig,
+  onAOIConfigChange,
   className = ''
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
@@ -67,6 +79,34 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   const [tileErrorOccurred, setTileErrorOccurred] = useState<boolean>(false);
   const [isDrawingMode, setIsDrawingMode] = useState<boolean>(false);
   const [activeDemoId, setActiveDemoId] = useState<string | null>(null);
+  const [isAnalysisDrawerOpen, setIsAnalysisDrawerOpen] = useState<boolean>(true);
+
+  const [internalConfig, setInternalConfig] = useState<AOIAnalysisConfig>({
+    startDate: '2024-01-01',
+    endDate: '2024-03-31',
+    t1StartDate: '2023-01-01',
+    t1EndDate: '2023-06-30',
+    t2StartDate: '2023-07-01',
+    t2EndDate: '2023-12-31',
+    maxCloudCover: 20
+  });
+
+  const config = aoiConfig || internalConfig;
+  const updateConfig = (patch: Partial<AOIAnalysisConfig>) => {
+    const next = { ...config, ...patch };
+    if (onAOIConfigChange) {
+      onAOIConfigChange(next);
+    } else {
+      setInternalConfig(next);
+    }
+  };
+
+  const bitemporalValidation = validateBiTemporalDateRanges(
+    config.t1StartDate,
+    config.t1EndDate,
+    config.t2StartDate,
+    config.t2EndDate
+  );
 
   // Mouse drag tracking for rectangle selection
   const isMouseDownRef = useRef<boolean>(false);
@@ -496,13 +536,149 @@ export const MapViewer: React.FC<MapViewerProps> = ({
           )}
         </div>
 
-        {/* Network & Offline Disclaimer Notice */}
-        <div className="text-[10px] text-slate-500 font-sans flex items-center gap-1.5 self-end sm:self-auto">
-          <Info className="w-3 h-3 text-slate-600 shrink-0" />
-          <span>Online basemap tiles require active internet connection.</span>
+        <div className="flex items-center gap-3 self-end sm:self-auto">
+          {/* Toggle Analysis Parameters Drawer Button */}
+          <button
+            onClick={() => setIsAnalysisDrawerOpen(!isAnalysisDrawerOpen)}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-xl border transition-all flex items-center gap-1.5 ${
+              isAnalysisDrawerOpen
+                ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 shadow-sm'
+                : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-700'
+            }`}
+            title="Configure bi-temporal date windows and optical cloud filter"
+          >
+            <Sliders className="w-3.5 h-3.5 text-cyan-400" />
+            <span>AOI Analysis Settings</span>
+            {isAnalysisDrawerOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+          </button>
+
+          {/* Network & Offline Disclaimer Notice */}
+          <div className="text-[10px] text-slate-500 font-sans flex items-center gap-1.5">
+            <Info className="w-3 h-3 text-slate-600 shrink-0" />
+            <span>Online tiles require internet.</span>
+          </div>
         </div>
 
       </div>
+
+      {/* AOI Analysis Parameters Drawer: Bi-Temporal Dates & Optical Cloud Filter */}
+      {isAnalysisDrawerOpen && (
+        <div className="border-t border-slate-800 bg-slate-950/95 p-4 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Calendar className="w-4 h-4 text-cyan-400" />
+              <span className="text-xs font-mono font-bold text-slate-200 uppercase tracking-wider">
+                Automated AOI Analysis Settings
+              </span>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-950 text-cyan-300 border border-cyan-800 font-mono">
+                STAC Search &amp; Bounded Acquisition
+              </span>
+            </div>
+            
+            {/* Live Chronological Status Indicator */}
+            {bitemporalValidation.isValid ? (
+              <div className="flex items-center gap-1.5 text-[11px] font-mono text-emerald-400 bg-emerald-950/40 px-2.5 py-1 rounded-lg border border-emerald-800/60">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Valid Bi-Temporal Chronology</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 text-[11px] font-mono text-rose-300 bg-rose-950/60 px-2.5 py-1 rounded-lg border border-rose-800/80">
+                <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
+                <span>{bitemporalValidation.error}</span>
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+            {/* Window 1: Pre-Event (T1) */}
+            <div className="md:col-span-4 p-3 rounded-xl bg-slate-900/70 border border-cyan-900/50 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-mono font-bold text-cyan-300 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-cyan-400" />
+                  PRE-EVENT (T1 - BASELINE)
+                </span>
+                <span className="text-[10px] text-slate-500 font-mono">Reference</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                <div>
+                  <label className="text-[10px] text-slate-400 block mb-1">START DATE</label>
+                  <input
+                    type="date"
+                    value={config.t1StartDate}
+                    onChange={(e) => updateConfig({ t1StartDate: e.target.value })}
+                    className="w-full px-2 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 focus:outline-none focus:border-cyan-500 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-slate-400 block mb-1">END DATE</label>
+                  <input
+                    type="date"
+                    value={config.t1EndDate}
+                    onChange={(e) => updateConfig({ t1EndDate: e.target.value })}
+                    className="w-full px-2 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 focus:outline-none focus:border-cyan-500 text-xs font-mono"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Window 2: Post-Event (T2) */}
+            <div className="md:col-span-4 p-3 rounded-xl bg-slate-900/70 border border-indigo-900/50 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-mono font-bold text-indigo-300 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-indigo-400" />
+                  POST-EVENT (T2 - CHANGED)
+                </span>
+                <span className="text-[10px] text-slate-500 font-mono">Impact state</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                <div>
+                  <label className="text-[10px] text-slate-400 block mb-1">START DATE</label>
+                  <input
+                    type="date"
+                    value={config.t2StartDate}
+                    onChange={(e) => updateConfig({ t2StartDate: e.target.value })}
+                    className="w-full px-2 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 focus:outline-none focus:border-indigo-500 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-slate-400 block mb-1">END DATE</label>
+                  <input
+                    type="date"
+                    value={config.t2EndDate}
+                    onChange={(e) => updateConfig({ t2EndDate: e.target.value })}
+                    className="w-full px-2 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 focus:outline-none focus:border-indigo-500 text-xs font-mono"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Cloud Cover Threshold Slider */}
+            <div className="md:col-span-4 p-3 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-mono font-bold text-slate-300 flex items-center gap-1.5">
+                  <Cloud className="w-3.5 h-3.5 text-cyan-400" />
+                  MAX OPTICAL CLOUD COVER
+                </span>
+                <span className="text-xs font-mono font-bold text-cyan-300 px-2 py-0.5 rounded bg-cyan-950/80 border border-cyan-800">
+                  {config.maxCloudCover}%
+                </span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="5"
+                value={config.maxCloudCover}
+                onChange={(e) => updateConfig({ maxCloudCover: Number(e.target.value) })}
+                className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-400"
+              />
+              <p className="text-[10px] text-slate-500 font-mono">
+                Filters out Sentinel-2 scenes with cloud cover exceeding {config.maxCloudCover}% during STAC search.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

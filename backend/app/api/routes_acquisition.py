@@ -279,31 +279,38 @@ def search_optical_sar_pair_endpoint(request: STACOpticalSARSearchRequest):
     """
     try:
         # Search Optical (Sentinel-2 L2A)
+        opt_col = getattr(request, "optical_collection", None) or "sentinel-2-l2a"
         req_opt = STACSearchRequest(
             bbox=request.bbox,
             start_date=request.optical_start_date,
             end_date=request.optical_end_date,
-            collection="sentinel-2-l2a",
+            collection=opt_col,
             max_cloud_cover=request.max_cloud_cover,
             limit=request.limit
         )
         opt_resp = stac_service.search(req_opt)
 
-        # Search SAR (Sentinel-1 GRD)
+        # Search SAR (Sentinel-1 RTC by default for projected COG windowing)
+        sar_col = getattr(request, "sar_collection", None) or "sentinel-1-rtc"
         req_sar = STACSearchRequest(
             bbox=request.bbox,
             start_date=request.sar_start_date,
             end_date=request.sar_end_date,
-            collection="sentinel-1-grd",
+            collection=sar_col,
             max_cloud_cover=None,
             limit=request.limit
         )
         sar_resp = stac_service.search(req_sar)
 
-        # Determine overall status
+        # Determine overall status and combined provider display
+        sar_label = "Sentinel-1 RTC" if "rtc" in sar_col.lower() else "Sentinel-1"
+        provider_display = opt_resp.provider
+        if sar_resp.provider and sar_resp.provider != opt_resp.provider:
+            provider_display = f"{opt_resp.provider} + {sar_resp.provider}"
+
         if opt_resp.total_results > 0 and sar_resp.total_results > 0:
             status = "success"
-            msg = f"Discovered {opt_resp.total_results} Optical (Sentinel-2) and {sar_resp.total_results} SAR (Sentinel-1) candidate acquisitions for the active AOI."
+            msg = f"Discovered {opt_resp.total_results} Optical (Sentinel-2) and {sar_resp.total_results} SAR ({sar_label}) candidate acquisitions for the active AOI."
         elif opt_resp.total_results > 0 or sar_resp.total_results > 0:
             status = "partial"
             msg = f"Partial cross-sensor match: Optical yielded {opt_resp.total_results} scene(s), SAR yielded {sar_resp.total_results} scene(s)."
@@ -323,7 +330,7 @@ def search_optical_sar_pair_endpoint(request: STACOpticalSARSearchRequest):
 
         return STACOpticalSARSearchResponse(
             status=status,
-            provider=opt_resp.provider or "Element84 Earth Search (AWS)",
+            provider=provider_display,
             search_bbox=request.bbox,
             optical_results=opt_resp,
             sar_results=sar_resp,

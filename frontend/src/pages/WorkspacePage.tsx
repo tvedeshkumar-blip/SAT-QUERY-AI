@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AnalysisMode, AnalysisResponse, PresetPhoto, AOIBounds } from '../types';
+import { AnalysisMode, AnalysisResponse, PresetPhoto, AOIBounds, AOIAnalysisConfig } from '../types';
 import { ImageUploader, UploadedFileState } from '../components/ImageUploader';
 import { QuestionPanel } from '../components/QuestionPanel';
 import { AnalysisResultCard } from '../components/AnalysisResultCard';
@@ -10,6 +10,7 @@ import { MapViewer } from '../components/MapViewer';
 import { AcquisitionPanel } from '../components/AcquisitionPanel';
 import { submitSatQueryAnalysis, AnalyzePayload } from '../services/api';
 import { EARTH_OBSERVATION_PRESETS } from '../utils/presetPhotos';
+import { validateBiTemporalDateRanges } from '../utils/dateValidation';
 
 import { Sparkles, AlertCircle } from 'lucide-react';
 
@@ -21,6 +22,15 @@ export const WorkspacePage: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [response, setResponse] = useState<AnalysisResponse | null>(null);
   const [selectedAOI, setSelectedAOI] = useState<AOIBounds | null>(null);
+  const [aoiConfig, setAoiConfig] = useState<AOIAnalysisConfig>({
+    startDate: '2024-01-01',
+    endDate: '2024-03-31',
+    t1StartDate: '2023-01-01',
+    t1EndDate: '2023-06-30',
+    t2StartDate: '2023-07-01',
+    t2EndDate: '2023-12-31',
+    maxCloudCover: 20
+  });
 
   // Filter preset sample queries for current mode
   const currentPresets = EARTH_OBSERVATION_PRESETS.filter((p) => p.mode === mode);
@@ -69,6 +79,21 @@ export const WorkspacePage: React.FC = () => {
 
   const handleSubmitAnalysis = async () => {
     if (!query.trim()) return;
+
+    // Validate bi-temporal windows if mode is bitemporal
+    if (mode === 'bitemporal') {
+      const val = validateBiTemporalDateRanges(
+        aoiConfig.t1StartDate,
+        aoiConfig.t1EndDate,
+        aoiConfig.t2StartDate,
+        aoiConfig.t2EndDate
+      );
+      if (!val.isValid) {
+        setErrorMsg(`Bi-temporal date validation error: ${val.error}`);
+        return;
+      }
+    }
+
     setIsLoading(true);
     setErrorMsg(null);
 
@@ -86,8 +111,12 @@ export const WorkspacePage: React.FC = () => {
       }));
 
 
-      // Fallback synthetic preset if no file uploaded and mode is not autonomous orchestration or temporal
-      if (imagePayloads.length === 0 && mode !== 'orchestration' && mode !== 'temporal') {
+      const aoiCoords = selectedAOI
+        ? [selectedAOI[0], selectedAOI[1], selectedAOI[2], selectedAOI[3]]
+        : undefined;
+
+      // Fallback synthetic preset only if no file uploaded, no AOI selected, and mode is single
+      if (imagePayloads.length === 0 && !selectedAOI && mode === 'single') {
         const dummyPreset = currentPresets[0] || EARTH_OBSERVATION_PRESETS[0];
         imagePayloads.push({
           data: dummyPreset.imageUrl,
@@ -100,7 +129,20 @@ export const WorkspacePage: React.FC = () => {
       const result = await submitSatQueryAnalysis({
         images: imagePayloads,
         query,
-        mode
+        mode,
+        aoi_bbox: aoiCoords,
+        start_date: aoiConfig.startDate,
+        end_date: aoiConfig.endDate,
+        t1_start_date: aoiConfig.t1StartDate,
+        t1_end_date: aoiConfig.t1EndDate,
+        t2_start_date: aoiConfig.t2StartDate,
+        t2_end_date: aoiConfig.t2EndDate,
+        max_cloud_cover: aoiConfig.maxCloudCover,
+        metadata: {
+          aoi_bbox: aoiCoords,
+          selected_aoi: selectedAOI,
+          aoi_config: aoiConfig
+        }
       });
 
       setResponse(result);
@@ -122,7 +164,12 @@ export const WorkspacePage: React.FC = () => {
       <DemoPresetsBar onLoadDemo={handleLoadDemo} />
 
       {/* Global Interactive Satellite Map & AOI Selection */}
-      <MapViewer selectedAOI={selectedAOI} onAOIChange={setSelectedAOI} />
+      <MapViewer 
+        selectedAOI={selectedAOI} 
+        onAOIChange={setSelectedAOI} 
+        aoiConfig={aoiConfig}
+        onAOIConfigChange={setAoiConfig}
+      />
 
       {/* Satellite Imagery Acquisition & STAC Catalog Search */}
       <AcquisitionPanel 

@@ -21,7 +21,7 @@ import re
 import time
 import uuid
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
 
@@ -33,6 +33,7 @@ from app.agent.conflict_detector import ConflictDetector, ConflictCheckResult
 from app.schemas.analysis import ConflictInfoSchema
 from app.schemas.verification import EvidencePackageSchema, ClaimVerificationItem
 from app.reports.scientific_report import ScientificReportBuilder
+from app.acquisition.windowed_reader import SafeWindowedCOGReader
 
 logger = logging.getLogger("satquery.orchestrator")
 
@@ -79,46 +80,102 @@ class QueryParser:
     """Natural-language remote sensing query parser with ambiguity detection."""
 
     @staticmethod
-    def parse(query: str, has_images: bool = False) -> Dict[str, Any]:
+    def parse(
+        query: str, 
+        has_images: bool = False,
+        aoi_bbox: Optional[List[float]] = None,
+        start_date_in: Optional[str] = None,
+        end_date_in: Optional[str] = None,
+        t1_start_date_in: Optional[str] = None,
+        t1_end_date_in: Optional[str] = None,
+        t2_start_date_in: Optional[str] = None,
+        t2_end_date_in: Optional[str] = None,
+        max_cloud_cover_in: Optional[float] = None,
+        mode: Optional[str] = None
+    ) -> Dict[str, Any]:
         q_lower = query.lower()
 
         # 1. Spatial Resolution
         bbox = None
         location_name = None
 
-        # Check explicit bounding box coordinates e.g. [72.8, 18.9, 72.9, 19.0]
-        coord_match = re.search(r'\[\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*\]', query)
-        if coord_match:
+        # Check explicitly provided AOI bounding box
+        if aoi_bbox and len(aoi_bbox) == 4:
             try:
-                coords = [float(c) for c in coord_match.groups()]
-                # Validate min < max
+                coords = [float(c) for c in aoi_bbox]
                 if coords[0] < coords[2] and coords[1] < coords[3] and -180 <= coords[0] <= 180 and -90 <= coords[1] <= 90:
                     bbox = coords
-                    location_name = "User-Specified Bounding Box"
-            except ValueError:
+                    location_name = "User-Selected AOI"
+            except (ValueError, TypeError):
                 pass
+
+        # Check explicit bounding box coordinates in query string e.g. [72.8, 18.9, 72.9, 19.0]
+        if not bbox:
+            coord_match = re.search(r'\[\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*\]', query)
+            if coord_match:
+                try:
+                    coords = [float(c) for c in coord_match.groups()]
+                    # Validate min < max
+                    if coords[0] < coords[2] and coords[1] < coords[3] and -180 <= coords[0] <= 180 and -90 <= coords[1] <= 90:
+                        bbox = coords
+                        location_name = "User-Specified Bounding Box"
+                except ValueError:
+                    pass
 
         # Check gazetteer names to resolve location_name (and bbox if not already explicitly specified)
         for name, box in GAZETTEER.items():
             if name in q_lower:
                 if not bbox:
                     bbox = box
-                location_name = name.title()
+                if not location_name:
+                    location_name = name.title()
                 break
 
         # 2. Temporal Resolution
-        start_date = None
-        end_date = None
-        t1_date = None
-        t2_date = None
+        t1_start = t1_start_date_in
+        t1_end = t1_end_date_in
+        t2_start = t2_start_date_in
+        t2_end = t2_end_date_in
+
+        # Check bi-temporal date window ordering if provided
+        is_invalid_date_order = False
+        date_order_error = None
+        if t1_start and t1_end and t2_start and t2_end:
+            try:
+                d1s = datetime.fromisoformat(t1_start.replace("Z", "+00:00").split("T")[0])
+                d1e = datetime.fromisoformat(t1_end.replace("Z", "+00:00").split("T")[0])
+                d2s = datetime.fromisoformat(t2_start.replace("Z", "+00:00").split("T")[0])
+                d2e = datetime.fromisoformat(t2_end.replace("Z", "+00:00").split("T")[0])
+                if d1s > d1e:
+                    is_invalid_date_order = True
+                    date_order_error = f"Pre-event start date ({t1_start}) must precede or equal pre-event end date ({t1_end})."
+                elif d2s > d2e:
+                    is_invalid_date_order = True
+                    date_order_error = f"Post-event start date ({t2_start}) must precede or equal post-event end date ({t2_end})."
+                elif d1e >= d2s:
+                    is_invalid_date_order = True
+                    date_order_error = f"Post-event window start ({t2_start}) must be strictly later than pre-event window end ({t1_end})."
+            except Exception as e:
+                is_invalid_date_order = True
+                date_order_error = f"Invalid date format in bi-temporal windows: {e}"
+
+        start_date = start_date_in or t1_start
+        end_date = end_date_in or t2_end
+        t1_date = t1_start or start_date
+        t2_date = t2_end or end_date
 
         # Check ISO dates: YYYY-MM-DD
-        iso_dates = re.findall(r'\b(\d{4}-\d{2}-\d{2})\b', query)
-        if len(iso_dates) >= 2:
-            start_date, end_date = sorted(iso_dates[:2])
-            t1_date, t2_date = start_date, end_date
-        elif len(iso_dates) == 1:
-            start_date = iso_dates[0]
+        if not start_date or not end_date:
+            iso_dates = re.findall(r'\b(\d{4}-\d{2}-\d{2})\b', query)
+            if len(iso_dates) >= 2:
+                s_d, e_d = sorted(iso_dates[:2])
+                if not start_date:
+                    start_date = s_d
+                if not end_date:
+                    end_date = e_d
+                t1_date, t2_date = start_date, end_date
+            elif len(iso_dates) == 1 and not start_date:
+                start_date = iso_dates[0]
 
         # Check Month-Year ranges e.g. "January 2024 to March 2024"
         if not start_date:
@@ -141,6 +198,23 @@ class QueryParser:
                 end_date = f"{y2}-12-31"
                 t1_date, t2_date = f"{y1}-06-01", f"{y2}-06-01"
 
+        # Cloud Cover Threshold parsing
+        cloud_thresh = 20.0
+        if max_cloud_cover_in is not None:
+            try:
+                cloud_thresh = float(max_cloud_cover_in)
+                cloud_thresh = max(0.0, min(100.0, cloud_thresh))
+            except (ValueError, TypeError):
+                cloud_thresh = 20.0
+        else:
+            c_match = re.search(r'(?:cloud(?:s|\s+cover)?\s*(?:<|<=|under|below|less\s+than)\s*(\d+(?:\.\d+)?)\s*%?|(\d+(?:\.\d+)?)\s*%\s*(?:max(?:imum)?\s+)?cloud)', q_lower)
+            if c_match:
+                val = c_match.group(1) or c_match.group(2)
+                try:
+                    cloud_thresh = float(val)
+                except ValueError:
+                    pass
+
         # 3. Intent Detection
         is_temporal_change = any(t in q_lower for t in ["change", "temporal", "difference", "trend", "loss", "gain", "increase", "decrease", "compare", "vs", "versus"])
         is_sar = any(t in q_lower for t in ["sar", "radar", "backscatter", "dprvi", "sentinel-1", "s1", "rtc", "vv", "vh", "polarization"])
@@ -149,10 +223,15 @@ class QueryParser:
         is_grounding = any(t in q_lower for t in ["ground", "locate", "detect", "bounding box", "find", "where is", "where are"])
         is_vqa = any(t in q_lower for t in ["what", "how many", "is there", "describe", "explain", "caption"])
 
-        if is_fusion:
+        # Override or specialize task using caller-specified mode if provided
+        if mode == "optical_sar" or is_fusion:
+            is_fusion = True
             task = "optical_sar"
-        elif is_temporal_change:
+        elif mode in ("bitemporal", "temporal") or is_temporal_change:
+            is_temporal_change = True
             task = "temporal_sar_change" if is_sar else "temporal_optical_change"
+        elif mode == "single":
+            task = "sentinel1_rtc_dprvi" if is_sar else "sentinel2_ndvi"
         elif is_sar:
             task = "sentinel1_rtc_dprvi"
         elif is_optical:
@@ -165,10 +244,11 @@ class QueryParser:
         # 4. Ambiguity Evaluation
         # If images are already provided in the workspace, spatial location and dates are implicitly present
         missing_params = []
-        if not has_images:
+        is_offline_demo = mode == "offline" or "offline" in q_lower or "demo" in q_lower
+        if not has_images and not is_offline_demo:
             if not bbox:
                 missing_params.append("spatial_location")
-            if is_temporal_change and not (start_date and end_date):
+            if is_temporal_change and not (start_date and end_date) and not (t1_start and t2_end):
                 missing_params.append("temporal_date_range")
 
         is_ambiguous = len(missing_params) > 0
@@ -192,6 +272,13 @@ class QueryParser:
             "end_date": end_date,
             "t1_date": t1_date,
             "t2_date": t2_date,
+            "t1_start_date": t1_start,
+            "t1_end_date": t1_end,
+            "t2_start_date": t2_start,
+            "t2_end_date": t2_end,
+            "max_cloud_cover": cloud_thresh,
+            "is_invalid_date_order": is_invalid_date_order,
+            "date_order_error": date_order_error,
             "is_temporal_change": is_temporal_change,
             "is_sar": is_sar,
             "is_optical": is_optical,
@@ -208,6 +295,46 @@ class MultiStepOrchestrator:
 
     def __init__(self):
         self.tool_registry = tool_registry
+
+    @staticmethod
+    def _resolve_temporal_search_windows(parsed: Dict[str, Any]) -> Tuple[Tuple[str, str], Tuple[str, str]]:
+        """Resolves distinct, non-overlapping search windows for T1 (pre-event) and T2 (post-event)."""
+        if parsed.get("t1_start_date") and parsed.get("t1_end_date") and parsed.get("t2_start_date") and parsed.get("t2_end_date"):
+            return (parsed["t1_start_date"], parsed["t1_end_date"]), (parsed["t2_start_date"], parsed["t2_end_date"])
+
+        s_date = parsed.get("start_date") or "2023-01-01"
+        e_date = parsed.get("end_date") or "2024-01-01"
+        t1_date = parsed.get("t1_date")
+        t2_date = parsed.get("t2_date")
+
+        try:
+            d_start = datetime.fromisoformat(s_date.replace("Z", "+00:00").split("T")[0])
+            d_end = datetime.fromisoformat(e_date.replace("Z", "+00:00").split("T")[0])
+            if d_end <= d_start:
+                d_end = datetime(d_start.year + 1, d_start.month, d_start.day)
+        except Exception:
+            return ("2023-01-01", "2023-06-30"), ("2023-07-01", "2024-01-01")
+
+        if t1_date and t2_date and t1_date != t2_date:
+            try:
+                d_t1 = datetime.fromisoformat(t1_date.replace("Z", "+00:00").split("T")[0])
+                d_t2 = datetime.fromisoformat(t2_date.replace("Z", "+00:00").split("T")[0])
+                if d_t1 < d_t2:
+                    w1_start = max(d_start, d_t1 - timedelta(days=30)).strftime("%Y-%m-%d")
+                    w1_end = min(d_t2 - timedelta(days=1), d_t1 + timedelta(days=30)).strftime("%Y-%m-%d")
+                    w2_start = max(d_t1 + timedelta(days=1), d_t2 - timedelta(days=30)).strftime("%Y-%m-%d")
+                    w2_end = min(d_end, d_t2 + timedelta(days=30)).strftime("%Y-%m-%d")
+                    return (w1_start, w1_end), (w2_start, w2_end)
+            except Exception:
+                pass
+
+        mid_ts = d_start.timestamp() + (d_end.timestamp() - d_start.timestamp()) / 2.0
+        d_mid = datetime.fromtimestamp(mid_ts)
+        w1_start = d_start.strftime("%Y-%m-%d")
+        w1_end = d_mid.strftime("%Y-%m-%d")
+        w2_start = (d_mid + timedelta(days=1)).strftime("%Y-%m-%d")
+        w2_end = d_end.strftime("%Y-%m-%d")
+        return (w1_start, w1_end), (w2_start, w2_end)
 
     def _synthesize_claims(
         self,
@@ -409,20 +536,82 @@ class MultiStepOrchestrator:
         self,
         query: str,
         images: Optional[List[Any]] = None,
-        max_bytes: int = MAX_CUMULATIVE_TRANSFER_BYTES
+        max_bytes: int = MAX_CUMULATIVE_TRANSFER_BYTES,
+        aoi_bbox: Optional[List[float]] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        t1_start_date: Optional[str] = None,
+        t1_end_date: Optional[str] = None,
+        t2_start_date: Optional[str] = None,
+        t2_end_date: Optional[str] = None,
+        max_cloud_cover: Optional[float] = None,
+        mode: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         start_time = time.time()
         trace_id = f"orch_{uuid.uuid4().hex[:10]}"
         images = images or []
         has_images = len(images) > 0
 
+        meta = metadata or {}
+        use_offline = (
+            meta.get("use_offline_fixtures") is True
+            or meta.get("offline_mode") is True
+            or meta.get("demo_fixtures") is True
+            or mode == "offline"
+            or "local_sample" in query
+            or "offline" in query.lower()
+            or "demo" in query.lower()
+            or (not (aoi_bbox or meta.get("aoi_bbox")) and not has_images)
+        )
+
         # Step 1: Natural-Language Query Parsing
         trace = ExecutionTraceTracker(task="orchestration")
         trace.add_step("QUERY_RECEIVED", f"Received query: '{query}' ({len(images)} workspace image(s) attached)")
 
-        parsed = QueryParser.parse(query, has_images=has_images)
+        parsed = QueryParser.parse(
+            query=query, 
+            has_images=has_images,
+            aoi_bbox=aoi_bbox or meta.get("aoi_bbox"),
+            start_date_in=start_date or meta.get("start_date"),
+            end_date_in=end_date or meta.get("end_date"),
+            t1_start_date_in=t1_start_date or meta.get("t1_start_date"),
+            t1_end_date_in=t1_end_date or meta.get("t1_end_date"),
+            t2_start_date_in=t2_start_date or meta.get("t2_start_date"),
+            t2_end_date_in=t2_end_date or meta.get("t2_end_date"),
+            max_cloud_cover_in=max_cloud_cover if max_cloud_cover is not None else meta.get("max_cloud_cover"),
+            mode=mode
+        )
+        parsed["use_offline_fixtures"] = use_offline
         task = parsed["task"]
         trace.task = task
+
+        # Check Bi-Temporal Chronological Order
+        if parsed.get("is_invalid_date_order"):
+            trace.add_step("DATE_ORDER_VALIDATION_FAILED", parsed["date_order_error"], status="failed")
+            elapsed = round((time.time() - start_time) * 1000, 2)
+            return {
+                "id": trace_id,
+                "status": "failed",
+                "task": task,
+                "mode": mode or "orchestration",
+                "answer": f"Bi-temporal date validation failed: {parsed['date_order_error']}",
+                "confidence": None,
+                "confidence_label": "Invalid Date Windows",
+                "models": [],
+                "evidence": [],
+                "trace": trace.to_dict(),
+                "metadata": {
+                    "error": parsed["date_order_error"],
+                    "parsed_query": parsed,
+                    "date_validation": {
+                        "is_valid": False,
+                        "error": parsed["date_order_error"]
+                    }
+                },
+                "execution_time_ms": elapsed,
+                "created_at": datetime.utcnow().isoformat() + "Z"
+            }
 
         # Check Ambiguity Gate: If required inputs cannot be determined, ask for clarification
         if parsed["is_ambiguous"]:
@@ -455,6 +644,12 @@ class MultiStepOrchestrator:
             "QUERY_PARSED",
             f"Target: Task={task}, Location={parsed.get('location_name') or 'From Workspace'}, Dates={parsed.get('start_date')} to {parsed.get('end_date')}"
         )
+        trace.add_step(
+            "PARAMETERS_CONFIGURED",
+            f"Configured search: AOI={parsed.get('bbox')}, Cloud Cover Filter<={parsed.get('max_cloud_cover')}%, "
+            f"Pre-Event Window={parsed.get('t1_start_date')} to {parsed.get('t1_end_date')}, "
+            f"Post-Event Window={parsed.get('t2_start_date')} to {parsed.get('t2_end_date')}"
+        )
 
         # Execution Graph State
         execution_steps = []
@@ -472,6 +667,7 @@ class MultiStepOrchestrator:
 
         # Step 3: Execute Plan Steps
         retrieved_scenes = []
+        search_scenes_by_key: Dict[str, List[Dict[str, Any]]] = {}
         for step_def in plan_steps:
             if step_count >= step_budget:
                 trace.add_step("STEP_LIMIT_EXCEEDED", f"Maximum orchestration step limit ({step_budget}) reached.", status="failed")
@@ -479,9 +675,70 @@ class MultiStepOrchestrator:
 
             step_count += 1
             tool_name = step_def["tool"]
-            tool_args = step_def.get("args", {})
+            tool_args = dict(step_def.get("args", {}))
             step_desc = step_def.get("description", tool_name)
             t_start = time.time()
+
+            # Dynamic scene_id resolution for automated retrieval
+            if tool_name == "stac_composite_retrieve" and tool_args.get("scene_id") == "auto":
+                col = tool_args.get("collection", "sentinel-2-l2a")
+                role = tool_args.get("temporal_role")
+                search_key = f"{col}_{role}" if role else col
+                candidates = search_scenes_by_key.get(search_key) or search_scenes_by_key.get(col) or []
+
+                already_retrieved_ids = {s.get("scene_id") for s in retrieved_scenes if s.get("scene_id")}
+                available_candidates = [c for c in candidates if c.get("scene_id") not in already_retrieved_ids]
+                if not available_candidates and candidates:
+                    available_candidates = candidates
+
+                if available_candidates:
+                    chosen = available_candidates[0]
+                    tool_args["scene_id"] = chosen["scene_id"]
+                    step_desc = f"Retrieve bounded {chosen.get('collection', col)} composite window ({chosen['scene_id']})"
+                    trace.add_step(
+                        "SCENE_SELECTED",
+                        f"Selected live {chosen.get('collection', col)} scene '{chosen['scene_id']}' for bounded window acquisition.",
+                        status="completed"
+                    )
+                elif tool_args.get("optional"):
+                    trace.add_step(
+                        "SCENE_SELECTION_SKIPPED",
+                        f"No additional candidate scene available for {col} ({role}); continuing with retrieved scenes.",
+                        status="completed"
+                    )
+                    continue
+                elif parsed.get("allow_offline_fallback", False) or parsed.get("use_offline_fixtures"):
+                    if "rtc" in col.lower() or "sar" in col.lower() or "sentinel-1" in col.lower():
+                        tool_args["scene_id"] = "local_sample_risat_sar_mumbai"
+                        fallback_label = "local offline SAR sample raster (Mumbai)"
+                    elif role == "t2":
+                        tool_args["scene_id"] = "local_sample_temporal_t2_post_monsoon"
+                        fallback_label = "local offline temporal T2 optical sample raster"
+                    elif role == "t1":
+                        tool_args["scene_id"] = "local_sample_temporal_t1_pre_monsoon"
+                        fallback_label = "local offline temporal T1 optical sample raster"
+                    else:
+                        tool_args["scene_id"] = "local_sample_cartosat_optical_bengaluru"
+                        fallback_label = "local offline optical sample raster (Bengaluru)"
+
+                    trace.add_step(
+                        "OFFLINE_FIXTURE_FALLBACK",
+                        f"Live STAC search yielded no available scenes for '{col}'. Falling back to {fallback_label}.",
+                        status="completed"
+                    )
+                else:
+                    err_msg = f"No satellite scenes discovered in STAC collection '{col}' for the requested AOI and date range."
+                    trace.add_step(f"TOOL_{tool_name.upper()}", err_msg, status="failed")
+                    execution_steps.append({
+                        "step_number": step_count,
+                        "tool": tool_name,
+                        "status": "failed",
+                        "latency_ms": 0.0,
+                        "summary": step_desc,
+                        "error": err_msg
+                    })
+                    analysis_metadata.setdefault("errors", []).append(err_msg)
+                    continue
 
             tool = self.tool_registry.get(tool_name)
             if not tool:
@@ -494,6 +751,13 @@ class MultiStepOrchestrator:
             if "retrieve" in tool_name:
                 rem_budget = max_bytes - cumulative_transfer_bytes
                 if rem_budget <= 0:
+                    if tool_args.get("optional"):
+                        trace.add_step(
+                            f"TOOL_{tool_name.upper()}_SKIPPED",
+                            f"Transfer budget of {max_bytes} bytes reached; skipping optional multi-scene retrieval.",
+                            status="completed"
+                        )
+                        continue
                     trace.add_step(f"TOOL_{tool_name.upper()}", f"Cumulative transfer budget of {max_bytes} bytes exhausted.", status="failed")
                     analysis_metadata["budget_exhausted"] = True
                     execution_steps.append({
@@ -508,15 +772,27 @@ class MultiStepOrchestrator:
                 tool_args["max_bytes"] = rem_budget
 
             # Wire outputs from prior retrieval steps into temporal analysis tools
-            if tool_name == "temporal_optical_change" and not tool_args.get("t1_b04"):
-                valid_optical = (
-                    len(retrieved_scenes) >= 2 and
-                    retrieved_scenes[0].get("status") in ("success", None) and
-                    retrieved_scenes[1].get("status") in ("success", None) and
-                    retrieved_scenes[0].get("array") is not None and
-                    retrieved_scenes[1].get("array") is not None
-                )
-                if not valid_optical:
+            if tool_name == "temporal_optical_change" and not tool_args.get("t1_scenes") and not tool_args.get("t1_b04"):
+                t1_retrieved = [
+                    s for s in retrieved_scenes
+                    if s.get("temporal_role") == "t1" and s.get("status") in ("success", None) and s.get("array") is not None
+                ]
+                t2_retrieved = [
+                    s for s in retrieved_scenes
+                    if s.get("temporal_role") == "t2" and s.get("status") in ("success", None) and s.get("array") is not None
+                ]
+
+                # Fallback if temporal_role was not explicitly tagged on items
+                if not t1_retrieved or not t2_retrieved:
+                    valid_opt = [
+                        s for s in retrieved_scenes
+                        if s.get("status") in ("success", None) and s.get("array") is not None
+                    ]
+                    if len(valid_opt) >= 2:
+                        t1_retrieved = [valid_opt[0]]
+                        t2_retrieved = [valid_opt[1]]
+
+                if not t1_retrieved or not t2_retrieved:
                     err_msg = "Upstream Sentinel-2 optical scene retrieval failed or returned incomplete rasters; bi-temporal optical change calculation blocked."
                     trace.add_step(f"TOOL_{tool_name.upper()}", err_msg, status="blocked")
                     execution_steps.append({
@@ -530,28 +806,39 @@ class MultiStepOrchestrator:
                     analysis_metadata["temporal_optical_change"] = {"status": "blocked", "error": err_msg}
                     continue
 
-                s1 = retrieved_scenes[0]
-                s2 = retrieved_scenes[1]
-                arr1 = s1.get("array")
-                arr2 = s2.get("array")
-                meta1 = s1.get("raster_metadata") or s1.get("metadata") or {}
-                meta2 = s2.get("raster_metadata") or s2.get("metadata") or {}
-                b04_1 = arr1[:, :, 0] if arr1.ndim == 3 else arr1
-                b08_1 = arr1[:, :, 1] if arr1.ndim == 3 and arr1.shape[2] > 1 else arr1
-                b04_2 = arr2[:, :, 0] if arr2.ndim == 3 else arr2
-                b08_2 = arr2[:, :, 1] if arr2.ndim == 3 and arr2.shape[2] > 1 else arr2
-                tool_args["t1_b04"] = b04_1
-                tool_args["t1_b08"] = b08_1
-                tool_args["t2_b04"] = b04_2
-                tool_args["t2_b08"] = b08_2
-                if arr1.ndim == 3 and arr1.shape[2] >= 3:
-                    tool_args["t1_scl"] = arr1[:, :, 2]
-                if arr2.ndim == 3 and arr2.shape[2] >= 3:
-                    tool_args["t2_scl"] = arr2[:, :, 2]
-                tool_args["t1_meta"] = meta1
-                tool_args["t2_meta"] = meta2
-                tool_args["t1_datetime"] = parsed.get("t1_date") or meta1.get("datetime") or "2023-01-01T10:00:00Z"
-                tool_args["t2_datetime"] = parsed.get("t2_date") or meta2.get("datetime") or "2024-01-01T10:00:00Z"
+                def extract_scene_dict(s, fallback_id="scene"):
+                    arr = s.get("array")
+                    meta = s.get("raster_metadata") or s.get("metadata") or {}
+                    b04 = arr[:, :, 0] if arr.ndim == 3 else arr
+                    b08 = arr[:, :, 1] if arr.ndim == 3 and arr.shape[2] > 1 else arr
+                    scl = arr[:, :, 2] if arr.ndim == 3 and arr.shape[2] > 2 else None
+                    return {
+                        "scene_id": s.get("scene_id") or meta.get("scene_id") or fallback_id,
+                        "datetime": s.get("datetime") or meta.get("datetime"),
+                        "b04": b04,
+                        "b08": b08,
+                        "scl": scl,
+                        "meta": meta,
+                        "cloud_cover": s.get("cloud_cover"),
+                        "provider": (s.get("provenance") or {}).get("provider")
+                    }
+
+                tool_args["t1_scenes"] = [extract_scene_dict(s, f"t1_{i+1}") for i, s in enumerate(t1_retrieved)]
+                tool_args["t2_scenes"] = [extract_scene_dict(s, f"t2_{i+1}") for i, s in enumerate(t2_retrieved)]
+                tool_args["cloud_threshold"] = parsed.get("max_cloud_cover", 20.0)
+                tool_args["composite_method"] = "median"
+
+                # Maintain legacy scalar args for compatibility
+                tool_args["t1_b04"] = tool_args["t1_scenes"][0]["b04"]
+                tool_args["t1_b08"] = tool_args["t1_scenes"][0]["b08"]
+                tool_args["t2_b04"] = tool_args["t2_scenes"][0]["b04"]
+                tool_args["t2_b08"] = tool_args["t2_scenes"][0]["b08"]
+                tool_args["t1_scl"] = tool_args["t1_scenes"][0]["scl"]
+                tool_args["t2_scl"] = tool_args["t2_scenes"][0]["scl"]
+                tool_args["t1_meta"] = tool_args["t1_scenes"][0]["meta"]
+                tool_args["t2_meta"] = tool_args["t2_scenes"][0]["meta"]
+                tool_args["t1_datetime"] = parsed.get("t1_date") or tool_args["t1_scenes"][0]["datetime"] or "2023-01-01T10:00:00Z"
+                tool_args["t2_datetime"] = parsed.get("t2_date") or tool_args["t2_scenes"][0]["datetime"] or "2024-01-01T10:00:00Z"
 
             elif tool_name == "temporal_sar_change" and not tool_args.get("t1_vv"):
                 valid_sar = (
@@ -664,28 +951,39 @@ class MultiStepOrchestrator:
                     "optical": {
                         "catalog_id": opt_scene.get("scene_id"),
                         "collection": opt_scene.get("collection") or "cartosat-optical-l2",
+                        "provider": opt_prov.get("provider") or ("Element84 Earth Search (AWS)" if "sentinel-2" in str(opt_scene.get("collection", "")).lower() else "Local Demonstration Archive"),
+                        "sensor": opt_prov.get("sensor") or ("Sentinel-2 MSI" if "sentinel-2" in str(opt_scene.get("collection", "")).lower() else "Cartosat-style synthetic demonstration optical scene"),
+                        "datetime": opt_scene.get("datetime") or opt_meta.get("datetime") or (opt_prov.get("datetime") if isinstance(opt_prov, dict) else None),
                         "asset_key": "B04_B08_SCL",
                         "crs": opt_meta.get("crs_display") or opt_meta.get("crs"),
                         "dimensions": f"{opt_meta.get('width', 0)}x{opt_meta.get('height', 0)}",
-                        "validation_status": "validated" if opt_scene.get("status") == "success" else "unsupported"
+                        "validation_status": "validated" if opt_scene.get("status") == "success" else "unsupported",
+                        "asset_hrefs": {k: SafeWindowedCOGReader._sanitize_url(v) for k, v in opt_prov.get("asset_hrefs", {}).items()} if opt_prov.get("asset_hrefs") else None
                     },
                     "sar": {
                         "catalog_id": sar_scene.get("scene_id"),
                         "collection": sar_scene.get("collection") or "risat-c-band-sar",
+                        "provider": sar_prov.get("provider") or ("Microsoft Planetary Computer" if "sentinel-1" in str(sar_scene.get("collection", "")).lower() else "Local Demonstration Archive"),
+                        "sensor": sar_prov.get("sensor") or ("Sentinel-1 C-SAR (RTC)" if "sentinel-1" in str(sar_scene.get("collection", "")).lower() else "RISAT-style synthetic demonstration SAR scene"),
+                        "datetime": sar_scene.get("datetime") or sar_meta.get("datetime") or (sar_prov.get("datetime") if isinstance(sar_prov, dict) else None),
                         "asset_key": "VV_VH",
-                        "sensor": sar_prov.get("sensor") or "RISAT-style synthetic demonstration SAR scene",
                         "polarization": sar_prov.get("polarization") or "DUAL_VV_VH",
                         "calibration_status": sar_prov.get("calibration_quantity") or "linear_power",
                         "terrain_correction_status": sar_prov.get("sar_terrain_layover_shadow_mask") or "unavailable",
                         "crs": sar_meta.get("crs_display") or sar_meta.get("crs"),
                         "dimensions": f"{sar_meta.get('width', 0)}x{sar_meta.get('height', 0)}",
-                        "validation_status": "validated" if sar_scene.get("status") == "success" else "unsupported"
+                        "validation_status": "validated" if sar_scene.get("status") == "success" else "unsupported",
+                        "asset_hrefs": {k: SafeWindowedCOGReader._sanitize_url(v) for k, v in sar_prov.get("asset_hrefs", {}).items()} if sar_prov.get("asset_hrefs") else None
                     },
                     "cross_sensor_verification": {
-                        "spatial_overlap_pct": cs_val.get("spatial_overlap_pct", 0.0),
+                        "spatial_overlap_pct": cs_val.get("spatial_overlap_pct") if cs_val.get("spatial_overlap_pct") is not None else 0.0,
                         "crs_matching": bool(opt_meta.get("crs") and sar_meta.get("crs") and opt_meta.get("crs") == sar_meta.get("crs")),
                         "temporal_delta_days": cs_val.get("temporal_delta_days"),
                         "co_registered": cs_val.get("co_registered", False)
+                    },
+                    "optical_cloud_filter": {
+                        "max_cloud_cover_pct": parsed.get("max_cloud_cover", 20.0),
+                        "actual_cloud_cover_pct": opt_scene.get("cloud_cover") or opt_meta.get("cloud_cover")
                     },
                     "scientific_distinction": {
                         "optical_measurement": "Solar spectral surface reflectance (albedo across visible and NIR wavelengths).",
@@ -757,8 +1055,10 @@ class MultiStepOrchestrator:
                         break
                     else:
                         step_error = tool_out.get("error") or f"Tool returned failure status '{tool_out.get('status')}'"
+                        if "budget" in step_error.lower():
+                            analysis_metadata["budget_exhausted"] = True
                         is_non_retryable = any(kw in step_error.lower() for kw in [
-                            "validation", "degenerate", "identical", "unsupported", "invalid bbox", "crs mismatch"
+                            "validation", "degenerate", "identical", "unsupported", "invalid bbox", "crs mismatch", "budget"
                         ])
                         if is_non_retryable or attempt >= MAX_TOOL_RETRIES:
                             step_status = "failed"
@@ -772,8 +1072,10 @@ class MultiStepOrchestrator:
                 except Exception as tool_err:
                     t_latency = round((time.time() - t_start) * 1000, 2)
                     step_error = str(tool_err)
+                    if "budget" in step_error.lower():
+                        analysis_metadata["budget_exhausted"] = True
                     is_non_retryable = any(kw in step_error.lower() for kw in [
-                        "validation", "degenerate", "identical", "unsupported", "invalid bbox", "crs mismatch"
+                        "validation", "degenerate", "identical", "unsupported", "invalid bbox", "crs mismatch", "budget"
                     ])
                     if is_non_retryable or attempt >= MAX_TOOL_RETRIES:
                         step_status = "failed"
@@ -809,6 +1111,25 @@ class MultiStepOrchestrator:
                 if "size_bytes" in tool_out:
                     cumulative_transfer_bytes += tool_out.get("size_bytes", 0)
 
+                if tool_name == "stac_search" and tool_out.get("status") == "success":
+                    col = tool_args.get("collection", "default")
+                    role = tool_args.get("temporal_role")
+                    search_key = f"{col}_{role}" if role else col
+                    scenes_found = tool_out.get("scenes", [])
+                    search_scenes_by_key[search_key] = scenes_found
+                    search_scenes_by_key.setdefault(col, []).extend(scenes_found)
+
+                    disc_list = analysis_metadata.setdefault("discovered_scenes", [])
+                    for sc in scenes_found:
+                        disc_list.append({
+                            "scene_id": sc.get("scene_id"),
+                            "datetime": sc.get("datetime"),
+                            "collection": sc.get("collection") or col,
+                            "provider": tool_out.get("provider"),
+                            "cloud_cover": sc.get("cloud_cover"),
+                            "sensor": sc.get("sensor")
+                        })
+
                 if tool_name == "stac_composite_retrieve":
                     retrieved_scenes.append(tool_out)
                     scene_prov = tool_out.get("provenance") or {}
@@ -827,22 +1148,40 @@ class MultiStepOrchestrator:
                 if "dprvi_result" in tool_out and tool_out["dprvi_result"]:
                     analysis_metadata["dprvi_result"] = tool_out["dprvi_result"]
                 if "delta_ndvi_mean" in tool_out:
+                    tool_out["parameters"] = {
+                        "t1_window": (parsed.get("t1_start_date"), parsed.get("t1_end_date")),
+                        "t2_window": (parsed.get("t2_start_date"), parsed.get("t2_end_date")),
+                        "max_cloud_cover_pct": parsed.get("max_cloud_cover", 20.0),
+                        "composite_method": tool_out.get("composite_method", "valid_pixel_temporal_median"),
+                        "scl_mask_policy": tool_out.get("scl_mask_policy"),
+                        "t1_scenes_contributing": tool_out.get("contributing_scene_ids_t1", []),
+                        "t2_scenes_contributing": tool_out.get("contributing_scene_ids_t2", []),
+                        "rejected_scenes": tool_out.get("rejected_scenes", []),
+                        "cumulative_transfer_bytes": cumulative_transfer_bytes
+                    }
                     analysis_metadata["temporal_optical_change"] = tool_out
                     if tool_out.get("colorized_preview_base64"):
                         evidence_items.append({
                             "id": "ev_temporal_optical_change_map",
                             "type": "change_map",
                             "title": "Sentinel-2 Calibrated Bi-Temporal NDVI Change Map",
-                            "description": "Joint SCL-screened Delta-NDVI change map (Red: Vegetation Loss, Green: Vegetation Gain, Gray: Stable)",
+                            "description": "Multi-scene SCL-screened Delta-NDVI composite change map (Red: Vegetation Loss, Green: Vegetation Gain, Gray: Stable)",
                             "data_base64": tool_out.get("colorized_preview_base64"),
                             "statistics": {
                                 "mean_delta_ndvi": tool_out.get("delta_ndvi_mean"),
                                 "vegetation_loss_pct": tool_out.get("vegetation_loss_pct"),
                                 "vegetation_gain_pct": tool_out.get("vegetation_gain_pct"),
-                                "joint_clear_pixels": tool_out.get("joint_valid_pixel_count")
+                                "joint_clear_pixels": tool_out.get("joint_valid_pixel_count"),
+                                "composite_method": tool_out.get("composite_method"),
+                                "t1_obs_depth": tool_out.get("t1_mean_observation_count"),
+                                "t2_obs_depth": tool_out.get("t2_mean_observation_count")
                             }
                         })
                 if "delta_dprvi_mean" in tool_out:
+                    tool_out["parameters"] = {
+                        "t1_window": (parsed.get("t1_start_date"), parsed.get("t1_end_date")),
+                        "t2_window": (parsed.get("t2_start_date"), parsed.get("t2_end_date"))
+                    }
                     analysis_metadata["temporal_sar_change"] = tool_out
                     if tool_out.get("colorized_preview_base64"):
                         evidence_items.append({
@@ -888,7 +1227,9 @@ class MultiStepOrchestrator:
             {
                 "scene_id": s.get("scene_id"),
                 "collection": s.get("collection"),
-                "bands": s.get("bands_retrieved") or ["b04", "b08", "scl"]
+                "provider": (s.get("provenance") or {}).get("provider") or ("Element84 Earth Search (AWS)" if "sentinel-2" in str(s.get("collection")).lower() else "Microsoft Planetary Computer"),
+                "bands": s.get("bands_retrieved") or ["b04", "b08", "scl"],
+                "size_bytes": s.get("size_bytes", 0)
             }
             for s in retrieved_scenes
         ]
@@ -997,7 +1338,7 @@ class MultiStepOrchestrator:
                 if v_out:
                     confidence = 0.95 if det_passed else 0.40
                     confidence_label = "Deterministic Verified" if det_passed else "Verification Flagged"
-                    trace.add_step("DETERMINISTIC_VERIFIED", f"Checks A-L: {'PASSED' if det_passed else 'VIOLATIONS DETECTED'} ({len(v_out['failures'])} violation(s))")
+                    trace.add_step("DETERMINISTIC_VERIFIED", f"Checks A-L: {'PASSED' if det_passed else 'VIOLATIONS DETECTED'} ({len(v_out.get('failures', []))} violation(s))")
                 else:
                     confidence = 0.95
                     confidence_label = "Deterministic Verified"
@@ -1071,124 +1412,385 @@ class MultiStepOrchestrator:
         """Formulates an ordered, bounded list of tools to execute based on parsed query."""
         task = parsed["task"]
         bbox = parsed.get("bbox") or [72.8, 18.9, 72.9, 19.0]
+        use_offline = parsed.get("use_offline_fixtures", False)
+        cloud_thresh = parsed.get("max_cloud_cover")
+        if cloud_thresh is None:
+            cloud_thresh = 20.0
         steps = []
 
         if task == "temporal_optical_change":
-            # Search / retrieve / process T1 and T2
-            steps.append({
-                "tool": "stac_composite_retrieve",
-                "args": {
-                    "scene_id": "local_sample_temporal_t1_pre_monsoon" if not has_images else "workspace_img_1",
-                    "aoi_bbox": bbox,
-                    "collection": "sentinel-2-l2a",
-                    "bands": ["b04", "b08", "scl"],
-                    "include_scl": True,
-                    "compute_ndvi": True
-                },
-                "description": "Acquire Pre-Event (T1) Sentinel-2 optical composite with SCL"
-            })
-            steps.append({
-                "tool": "stac_composite_retrieve",
-                "args": {
-                    "scene_id": "local_sample_temporal_t2_post_monsoon" if not has_images else "workspace_img_2",
-                    "aoi_bbox": bbox,
-                    "collection": "sentinel-2-l2a",
-                    "bands": ["b04", "b08", "scl"],
-                    "include_scl": True,
-                    "compute_ndvi": True
-                },
-                "description": "Acquire Post-Event (T2) Sentinel-2 optical composite with SCL"
-            })
-            steps.append({
-                "tool": "temporal_optical_change",
-                "args": {},
-                "description": "Compute bi-temporal Sentinel-2 optical change and SCL filtering"
-            })
+            if not has_images and not use_offline:
+                (t1_start, t1_end), (t2_start, t2_end) = self._resolve_temporal_search_windows(parsed)
+                steps.append({
+                    "tool": "stac_search",
+                    "args": {
+                        "collection": "sentinel-2-l2a",
+                        "bbox": bbox,
+                        "start_date": t1_start,
+                        "end_date": t1_end,
+                        "max_cloud_cover": cloud_thresh,
+                        "temporal_role": "t1",
+                        "limit": 3
+                    },
+                    "description": f"Discover Pre-Event (T1) Sentinel-2 optical scenes ({t1_start} to {t1_end}; cloud<={cloud_thresh}%)"
+                })
+                steps.append({
+                    "tool": "stac_search",
+                    "args": {
+                        "collection": "sentinel-2-l2a",
+                        "bbox": bbox,
+                        "start_date": t2_start,
+                        "end_date": t2_end,
+                        "max_cloud_cover": cloud_thresh,
+                        "temporal_role": "t2",
+                        "limit": 3
+                    },
+                    "description": f"Discover Post-Event (T2) Sentinel-2 optical scenes ({t2_start} to {t2_end}; cloud<={cloud_thresh}%)"
+                })
+                # Primary and secondary candidate retrieval for Pre-Event (T1) multi-scene compositing
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "auto",
+                        "temporal_role": "t1",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-2-l2a",
+                        "bands": ["b04", "b08", "scl"],
+                        "include_scl": True,
+                        "compute_ndvi": True
+                    },
+                    "description": "Acquire Pre-Event (T1) Sentinel-2 optical composite with SCL (Candidate 1)"
+                })
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "auto",
+                        "temporal_role": "t1",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-2-l2a",
+                        "bands": ["b04", "b08", "scl"],
+                        "include_scl": True,
+                        "compute_ndvi": True,
+                        "optional": True
+                    },
+                    "description": "Acquire Pre-Event (T1) Sentinel-2 optical composite with SCL (Candidate 2, Multi-Scene)"
+                })
+                # Primary and secondary candidate retrieval for Post-Event (T2) multi-scene compositing
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "auto",
+                        "temporal_role": "t2",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-2-l2a",
+                        "bands": ["b04", "b08", "scl"],
+                        "include_scl": True,
+                        "compute_ndvi": True
+                    },
+                    "description": "Acquire Post-Event (T2) Sentinel-2 optical composite with SCL (Candidate 1)"
+                })
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "auto",
+                        "temporal_role": "t2",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-2-l2a",
+                        "bands": ["b04", "b08", "scl"],
+                        "include_scl": True,
+                        "compute_ndvi": True,
+                        "optional": True
+                    },
+                    "description": "Acquire Post-Event (T2) Sentinel-2 optical composite with SCL (Candidate 2, Multi-Scene)"
+                })
+                steps.append({
+                    "tool": "temporal_optical_change",
+                    "args": {
+                        "composite_method": "median"
+                    },
+                    "description": "Compute multi-scene bi-temporal Sentinel-2 optical change and SCL filtering"
+                })
+            else:
+                # Search / retrieve / process T1 and T2 using local demo fixtures or workspace images
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "local_sample_temporal_t1_pre_monsoon" if not has_images else "workspace_img_1",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-2-l2a",
+                        "bands": ["b04", "b08", "scl"],
+                        "include_scl": True,
+                        "compute_ndvi": True
+                    },
+                    "description": "Acquire Pre-Event (T1) Sentinel-2 optical composite with SCL"
+                })
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "local_sample_temporal_t2_post_monsoon" if not has_images else "workspace_img_2",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-2-l2a",
+                        "bands": ["b04", "b08", "scl"],
+                        "include_scl": True,
+                        "compute_ndvi": True
+                    },
+                    "description": "Acquire Post-Event (T2) Sentinel-2 optical composite with SCL"
+                })
+                steps.append({
+                    "tool": "temporal_optical_change",
+                    "args": {},
+                    "description": "Compute bi-temporal Sentinel-2 optical change and SCL filtering"
+                })
         elif task == "temporal_sar_change":
-            steps.append({
-                "tool": "stac_composite_retrieve",
-                "args": {
-                    "scene_id": "local_sample_risat_sar_mumbai" if not has_images else "workspace_img_1",
-                    "aoi_bbox": bbox,
-                    "collection": "sentinel-1-rtc",
-                    "bands": ["vv", "vh"],
-                    "compute_dprvi": True
-                },
-                "description": "Acquire Pre-Event (T1) Sentinel-1 RTC dual-pol composite"
-            })
-            steps.append({
-                "tool": "stac_composite_retrieve",
-                "args": {
-                    "scene_id": "local_sample_risat_sar_mumbai" if not has_images else "workspace_img_2",
-                    "aoi_bbox": bbox,
-                    "collection": "sentinel-1-rtc",
-                    "bands": ["vv", "vh"],
-                    "compute_dprvi": True
-                },
-                "description": "Acquire Post-Event (T2) Sentinel-1 RTC dual-pol composite"
-            })
-            steps.append({
-                "tool": "temporal_sar_change",
-                "args": {},
-                "description": "Compute bi-temporal Sentinel-1 RTC SAR backscatter and DpRVI change"
-            })
+            if not has_images and not use_offline:
+                (t1_start, t1_end), (t2_start, t2_end) = self._resolve_temporal_search_windows(parsed)
+                steps.append({
+                    "tool": "stac_search",
+                    "args": {
+                        "collection": "sentinel-1-rtc",
+                        "bbox": bbox,
+                        "start_date": t1_start,
+                        "end_date": t1_end,
+                        "temporal_role": "t1",
+                        "limit": 3
+                    },
+                    "description": f"Discover Pre-Event (T1) Sentinel-1 RTC SAR scenes ({t1_start} to {t1_end})"
+                })
+                steps.append({
+                    "tool": "stac_search",
+                    "args": {
+                        "collection": "sentinel-1-rtc",
+                        "bbox": bbox,
+                        "start_date": t2_start,
+                        "end_date": t2_end,
+                        "temporal_role": "t2",
+                        "limit": 3
+                    },
+                    "description": f"Discover Post-Event (T2) Sentinel-1 RTC SAR scenes ({t2_start} to {t2_end})"
+                })
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "auto",
+                        "temporal_role": "t1",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-1-rtc",
+                        "bands": ["vv", "vh"],
+                        "compute_dprvi": True
+                    },
+                    "description": "Acquire Pre-Event (T1) Sentinel-1 RTC dual-pol composite"
+                })
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "auto",
+                        "temporal_role": "t2",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-1-rtc",
+                        "bands": ["vv", "vh"],
+                        "compute_dprvi": True
+                    },
+                    "description": "Acquire Post-Event (T2) Sentinel-1 RTC dual-pol composite"
+                })
+                steps.append({
+                    "tool": "temporal_sar_change",
+                    "args": {},
+                    "description": "Compute bi-temporal Sentinel-1 RTC SAR backscatter and DpRVI change"
+                })
+            else:
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "local_sample_risat_sar_mumbai" if not has_images else "workspace_img_1",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-1-rtc",
+                        "bands": ["vv", "vh"],
+                        "compute_dprvi": True
+                    },
+                    "description": "Acquire Pre-Event (T1) Sentinel-1 RTC dual-pol composite"
+                })
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "local_sample_risat_sar_mumbai" if not has_images else "workspace_img_2",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-1-rtc",
+                        "bands": ["vv", "vh"],
+                        "compute_dprvi": True
+                    },
+                    "description": "Acquire Post-Event (T2) Sentinel-1 RTC dual-pol composite"
+                })
+                steps.append({
+                    "tool": "temporal_sar_change",
+                    "args": {},
+                    "description": "Compute bi-temporal Sentinel-1 RTC SAR backscatter and DpRVI change"
+                })
         elif task == "optical_sar":
-            # Disentangled sensor-appropriate local fixtures:
-            # Optical: local_sample_cartosat_optical_bengaluru (optical raster)
-            # SAR: local_sample_risat_sar_mumbai (SAR raster)
-            steps.append({
-                "tool": "stac_composite_retrieve",
-                "args": {
-                    "scene_id": "local_sample_cartosat_optical_bengaluru" if not has_images else "workspace_img_1",
-                    "aoi_bbox": bbox,
-                    "collection": "cartosat-optical-l2" if not has_images else "sentinel-2-l2a",
-                    "bands": ["b04", "b08", "scl"],
-                    "include_scl": True,
-                    "compute_ndvi": True
-                },
-                "description": "Acquire optical composite for cross-sensor fusion"
-            })
-            steps.append({
-                "tool": "stac_composite_retrieve",
-                "args": {
-                    "scene_id": "local_sample_risat_sar_mumbai" if not has_images else "workspace_img_2",
-                    "aoi_bbox": bbox,
-                    "collection": "risat-c-band-sar" if not has_images else "sentinel-1-rtc",
-                    "bands": ["vv", "vh"],
-                    "compute_dprvi": True
-                },
-                "description": "Acquire SAR composite for cross-sensor fusion"
-            })
-            steps.append({
-                "tool": "optical_sar_fusion",
-                "args": {},
-                "description": "Execute calibrated Optical and SAR cross-sensor alignment and fusion"
-            })
+            if not has_images and not use_offline:
+                s_date = parsed.get("start_date") or "2023-01-01"
+                e_date = parsed.get("end_date") or "2024-01-01"
+                steps.append({
+                    "tool": "stac_search",
+                    "args": {
+                        "collection": "sentinel-2-l2a",
+                        "bbox": bbox,
+                        "start_date": s_date,
+                        "end_date": e_date,
+                        "max_cloud_cover": cloud_thresh,
+                        "limit": 5
+                    },
+                    "description": f"Discover Sentinel-2 L2A optical scenes via Element84 Earth Search (cloud<={cloud_thresh}%)"
+                })
+                steps.append({
+                    "tool": "stac_search",
+                    "args": {
+                        "collection": "sentinel-1-rtc",
+                        "bbox": bbox,
+                        "start_date": s_date,
+                        "end_date": e_date,
+                        "limit": 5
+                    },
+                    "description": "Discover Sentinel-1 RTC SAR scenes via Microsoft Planetary Computer"
+                })
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "auto",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-2-l2a",
+                        "bands": ["b04", "b08", "scl"],
+                        "include_scl": True,
+                        "compute_ndvi": True
+                    },
+                    "description": "Acquire bounded Sentinel-2 optical composite with SCL"
+                })
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "auto",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-1-rtc",
+                        "bands": ["vv", "vh"],
+                        "compute_dprvi": True
+                    },
+                    "description": "Acquire bounded Sentinel-1 RTC SAR composite"
+                })
+                steps.append({
+                    "tool": "optical_sar_fusion",
+                    "args": {},
+                    "description": "Execute calibrated Optical and SAR cross-sensor alignment and fusion"
+                })
+            else:
+                # Disentangled sensor-appropriate local fixtures:
+                # Optical: local_sample_cartosat_optical_bengaluru (optical raster)
+                # SAR: local_sample_risat_sar_mumbai (SAR raster)
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "local_sample_cartosat_optical_bengaluru" if not has_images else "workspace_img_1",
+                        "aoi_bbox": bbox,
+                        "collection": "cartosat-optical-l2" if not has_images else "sentinel-2-l2a",
+                        "bands": ["b04", "b08", "scl"],
+                        "include_scl": True,
+                        "compute_ndvi": True
+                    },
+                    "description": "Acquire optical composite for cross-sensor fusion"
+                })
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "local_sample_risat_sar_mumbai" if not has_images else "workspace_img_2",
+                        "aoi_bbox": bbox,
+                        "collection": "risat-c-band-sar" if not has_images else "sentinel-1-rtc",
+                        "bands": ["vv", "vh"],
+                        "compute_dprvi": True
+                    },
+                    "description": "Acquire SAR composite for cross-sensor fusion"
+                })
+                steps.append({
+                    "tool": "optical_sar_fusion",
+                    "args": {},
+                    "description": "Execute calibrated Optical and SAR cross-sensor alignment and fusion"
+                })
         elif task == "sentinel1_rtc_dprvi":
-            steps.append({
-                "tool": "stac_composite_retrieve",
-                "args": {
-                    "scene_id": "local_sample_risat_sar_mumbai" if not has_images else "workspace_img_1",
-                    "aoi_bbox": bbox,
-                    "collection": "sentinel-1-rtc",
-                    "bands": ["vv", "vh"],
-                    "compute_dprvi": True
-                },
-                "description": "Acquire Sentinel-1 RTC dual-pol window and compute calibrated DpRVI"
-            })
+            if not has_images and not use_offline:
+                s_date = parsed.get("start_date") or "2023-01-01"
+                e_date = parsed.get("end_date") or "2024-01-01"
+                steps.append({
+                    "tool": "stac_search",
+                    "args": {
+                        "collection": "sentinel-1-rtc",
+                        "bbox": bbox,
+                        "start_date": s_date,
+                        "end_date": e_date,
+                        "limit": 5
+                    },
+                    "description": "Discover Sentinel-1 RTC SAR scenes via Microsoft Planetary Computer"
+                })
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "auto",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-1-rtc",
+                        "bands": ["vv", "vh"],
+                        "compute_dprvi": True
+                    },
+                    "description": "Acquire bounded Sentinel-1 RTC dual-pol composite and compute calibrated DpRVI"
+                })
+            else:
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "local_sample_risat_sar_mumbai" if not has_images else "workspace_img_1",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-1-rtc",
+                        "bands": ["vv", "vh"],
+                        "compute_dprvi": True
+                    },
+                    "description": "Acquire Sentinel-1 RTC dual-pol window and compute calibrated DpRVI"
+                })
         elif task == "sentinel2_ndvi":
-            steps.append({
-                "tool": "stac_composite_retrieve",
-                "args": {
-                    "scene_id": "local_sample_cartosat_optical_bengaluru" if not has_images else "workspace_img_1",
-                    "aoi_bbox": bbox,
-                    "collection": "sentinel-2-l2a",
-                    "bands": ["b04", "b08", "scl"],
-                    "include_scl": True,
-                    "compute_ndvi": True
-                },
-                "description": "Acquire Sentinel-2 L2A window and compute calibrated NDVI with SCL"
-            })
+            if not has_images and not use_offline:
+                s_date = parsed.get("start_date") or "2023-01-01"
+                e_date = parsed.get("end_date") or "2024-01-01"
+                steps.append({
+                    "tool": "stac_search",
+                    "args": {
+                        "collection": "sentinel-2-l2a",
+                        "bbox": bbox,
+                        "start_date": s_date,
+                        "end_date": e_date,
+                        "max_cloud_cover": cloud_thresh,
+                        "limit": 5
+                    },
+                    "description": f"Discover Sentinel-2 L2A optical scenes via Element84 Earth Search (cloud<={cloud_thresh}%)"
+                })
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "auto",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-2-l2a",
+                        "bands": ["b04", "b08", "scl"],
+                        "include_scl": True,
+                        "compute_ndvi": True
+                    },
+                    "description": "Acquire bounded Sentinel-2 L2A optical composite and compute calibrated NDVI"
+                })
+            else:
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "local_sample_cartosat_optical_bengaluru" if not has_images else "workspace_img_1",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-2-l2a",
+                        "bands": ["b04", "b08", "scl"],
+                        "include_scl": True,
+                        "compute_ndvi": True
+                    },
+                    "description": "Acquire Sentinel-2 L2A window and compute calibrated NDVI with SCL"
+                })
         else:
             steps.append({
                 "tool": "vqa_captioning",

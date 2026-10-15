@@ -47,8 +47,10 @@ class SafeWindowedCOGReader:
     REQUEST_TIMEOUT_SECONDS = 15.0
 
     @staticmethod
-    def _sanitize_url(u: str) -> str:
+    def _sanitize_url(u: Optional[str]) -> str:
         """Strips query parameters (e.g. SAS tokens) to prevent leaking credentials in logs/errors."""
+        if not u:
+            return ""
         try:
             parsed = urlparse(u)
             return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"

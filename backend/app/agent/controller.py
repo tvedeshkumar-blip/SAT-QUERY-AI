@@ -42,13 +42,34 @@ class AgentController:
         trace = ExecutionTraceTracker(task=request.mode)
         trace.add_step("QUERY_RECEIVED", f"Received query: '{request.query}' in mode '{request.mode}'")
 
+        aoi_bbox = getattr(request, "aoi_bbox", None) or (request.metadata or {}).get("aoi_bbox")
+        start_date = getattr(request, "start_date", None) or (request.metadata or {}).get("start_date")
+        end_date = getattr(request, "end_date", None) or (request.metadata or {}).get("end_date")
+        t1_start_date = getattr(request, "t1_start_date", None) or (request.metadata or {}).get("t1_start_date")
+        t1_end_date = getattr(request, "t1_end_date", None) or (request.metadata or {}).get("t1_end_date")
+        t2_start_date = getattr(request, "t2_start_date", None) or (request.metadata or {}).get("t2_start_date")
+        t2_end_date = getattr(request, "t2_end_date", None) or (request.metadata or {}).get("t2_end_date")
+        max_cloud_cover = getattr(request, "max_cloud_cover", None)
+        if max_cloud_cover is None and request.metadata:
+            max_cloud_cover = request.metadata.get("max_cloud_cover")
+
         # Dynamic Multi-Step Orchestration Route
         if not request.images or len(request.images) == 0 or request.mode in ("orchestration", "temporal"):
             from app.agent.orchestrator import agent_orchestrator
             orch_res = agent_orchestrator.orchestrate(
                 query=request.query,
                 images=request.images or [],
-                max_bytes=20 * 1024 * 1024
+                max_bytes=20 * 1024 * 1024,
+                aoi_bbox=aoi_bbox,
+                start_date=start_date,
+                end_date=end_date,
+                t1_start_date=t1_start_date,
+                t1_end_date=t1_end_date,
+                t2_start_date=t2_start_date,
+                t2_end_date=t2_end_date,
+                max_cloud_cover=max_cloud_cover,
+                mode=request.mode,
+                metadata=request.metadata or {}
             )
             raw_ev = orch_res.get("evidence", [])
             ev_list = []
