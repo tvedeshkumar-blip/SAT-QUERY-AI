@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AnalysisMode, AnalysisResponse, PresetPhoto, AOIBounds, AOIAnalysisConfig } from '../types';
+import { AnalysisMode, AnalysisResponse, PresetPhoto, AOIBounds, AOIAnalysisConfig, MapOverlayConfig, CompositeInspectorData } from '../types';
 import { ImageUploader, UploadedFileState } from '../components/ImageUploader';
 import { QuestionPanel } from '../components/QuestionPanel';
 import { AnalysisResultCard } from '../components/AnalysisResultCard';
@@ -8,6 +8,7 @@ import { ExecutionTracePanel } from '../components/ExecutionTracePanel';
 import { DemoPresetsBar } from '../components/DemoPresetsBar';
 import { MapViewer } from '../components/MapViewer';
 import { AcquisitionPanel } from '../components/AcquisitionPanel';
+import { CompositeMaskInspector } from '../components/CompositeMaskInspector';
 import { submitSatQueryAnalysis, AnalyzePayload } from '../services/api';
 import { EARTH_OBSERVATION_PRESETS } from '../utils/presetPhotos';
 import { validateBiTemporalDateRanges } from '../utils/dateValidation';
@@ -22,6 +23,7 @@ export const WorkspacePage: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [response, setResponse] = useState<AnalysisResponse | null>(null);
   const [selectedAOI, setSelectedAOI] = useState<AOIBounds | null>(null);
+  const [activeOverlay, setActiveOverlay] = useState<MapOverlayConfig | null>(null);
   const [aoiConfig, setAoiConfig] = useState<AOIAnalysisConfig>({
     startDate: '2024-01-01',
     endDate: '2024-03-31',
@@ -169,6 +171,8 @@ export const WorkspacePage: React.FC = () => {
         onAOIChange={setSelectedAOI} 
         aoiConfig={aoiConfig}
         onAOIConfigChange={setAoiConfig}
+        activeOverlay={activeOverlay}
+        onClearOverlay={() => setActiveOverlay(null)}
       />
 
       {/* Satellite Imagery Acquisition & STAC Catalog Search */}
@@ -221,6 +225,23 @@ export const WorkspacePage: React.FC = () => {
           
           {/* Answer Card */}
           <AnalysisResultCard response={response} />
+
+          {/* Step 7H: Interactive Multi-Scene Composite & SCL Mask Inspector */}
+          {(() => {
+            const compositeInspectorData: CompositeInspectorData | null =
+              (response.evidence?.find((e) => e.inspector_data)?.inspector_data as CompositeInspectorData | undefined) ||
+              (response.metadata?.temporal_optical_change?.visual_inspector as CompositeInspectorData | undefined) ||
+              null;
+            if (!compositeInspectorData) return null;
+            return (
+              <CompositeMaskInspector
+                inspectorData={compositeInspectorData}
+                activeOverlay={activeOverlay}
+                onOverlayChange={setActiveOverlay}
+                isOfflineDemo={Boolean(response.metadata?.use_offline_fixtures || (response.mode as string) === 'offline')}
+              />
+            );
+          })()}
 
           {/* Evidence Viewer */}
           <EvidenceViewer

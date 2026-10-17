@@ -88,13 +88,14 @@ export interface GeoTIFFMetadata {
 
 export interface VisualEvidence {
   id: string;
-  type: 'original' | 'processed' | 'overlay' | 'mask' | 'boxes' | 'change_map' | 'fused';
+  type: 'original' | 'processed' | 'overlay' | 'mask' | 'boxes' | 'change_map' | 'fused' | 'composite_inspector';
   title: string;
   description?: string;
   artifact_url?: string;
   data_base64?: string;
   boxes?: BoundingBox[];
   statistics?: Record<string, number | string>;
+  inspector_data?: CompositeInspectorData;
 }
 
 export interface ExecutionTraceStep {
@@ -762,5 +763,67 @@ export interface STACOpticalSARSearchResponsePayload {
   temporal_delta_days_estimate?: number | null;
   message?: string;
 }
+
+export type CompositeInspectorLayerKey = 'b04_red' | 'b08_nir' | 'obs_depth' | 'scl_mask';
+export type CompositeInspectorPeriod = 't1' | 't2';
+
+export interface CompositeInspectorStats {
+  total_pixels: number;
+  valid_pixels: number;
+  masked_pixels: number;
+  clear_coverage_pct: number;
+  obs_depth_0_count: number;
+  obs_depth_1_count: number;
+  obs_depth_2plus_count: number;
+  mean_obs_depth: number;
+}
+
+export interface CompositeInspectorPeriodData {
+  status: 'success' | 'unavailable' | 'error';
+  reason?: string;
+  shape?: [number, number];
+  bounds?: AOIBounds;
+  crs?: string;
+  layers: {
+    b04_red?: string;
+    b08_nir?: string;
+    obs_depth?: string;
+    scl_mask?: string;
+  };
+  stats: CompositeInspectorStats;
+  contributing_scenes?: Array<{
+    scene_id: string;
+    datetime?: string;
+    cloud_cover?: number;
+    valid_pixel_count?: number;
+    valid_coverage_pct?: number;
+  }>;
+  rejected_scenes?: Array<{
+    scene_id?: string;
+    reason: string;
+  }>;
+  composite_method?: string;
+  scl_mask_policy?: Record<string, any>;
+}
+
+export interface CompositeInspectorData {
+  status: 'success' | 'unsupported_zero_valid_pixels' | 'unavailable' | 'error';
+  t1: CompositeInspectorPeriodData;
+  t2: CompositeInspectorPeriodData;
+  bounds?: AOIBounds;
+  crs?: string;
+  composite_method?: string;
+  scl_mask_policy?: Record<string, any>;
+}
+
+export interface MapOverlayConfig {
+  imageUrl: string;
+  bounds: AOIBounds;
+  opacity: number;
+  title: string;
+  layerKey?: CompositeInspectorLayerKey;
+  period?: CompositeInspectorPeriod;
+}
+
 
 

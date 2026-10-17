@@ -7,6 +7,7 @@ from app.models.grounding.grounder import GroundingProvider, ClassicalBaselineGr
 from app.models.change_detection.change_detector import ChangeDetectionProvider
 from app.models.change_vqa.change_vqa import ChangeVQA
 from app.models.optical_sar.optical_sar_fusion import OpticalSARJointAnalysisProvider
+from app.models.classification.bigearthnet_classifier import BigEarthNetResNet50Classifier
 
 logger = logging.getLogger("satquery.registry")
 
@@ -104,6 +105,19 @@ class ModelRegistry:
                 "license": "Apache-2.0"
             }
         )
+
+        # 7. Land-Cover Multi-Label Classification
+        land_cover_clf = BigEarthNetResNet50Classifier()
+        clf_metadata = {
+            "implementation": "BigEarthNetResNet50Classifier (ResNet-50 10-Band Multi-Label Classifier)",
+            "model_source": "BIFOLD-BigEarthNetv2-0/resnet50-s2-v0.2.0 (reBEN)",
+            "modality": "SENTINEL-2 MULTISPECTRAL (10 BANDS)",
+            "input_requirements": "10 Sentinel-2 bands (B02, B03, B04, B05, B06, B07, B08, B8A, B11, B12)",
+            "device_requirements": "CPU / GPU",
+            "license": "MIT"
+        }
+        self.register("classification", land_cover_clf, metadata=clf_metadata)
+        self.register("land_cover_classification", land_cover_clf, metadata=clf_metadata)
 
     def register(self, task_type: str, model: BaseModel, metadata: Optional[Dict[str, Any]] = None):
         self._models[task_type] = model

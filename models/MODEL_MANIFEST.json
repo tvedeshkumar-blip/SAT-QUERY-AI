@@ -144,5 +144,22 @@
     "requires_gpu": false,
     "fallback": "OpticalSARVisualizationBaseline",
     "notes": "Cross-modal calibrated joint analysis with separate normalization and decibel (dB) scaling."
+  },
+  {
+    "name": "BIFOLD-BigEarthNetv2-0/resnet50-s2-v0.2.0",
+    "model_name": "BIFOLD-BigEarthNetv2-0/resnet50-s2-v0.2.0",
+    "task": "land_cover_classification",
+    "provider": "BigEarthNetResNet50Classifier",
+    "status": "operational",
+    "remote_sensing_adapted": true,
+    "adaptation_status": "remote_sensing_multilabel_classifier",
+    "source": "https://huggingface.co/BIFOLD-BigEarthNetv2-0/resnet50-s2-v0.2.0",
+    "license": "MIT",
+    "weights_available": true,
+    "weights_required": "model.safetensors (~94.5 MB)",
+    "requires_gpu": false,
+    "gpu_required": false,
+    "fallback": null,
+    "notes": "Official Sentinel-2 ResNet-50 multi-label land-cover classification model pre-trained on the refined BigEarthNet v2.0 (reBEN) dataset. Accepts 10 Sentinel-2 bands (B02-B12) normalized with reBEN channel statistics, resized to 120x120, and predicts 19 CORINE Land Cover classes via multi-label sigmoid outputs."
   }
 ]

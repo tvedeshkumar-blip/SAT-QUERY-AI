@@ -52,6 +52,7 @@ class VisualEvidenceSchema(BaseModel):
     data_base64: Optional[str] = None
     boxes: Optional[List[BoundingBoxSchema]] = None
     statistics: Optional[Dict[str, Any]] = None
+    inspector_data: Optional[Dict[str, Any]] = None
 
 class TraceStepSchema(BaseModel):
     step: str

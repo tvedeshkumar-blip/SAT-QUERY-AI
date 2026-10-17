@@ -250,10 +250,28 @@ def build_cloud_masked_optical_composite(
 
                 # SCL categorical reprojection: STRICTLY NEAREST-NEIGHBOR
                 if scl_2d is not None:
+                    scl_trans_in = sc.get("scl_transform") or (sc.get("scl_meta") or {}).get("transform")
+                    scl_crs_in = sc.get("scl_crs") or (sc.get("scl_meta") or {}).get("crs") or sc_crs
+                    if scl_trans_in:
+                        scl_src_trans = Affine(*scl_trans_in[:6])
+                    elif sc_trans and scl_2d.shape[:2] != b04_2d.shape[:2]:
+                        scl_h, scl_w = scl_2d.shape[:2]
+                        b_h, b_w = b04_2d.shape[:2]
+                        scl_src_trans = Affine(
+                            sc_trans[0] * (b_w / scl_w if scl_w > 0 else 1.0),
+                            sc_trans[1],
+                            sc_trans[2],
+                            sc_trans[3],
+                            sc_trans[4] * (b_h / scl_h if scl_h > 0 else 1.0),
+                            sc_trans[5]
+                        )
+                    else:
+                        scl_src_trans = src_trans
+
                     out_scl = np.zeros((h, w), dtype=scl_2d.dtype)
                     reproject(
                         source=scl_2d, destination=out_scl,
-                        src_transform=src_trans, src_crs=sc_crs,
+                        src_transform=scl_src_trans, src_crs=scl_crs_in or sc_crs,
                         dst_transform=dst_trans, dst_crs=target_crs,
                         resampling=Resampling.nearest,
                         src_nodata=m.get("nodata"), dst_nodata=m.get("nodata")
@@ -268,22 +286,43 @@ def build_cloud_masked_optical_composite(
         elif scl_2d is not None and scl_2d.shape[:2] != (h, w):
             # Align 20m SCL to 10m target grid via nearest neighbor
             try:
-                if sc_trans and sc_crs:
-                    src_trans = Affine(*sc_trans[:6])
+                scl_h, scl_w = scl_2d.shape[:2]
+                scl_trans_in = sc.get("scl_transform") or (sc.get("scl_meta") or {}).get("transform")
+                scl_crs_in = sc.get("scl_crs") or (sc.get("scl_meta") or {}).get("crs") or sc_crs
+
+                if scl_trans_in and scl_crs_in:
+                    src_scl_trans = Affine(*scl_trans_in[:6])
+                    src_scl_crs = scl_crs_in
+                elif sc_trans and sc_crs:
+                    scale_x = w / scl_w if scl_w > 0 else 1.0
+                    scale_y = h / scl_h if scl_h > 0 else 1.0
+                    src_scl_trans = Affine(
+                        sc_trans[0] * scale_x,
+                        sc_trans[1],
+                        sc_trans[2],
+                        sc_trans[3],
+                        sc_trans[4] * scale_y,
+                        sc_trans[5]
+                    )
+                    src_scl_crs = sc_crs
+                else:
+                    src_scl_trans = None
+                    src_scl_crs = None
+
+                if src_scl_trans and src_scl_crs and sc_trans and sc_crs:
                     dst_trans = Affine(*sc_trans[:6])
                     out_scl = np.zeros((h, w), dtype=scl_2d.dtype)
                     reproject(
                         source=scl_2d, destination=out_scl,
-                        src_transform=src_trans, src_crs=sc_crs,
+                        src_transform=src_scl_trans, src_crs=src_scl_crs,
                         dst_transform=dst_trans, dst_crs=sc_crs,
                         resampling=Resampling.nearest
                     )
                     aligned_scl = out_scl
                 else:
                     # Simple integer-ratio nearest-neighbor zoom
-                    import math
-                    sy = h // scl_2d.shape[0]
-                    sx = w // scl_2d.shape[1]
+                    sy = max(1, h // scl_h)
+                    sx = max(1, w // scl_w)
                     aligned_scl = np.repeat(np.repeat(scl_2d, sy, axis=0), sx, axis=1)[:h, :w]
             except Exception as scl_err:
                 logger.warning(f"SCL nearest-neighbor alignment failed for {sc_id}: {scl_err}")
@@ -440,6 +479,138 @@ def build_cloud_masked_optical_composite(
     }
 
 
+def convert_rgba_to_base64_png(rgba: np.ndarray) -> str:
+    """Encodes an (H, W, 4) uint8 RGBA array to a base64-encoded PNG image string."""
+    from PIL import Image
+    import io, base64
+    img = Image.fromarray(rgba.astype(np.uint8), mode="RGBA")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
+
+
+def generate_composite_inspector_layers(
+    comp: Optional[Dict[str, Any]], 
+    aoi_bounds: Optional[List[float]] = None
+) -> Dict[str, Any]:
+    """
+    Generates 4 high-fidelity scientific visualization layers for an optical composite:
+    1. b04_red: Grayscale contrast-stretched Red surface reflectance (B04), with masked pixels distinct/dark slate.
+    2. b08_nir: Grayscale contrast-stretched Near-Infrared surface reflectance (B08).
+    3. obs_depth: Categorical observation depth (0 = Crimson warning, 1 = Amber, 2+ = Emerald).
+    4. scl_mask: Categorical SCL validity mask (Clear valid surface = Green, Cloud/Shadow masked = Rose).
+    """
+    if not comp or comp.get("composite_b04") is None:
+        return {
+            "status": "unavailable",
+            "reason": (comp.get("summary") if comp else None) or "Optical composite data unavailable.",
+            "layers": {},
+            "stats": {
+                "total_pixels": 0,
+                "valid_pixels": 0,
+                "masked_pixels": 0,
+                "clear_coverage_pct": 0.0,
+                "obs_depth_0_count": 0,
+                "obs_depth_1_count": 0,
+                "obs_depth_2plus_count": 0,
+                "mean_obs_depth": 0.0
+            },
+            "bounds": aoi_bounds,
+            "shape": None
+        }
+
+    comp_b04 = comp["composite_b04"]
+    comp_b08 = comp.get("composite_b08")
+    valid_mask = comp.get("valid_mask")
+    obs_counts = comp.get("observation_counts")
+    target_grid = comp.get("target_grid") or {}
+
+    h, w = comp_b04.shape[:2]
+    total_pixels = int(h * w)
+
+    if valid_mask is None:
+        valid_mask = np.isfinite(comp_b04) & (np.isfinite(comp_b08) if comp_b08 is not None else True)
+    if obs_counts is None:
+        obs_counts = valid_mask.astype(int)
+
+    # 1. B04 Red Reflectance Layer
+    rgba_b04 = np.zeros((h, w, 4), dtype=np.uint8)
+    rgba_b04[:, :] = [30, 32, 38, 120]  # Dark slate with partial transparency for masked/nodata
+    if np.any(valid_mask):
+        b04_clean = np.where(valid_mask & np.isfinite(comp_b04), comp_b04, np.nan)
+        # BOA Red reflectance scale: 0.0 to 0.30 standard stretch
+        stretched_b04 = np.clip(np.nan_to_num(b04_clean, nan=0.0) / 0.30 * 255.0, 0, 255).astype(np.uint8)
+        rgba_b04[valid_mask, 0] = stretched_b04[valid_mask]
+        rgba_b04[valid_mask, 1] = stretched_b04[valid_mask]
+        rgba_b04[valid_mask, 2] = stretched_b04[valid_mask]
+        rgba_b04[valid_mask, 3] = 255
+
+    # 2. B08 NIR Reflectance Layer
+    rgba_b08 = np.zeros((h, w, 4), dtype=np.uint8)
+    rgba_b08[:, :] = [30, 32, 38, 120]  # Dark slate with partial transparency for masked/nodata
+    if comp_b08 is not None and np.any(valid_mask):
+        b08_clean = np.where(valid_mask & np.isfinite(comp_b08), comp_b08, np.nan)
+        # BOA NIR reflectance scale: 0.0 to 0.60 standard stretch
+        stretched_b08 = np.clip(np.nan_to_num(b08_clean, nan=0.0) / 0.60 * 255.0, 0, 255).astype(np.uint8)
+        rgba_b08[valid_mask, 0] = stretched_b08[valid_mask]
+        rgba_b08[valid_mask, 1] = stretched_b08[valid_mask]
+        rgba_b08[valid_mask, 2] = stretched_b08[valid_mask]
+        rgba_b08[valid_mask, 3] = 255
+
+    # 3. Observation Depth Layer (0 = Crimson warning, 1 = Amber, 2+ = Emerald)
+    rgba_depth = np.zeros((h, w, 4), dtype=np.uint8)
+    m0 = obs_counts == 0
+    m1 = obs_counts == 1
+    m2 = obs_counts >= 2
+    rgba_depth[m0] = [220, 38, 38, 220]    # 0 observations: Crimson warning
+    rgba_depth[m1] = [217, 119, 6, 220]   # 1 observation: Amber
+    rgba_depth[m2] = [16, 185, 129, 220]  # 2+ observations: Emerald
+
+    # 4. SCL Validity Mask Layer (Clear Valid vs Masked)
+    rgba_scl = np.zeros((h, w, 4), dtype=np.uint8)
+    rgba_scl[valid_mask] = [34, 197, 94, 200]   # Clear surface: Emerald Green
+    rgba_scl[~valid_mask] = [244, 63, 94, 200]  # Masked (cloud/shadow/cirrus/nodata): Rose
+
+    d0_count = int(np.count_nonzero(m0))
+    d1_count = int(np.count_nonzero(m1))
+    d2_count = int(np.count_nonzero(m2))
+    v_count = int(np.count_nonzero(valid_mask))
+    m_count = total_pixels - v_count
+    cov_pct = round((v_count / max(1, total_pixels)) * 100.0, 2)
+    mean_depth = round(float(np.mean(obs_counts)), 2)
+
+    bounds = aoi_bounds
+    if not bounds and target_grid.get("bounds"):
+        bounds = target_grid["bounds"]
+
+    return {
+        "status": "success",
+        "shape": [h, w],
+        "bounds": bounds,
+        "crs": target_grid.get("crs", "EPSG:4326"),
+        "layers": {
+            "b04_red": convert_rgba_to_base64_png(rgba_b04),
+            "b08_nir": convert_rgba_to_base64_png(rgba_b08),
+            "obs_depth": convert_rgba_to_base64_png(rgba_depth),
+            "scl_mask": convert_rgba_to_base64_png(rgba_scl)
+        },
+        "stats": {
+            "total_pixels": total_pixels,
+            "valid_pixels": v_count,
+            "masked_pixels": m_count,
+            "clear_coverage_pct": cov_pct,
+            "obs_depth_0_count": d0_count,
+            "obs_depth_1_count": d1_count,
+            "obs_depth_2plus_count": d2_count,
+            "mean_obs_depth": mean_depth
+        },
+        "contributing_scenes": comp.get("contributing_scenes", []),
+        "rejected_scenes": comp.get("rejected_scenes", []),
+        "composite_method": comp.get("composite_method", "valid_pixel_temporal_median"),
+        "scl_mask_policy": comp.get("scl_mask_policy")
+    }
+
+
 def compute_temporal_optical_change(
     t1_b04: Any = None,
     t1_b08: Any = None,
@@ -460,12 +631,16 @@ def compute_temporal_optical_change(
     loss_threshold: float = -0.15,
     gain_threshold: float = 0.15,
     reflectance_scale: float = 10000.0,
-    cloud_threshold: Optional[float] = None
+    cloud_threshold: Optional[float] = None,
+    aoi_bounds: Optional[List[float]] = None,
+    **kwargs
 ) -> Dict[str, Any]:
     """
     Computes calibrated temporal Sentinel-2 NDVI change with multi-scene SCL cloud masking composites.
     Supports either explicit individual band arrays, structured dictionary inputs, or full multi-scene candidate lists.
     """
+    if aoi_bounds is None:
+        aoi_bounds = (t1_meta or {}).get("bounds") or (t2_meta or {}).get("bounds") or kwargs.get("aoi_bbox")
     # Normalize inputs to multi-scene candidate lists for T1 and T2
     if t1_scenes is None:
         if isinstance(t1_b04, list):
@@ -558,6 +733,18 @@ def compute_temporal_optical_change(
         scale_factor=reflectance_scale
     )
 
+    insp_t1 = generate_composite_inspector_layers(comp_t1, aoi_bounds)
+    insp_t2 = generate_composite_inspector_layers(comp_t2, aoi_bounds)
+    inspector_payload = {
+        "status": "success" if (insp_t1.get("status") == "success" or insp_t2.get("status") == "success") else "unavailable",
+        "t1": insp_t1,
+        "t2": insp_t2,
+        "bounds": aoi_bounds or insp_t1.get("bounds") or insp_t2.get("bounds"),
+        "crs": (t1_grid.get("crs") if t1_grid else None) or "EPSG:4326",
+        "composite_method": comp_t1.get("composite_method", f"valid_pixel_temporal_{composite_method}"),
+        "scl_mask_policy": comp_t1.get("scl_mask_policy")
+    }
+
     t1_valid_mask = comp_t1.get("valid_mask")
     t2_valid_mask = comp_t2.get("valid_mask")
 
@@ -601,6 +788,7 @@ def compute_temporal_optical_change(
             "composite_method": f"valid_pixel_temporal_{composite_method}",
             "t1_composite": comp_t1,
             "t2_composite": comp_t2,
+            "visual_inspector": inspector_payload,
             "contributing_scene_ids_t1": [s["scene_id"] for s in comp_t1.get("contributing_scenes", [])],
             "contributing_scene_ids_t2": [s["scene_id"] for s in comp_t2.get("contributing_scenes", [])],
             "rejected_scenes": comp_t1.get("rejected_scenes", []) + comp_t2.get("rejected_scenes", []),
@@ -741,6 +929,7 @@ def compute_temporal_optical_change(
         "composite_method": f"valid_pixel_temporal_{composite_method}",
         "t1_composite": comp_t1,
         "t2_composite": comp_t2,
+        "visual_inspector": inspector_payload,
         "contributing_scene_ids_t1": [s["scene_id"] for s in comp_t1.get("contributing_scenes", [])],
         "contributing_scene_ids_t2": [s["scene_id"] for s in comp_t2.get("contributing_scenes", [])],
         "rejected_scenes": comp_t1.get("rejected_scenes", []) + comp_t2.get("rejected_scenes", []),

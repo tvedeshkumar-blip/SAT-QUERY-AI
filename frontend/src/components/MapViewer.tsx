@@ -21,7 +21,7 @@ import {
   Sliders,
   CheckCircle2
 } from 'lucide-react';
-import { AOIBounds, AOIAnalysisConfig } from '../types';
+import { AOIBounds, AOIAnalysisConfig, MapOverlayConfig } from '../types';
 import { 
   DEMO_REGIONS, 
   DemoRegion, 
@@ -37,6 +37,8 @@ export interface MapViewerProps {
   onAOIChange: (aoi: AOIBounds | null) => void;
   aoiConfig?: AOIAnalysisConfig;
   onAOIConfigChange?: (config: AOIAnalysisConfig) => void;
+  activeOverlay?: MapOverlayConfig | null;
+  onClearOverlay?: () => void;
   className?: string;
 }
 
@@ -67,12 +69,15 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   onAOIChange,
   aoiConfig,
   onAOIConfigChange,
+  activeOverlay,
+  onClearOverlay,
   className = ''
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
   const currentTileLayerRef = useRef<L.TileLayer | null>(null);
   const rectangleLayerRef = useRef<L.Rectangle | null>(null);
+  const imageOverlayRef = useRef<L.ImageOverlay | null>(null);
 
   const [activeBasemap, setActiveBasemap] = useState<BasemapType>('satellite');
   const [isTileLoading, setIsTileLoading] = useState<boolean>(false);
@@ -209,6 +214,43 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       rectangleLayerRef.current = rect;
     }
   }, [selectedAOI]);
+
+  // Synchronize raster image overlay when activeOverlay changes
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
+    if (!activeOverlay) {
+      if (imageOverlayRef.current) {
+        map.removeLayer(imageOverlayRef.current);
+        imageOverlayRef.current = null;
+      }
+      return;
+    }
+
+    const [minLon, minLat, maxLon, maxLat] = activeOverlay.bounds;
+    const latLngBounds = L.latLngBounds([minLat, minLon], [maxLat, maxLon]);
+
+    if (imageOverlayRef.current) {
+      imageOverlayRef.current.setUrl(activeOverlay.imageUrl);
+      imageOverlayRef.current.setBounds(latLngBounds);
+      imageOverlayRef.current.setOpacity(activeOverlay.opacity);
+    } else {
+      const overlay = L.imageOverlay(activeOverlay.imageUrl, latLngBounds, {
+        opacity: activeOverlay.opacity,
+        interactive: false
+      });
+      overlay.addTo(map);
+      imageOverlayRef.current = overlay;
+    }
+  }, [activeOverlay?.imageUrl, activeOverlay?.bounds]);
+
+  // Synchronize opacity dynamically without reloading image
+  useEffect(() => {
+    if (imageOverlayRef.current && activeOverlay) {
+      imageOverlayRef.current.setOpacity(activeOverlay.opacity);
+    }
+  }, [activeOverlay?.opacity]);
 
   // Click & Drag AOI Drawing Logic
   useEffect(() => {
@@ -414,6 +456,39 @@ export const MapViewer: React.FC<MapViewerProps> = ({
               <Trash2 className="w-3.5 h-3.5" />
               Clear
             </button>
+          )}
+
+          {/* Active Raster Overlay Badge & Controls */}
+          {activeOverlay && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-cyan-950/80 border border-cyan-800 text-cyan-200 text-xs shadow-sm">
+              <span className="font-mono text-[10px] font-bold text-cyan-400 uppercase tracking-wider">
+                Overlay: {activeOverlay.title} ({Math.round(activeOverlay.opacity * 100)}%)
+              </span>
+              <button
+                onClick={() => {
+                  if (mapInstanceRef.current && activeOverlay.bounds) {
+                    const [minLon, minLat, maxLon, maxLat] = activeOverlay.bounds;
+                    mapInstanceRef.current.fitBounds(
+                      [[minLat, minLon], [maxLat, maxLon]],
+                      { padding: [40, 40], maxZoom: 14, animate: true }
+                    );
+                  }
+                }}
+                className="hover:text-cyan-100 underline text-[11px] ml-1 font-semibold"
+                title="Fit map view to active raster overlay"
+              >
+                Fit
+              </button>
+              {onClearOverlay && (
+                <button
+                  onClick={onClearOverlay}
+                  className="hover:text-rose-400 ml-1 text-slate-400 font-bold"
+                  title="Remove overlay from map"
+                >
+                  &times;
+                </button>
+              )}
+            </div>
           )}
 
           {/* Reset View */}

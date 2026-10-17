@@ -19,7 +19,9 @@ from app.schemas.acquisition import (
     STACOpticalSARPairValidateRequest,
     STACOpticalSARPairValidateResponse,
     STACOpticalSARSearchRequest,
-    STACOpticalSARSearchResponse
+    STACOpticalSARSearchResponse,
+    CompositeInspectorRequest,
+    CompositeInspectorResponse
 )
 from app.acquisition.stac_service import stac_service
 from app.acquisition.asset_validator import AssetValidator
@@ -340,6 +342,91 @@ def search_optical_sar_pair_endpoint(request: STACOpticalSARSearchRequest):
     except Exception as e:
         logger.error(f"Error executing optical+SAR cross-sensor search: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/acquisition/composite-inspector", response_model=CompositeInspectorResponse)
+def get_composite_mask_inspector(request: CompositeInspectorRequest):
+    """
+    Returns visual evidence layers for multi-scene Sentinel-2 temporal composites:
+    1. Red surface reflectance (B04)
+    2. NIR surface reflectance (B08)
+    3. Valid observation depth (0, 1, 2+)
+    4. Categorical SCL cloud and shadow validity mask
+    """
+    try:
+        from app.remote_sensing.temporal import (
+            compute_temporal_optical_change, 
+            generate_composite_inspector_layers
+        )
+        from app.remote_sensing.geotiff import parse_geotiff_or_image
+
+        t1_scenes = list(request.t1_scenes or [])
+        t2_scenes = list(request.t2_scenes or [])
+
+        # Parse base64 raster if provided
+        if request.t1_data_base64 and not t1_scenes:
+            arr1, meta1 = parse_geotiff_or_image(request.t1_data_base64, "t1.tif")
+            if arr1 is not None and arr1.ndim >= 2:
+                b04_1 = arr1[:, :, 0] if arr1.ndim == 3 else arr1
+                b08_1 = arr1[:, :, 1] if arr1.ndim == 3 and arr1.shape[2] > 1 else arr1
+                scl_1 = arr1[:, :, 2] if arr1.ndim == 3 and arr1.shape[2] > 2 else None
+                t1_scenes.append({
+                    "scene_id": "t1_input",
+                    "b04": b04_1,
+                    "b08": b08_1,
+                    "scl": scl_1,
+                    "meta": meta1,
+                    "datetime": meta1.get("acquisition_date") or meta1.get("datetime") or "2023-01-15T10:00:00Z"
+                })
+
+        if request.t2_data_base64 and not t2_scenes:
+            arr2, meta2 = parse_geotiff_or_image(request.t2_data_base64, "t2.tif")
+            if arr2 is not None and arr2.ndim >= 2:
+                b04_2 = arr2[:, :, 0] if arr2.ndim == 3 else arr2
+                b08_2 = arr2[:, :, 1] if arr2.ndim == 3 and arr2.shape[2] > 1 else arr2
+                scl_2 = arr2[:, :, 2] if arr2.ndim == 3 and arr2.shape[2] > 2 else None
+                t2_scenes.append({
+                    "scene_id": "t2_input",
+                    "b04": b04_2,
+                    "b08": b08_2,
+                    "scl": scl_2,
+                    "meta": meta2,
+                    "datetime": meta2.get("acquisition_date") or meta2.get("datetime") or "2023-07-15T10:00:00Z"
+                })
+
+        if not t1_scenes and not t2_scenes:
+            return CompositeInspectorResponse(
+                status="unavailable",
+                message="No candidate scenes or GeoTIFF data provided for composite inspection.",
+                t1={"status": "unavailable", "layers": {}, "stats": {"total_pixels": 0, "valid_pixels": 0, "clear_coverage_pct": 0.0}},
+                t2={"status": "unavailable", "layers": {}, "stats": {"total_pixels": 0, "valid_pixels": 0, "clear_coverage_pct": 0.0}},
+                bounds=request.aoi_bbox
+            )
+
+        res = compute_temporal_optical_change(
+            t1_scenes=t1_scenes,
+            t2_scenes=t2_scenes,
+            composite_method=request.composite_method or "median",
+            allow_uncertain_as_clear=request.allow_uncertain_as_clear or False,
+            aoi_bounds=request.aoi_bbox
+        )
+
+        inspector = res.get("visual_inspector") or {}
+        return CompositeInspectorResponse(
+            status=inspector.get("status", res.get("status", "success")),
+            message=res.get("summary"),
+            t1=inspector.get("t1", {}),
+            t2=inspector.get("t2", {}),
+            bounds=inspector.get("bounds") or request.aoi_bbox,
+            crs=inspector.get("crs", "EPSG:4326"),
+            composite_method=inspector.get("composite_method", f"valid_pixel_temporal_{request.composite_method or 'median'}"),
+            scl_mask_policy=inspector.get("scl_mask_policy"),
+            scientific_limitations=res.get("scientific_limitations", [])
+        )
+    except Exception as e:
+        logger.error(f"Error computing composite inspector: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 

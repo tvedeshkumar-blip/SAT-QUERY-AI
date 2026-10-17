@@ -10,7 +10,7 @@ model:
 
 dataset:
   name: "BigEarthNet-MM"
-  source: "http://bigearth.net/"
+  source: "https://huggingface.co/BIFOLD-BigEarthNetv2-0"
   modalities: ["optical_s2", "sar_s1"]
   split_ratio: [0.8, 0.1, 0.1]
   batch_size: 16

@@ -1177,6 +1177,23 @@ class MultiStepOrchestrator:
                                 "t2_obs_depth": tool_out.get("t2_mean_observation_count")
                             }
                         })
+                    if tool_out.get("visual_inspector") and tool_out["visual_inspector"].get("status") == "success":
+                        vi = tool_out["visual_inspector"]
+                        t1_insp = vi.get("t1", {})
+                        evidence_items.append({
+                            "id": "ev_temporal_composite_inspector",
+                            "type": "mask",
+                            "title": "Sentinel-2 Multi-Scene Composite & SCL Mask Inspector",
+                            "description": "Interactive visual inspection of Red (B04), NIR (B08), observation depth, and SCL cloud masking for T1/T2 composites.",
+                            "data_base64": t1_insp.get("layers", {}).get("obs_depth") or tool_out.get("colorized_preview_base64"),
+                            "statistics": {
+                                "t1_clear_coverage_pct": t1_insp.get("stats", {}).get("clear_coverage_pct"),
+                                "t1_mean_obs_depth": t1_insp.get("stats", {}).get("mean_obs_depth"),
+                                "t2_clear_coverage_pct": vi.get("t2", {}).get("stats", {}).get("clear_coverage_pct"),
+                                "t2_mean_obs_depth": vi.get("t2", {}).get("stats", {}).get("mean_obs_depth")
+                            },
+                            "inspector_data": vi
+                        })
                 if "delta_dprvi_mean" in tool_out:
                     tool_out["parameters"] = {
                         "t1_window": (parsed.get("t1_start_date"), parsed.get("t1_end_date")),

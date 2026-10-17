@@ -385,4 +385,27 @@ class STACOpticalSARSearchResponse(BaseModel):
     message: Optional[str] = None
 
 
+class CompositeInspectorRequest(BaseModel):
+    t1_data_base64: Optional[str] = Field(None, description="Optional T1 composite GeoTIFF base64")
+    t2_data_base64: Optional[str] = Field(None, description="Optional T2 composite GeoTIFF base64")
+    t1_scenes: Optional[List[Dict[str, Any]]] = Field(None, description="List of T1 candidate scenes")
+    t2_scenes: Optional[List[Dict[str, Any]]] = Field(None, description="List of T2 candidate scenes")
+    aoi_bbox: Optional[List[float]] = Field(None, min_length=4, max_length=4, description="[min_lon, min_lat, max_lon, max_lat] in EPSG:4326")
+    composite_method: Optional[str] = Field(default="median", description="Composite method: median or mean")
+    allow_uncertain_as_clear: Optional[bool] = Field(default=False)
+
+
+class CompositeInspectorResponse(BaseModel):
+    status: str = Field(..., description="'success', 'unsupported_zero_valid_pixels', 'unavailable', or 'error'")
+    message: Optional[str] = None
+    t1: Dict[str, Any] = Field(default_factory=dict, description="T1 inspector layers, bounds, and stats")
+    t2: Dict[str, Any] = Field(default_factory=dict, description="T2 inspector layers, bounds, and stats")
+    bounds: Optional[List[float]] = None
+    crs: Optional[str] = None
+    composite_method: Optional[str] = None
+    scl_mask_policy: Optional[Dict[str, Any]] = None
+    scientific_limitations: List[str] = Field(default_factory=list)
+
+
+
 

@@ -186,3 +186,46 @@ The following publicly available foundation models have been audited for future 
 * **License:** CDLA-Permissive-1.0
 * **Input Modality:** Sentinel-2 (B2-B8) + Sentinel-1 (VV, VH)
 * **Hardware Requirements:** 8GB VRAM
+
+---
+
+## 6. Integrated Official Sentinel-2 Land-Cover Classification Model (`BIFOLD-BigEarthNetv2-0/resnet50-s2-v0.2.0`)
+
+### Land-Cover Classification Model Backbone: `BIFOLD-BigEarthNetv2-0/resnet50-s2-v0.2.0`
+* **Model Identifier:** `BIFOLD-BigEarthNetv2-0/resnet50-s2-v0.2.0`
+* **Source / HuggingFace Repository:** [https://huggingface.co/BIFOLD-BigEarthNetv2-0/resnet50-s2-v0.2.0](https://huggingface.co/BIFOLD-BigEarthNetv2-0/resnet50-s2-v0.2.0)
+* **Dataset:** Refined BigEarthNet Dataset for Remote Sensing Image Analysis (reBEN / BigEarthNet v2.0)
+* **License:** MIT License
+* **Task:** Multi-Label Remote Sensing Land-Cover Classification (19 CORINE Land Cover classes)
+* **Provider:** `BigEarthNetResNet50Classifier` (`backend/app/models/classification/bigearthnet_classifier.py`)
+* **Remote-Sensing Adapted:** **YES** (`is_remote_sensing_adapted = true`, `adaptation_status = "remote_sensing_multilabel_classifier"`)
+* **Architecture:** ResNet-50 backbone with 10-channel `conv1` (`Conv2d(10, 64, kernel=7, stride=2, padding=3, bias=False)`) and 19-class `fc` (`Linear(2048, 19)`).
+* **Weights Required:** `model.safetensors` (~94.5 MB, 23.6M parameters).
+* **Input Specifications & Preprocessing:**
+  - **Required Bands (10 Sentinel-2 bands in ESA/reBEN order):** `B02` (Blue), `B03` (Green), `B04` (Red), `B05` (Red Edge 1), `B06` (Red Edge 2), `B07` (Red Edge 3), `B08` (NIR), `B8A` (Narrow NIR), `B11` (SWIR-1), `B12` (SWIR-2).
+  - **Spatial Dimensions:** $120 \times 120$ pixels (interpolated bilinearly if input differs).
+  - **Normalization:** Per-channel standardization using official reBEN dataset channel means and standard deviations:
+    - Means: `[438.3721, 614.0557, 588.4096, 942.8433, 1769.9316, 2049.5515, 2193.2920, 2235.5566, 1568.2268, 997.7325]`
+    - Stds: `[607.0269, 603.2968, 684.5688, 738.4327, 1100.4561, 1275.8054, 1369.3717, 1356.5441, 1070.1613, 813.5276]`
+* **Output Label Mapping (19 Lexicographically Sorted Classes):**
+  1. `Agro-forestry areas`
+  2. `Arable land`
+  3. `Beaches, dunes, sands`
+  4. `Broad-leaved forest`
+  5. `Coastal wetlands`
+  6. `Complex cultivation patterns`
+  7. `Coniferous forest`
+  8. `Industrial or commercial units`
+  9. `Inland waters`
+  10. `Inland wetlands`
+  11. `Land principally occupied by agriculture, with significant areas of natural vegetation`
+  12. `Marine waters`
+  13. `Mixed forest`
+  14. `Moors, heathland and sclerophyllous vegetation`
+  15. `Natural grassland and sparsely vegetated areas`
+  16. `Pastures`
+  17. `Permanent crops`
+  18. `Transitional woodland, shrub`
+  19. `Urban fabric`
+* **Output Activation:** Sigmoid activation (`torch.sigmoid()`) yielding independent multi-label probabilities in $[0.0, 1.0]$.
+* **Scientific Integrity & Error Handling:** Strictly requires authentic weights; if weights are missing, corrupt, or network downloads fail, raises clear descriptive errors and sets `status = "model_loading_error"`. Never silently substitutes random weights or fabricates predictions.

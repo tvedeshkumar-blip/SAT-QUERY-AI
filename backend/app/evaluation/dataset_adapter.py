@@ -134,3 +134,12 @@ class CDVQADatasetAdapter(PublicBenchmarkAdapter):
             task="Bi-Temporal Change VQA",
             expected_manifest="cdvqa_test.json"
         )
+
+
+class BigEarthNetAdapter(PublicBenchmarkAdapter):
+    def __init__(self):
+        super().__init__(
+            dataset_name="BigEarthNet-MM",
+            task="Multi-Modal Optical + SAR Classification",
+            expected_manifest="train_manifest.json"
+        )
