@@ -205,3 +205,58 @@ class TestModelRegistryAndDatasetAdapterIntegration:
         with pytest.raises(RuntimeError) as exc_info:
             list(adapter.iterate())
         assert "Cannot iterate over unmounted dataset" in str(exc_info.value)
+
+
+class TestBigEarthNetOrchestrationIntegration:
+    """Verifies end-to-end integration of BigEarthNet land cover classification into orchestrator."""
+
+    def test_query_parser_identifies_land_cover_intent(self):
+        from app.agent.orchestrator import QueryParser
+
+        parsed = QueryParser.parse("Classify CORINE land cover for this Sentinel-2 raster", mode="classification")
+        assert parsed["task"] == "land_cover_classification"
+        assert parsed["is_classification"] is True
+
+        parsed_nl = QueryParser.parse("Identify land-cover classes in Mumbai", mode=None)
+        assert parsed_nl["task"] == "land_cover_classification"
+        assert parsed_nl["is_classification"] is True
+
+    def test_orchestrator_dispatches_land_cover_classification(self, monkeypatch):
+        from app.agent.orchestrator import agent_orchestrator
+        from app.agent.registry import model_registry
+
+        # Register mock model or use real classifier if weights exist
+        model = model_registry.get("classification")
+
+        # Mock predict to return deterministic result for fast regression
+        mock_pred = {
+            "status": "success",
+            "model_id": "BIFOLD-BigEarthNetv2-0/resnet50-s2-v0.2.0",
+            "predicted_classes": ["Arable land", "Complex cultivation patterns"],
+            "top_predictions": [
+                {"label": "Arable land", "probability": 0.88},
+                {"label": "Complex cultivation patterns", "probability": 0.72},
+            ],
+            "class_probabilities": {
+                "Arable land": 0.88,
+                "Complex cultivation patterns": 0.72,
+            },
+            "parameters": {"threshold": 0.5, "input_bands": 10}
+        }
+        monkeypatch.setattr(model, "predict", lambda *args, **kwargs: mock_pred)
+
+        sample_raster = np.random.uniform(500, 3000, (120, 120, 10)).astype(np.float32)
+        resp = agent_orchestrator.orchestrate(
+            query="Classify land cover using BigEarthNet ResNet-50",
+            images=[sample_raster],
+            mode="classification"
+        )
+
+        assert resp["status"] == "success"
+        assert "Arable land" in resp["answer"]
+        assert "BigEarthNet ResNet-50" in resp["answer"]
+        assert any(e["type"] == "classification" for e in resp["evidence"])
+        clf_ev = next(e for e in resp["evidence"] if e["type"] == "classification")
+        assert clf_ev["id"] == "ev_bigearthnet_classification"
+        assert len(clf_ev["statistics"]["top_predictions"]) == 2
+

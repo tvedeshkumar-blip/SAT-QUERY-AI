@@ -121,18 +121,75 @@ def robust_remote_sensing_preprocess(
 def convert_array_to_base64_png(arr: np.ndarray) -> str:
     """
     Converts a NumPy array (RGB or Grayscale uint8) to a Base64-encoded PNG image string.
+    Safely handles rasterio channel-first (C, H, W) and standard (H, W, C) arrays.
     """
+    # 1. Channel-first transpose if rasterio layout (C, H, W)
+    if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and (arr.shape[0] < arr.shape[1] or arr.shape[2] > 4):
+        if arr.shape[0] == 1:
+            arr = arr[0]
+        elif arr.shape[0] in (3, 4):
+            arr = np.transpose(arr[:3], (1, 2, 0))
+    elif arr.ndim == 3 and arr.shape[2] == 1:
+        arr = arr[:, :, 0]
+    elif arr.ndim == 3 and arr.shape[2] > 3:
+        arr = arr[:, :, :3]
+
     arr_uint8 = normalize_to_uint8(arr)
     if arr_uint8.ndim == 2:
         img = Image.fromarray(arr_uint8, mode="L")
-    elif arr_uint8.ndim == 3 and arr_uint8.shape[2] == 1:
-        img = Image.fromarray(arr_uint8[:, :, 0], mode="L")
-    elif arr_uint8.ndim == 3 and arr_uint8.shape[2] >= 3:
-        img = Image.fromarray(arr_uint8[:, :, :3], mode="RGB")
+    elif arr_uint8.ndim == 3 and arr_uint8.shape[2] == 3:
+        img = Image.fromarray(arr_uint8, mode="RGB")
     else:
-        img = Image.fromarray(arr_uint8, mode="L")
+        sq = arr_uint8.squeeze()
+        if sq.ndim == 2:
+            img = Image.fromarray(sq, mode="L")
+        elif sq.ndim == 3 and sq.shape[2] == 3:
+            img = Image.fromarray(sq, mode="RGB")
+        else:
+            img = Image.fromarray(sq[:, :, 0] if sq.ndim == 3 else sq, mode="L")
 
     buffer = io.BytesIO()
     img.save(buffer, format="PNG")
     b64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
     return f"data:image/png;base64,{b64_str}"
+
+
+def make_json_safe(obj: Any) -> Any:
+    """
+    Recursively converts NumPy arrays, NumPy scalars, and nested structures
+    into JSON-serializable Python types.
+    - 2D/3D numpy arrays (including boolean masks) are converted to base64-encoded PNG image strings.
+    - 1D numpy arrays are converted to Python lists.
+    - NumPy scalars (int, float, bool) are converted to native Python primitives.
+    - NaNs and Infs are converted to None.
+    - Preserves nested dicts and lists.
+    """
+    if hasattr(obj, "model_dump"):
+        return make_json_safe(obj.model_dump())
+    if isinstance(obj, np.ndarray):
+        if obj.ndim in (2, 3):
+            try:
+                if obj.dtype == bool:
+                    return convert_array_to_base64_png(obj.astype(np.uint8) * 255)
+                return convert_array_to_base64_png(obj)
+            except Exception:
+                return None
+        elif obj.ndim == 1:
+            return [make_json_safe(x) for x in obj.tolist()]
+        elif obj.ndim == 0:
+            return make_json_safe(obj.item())
+        return None
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, dict):
+        return {k: make_json_safe(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [make_json_safe(v) for v in obj]
+    return obj
+

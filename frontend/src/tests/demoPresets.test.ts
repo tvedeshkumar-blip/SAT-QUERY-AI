@@ -84,20 +84,44 @@ describe('Demo Presets: Dynamic Orchestration & Preset Verification', () => {
     assert.equal(config.files[0].isGeoTIFF, true);
   });
 
-  test('preserves behavior of Demo 3 (Bi-Temporal Change Detection)', () => {
+  test('loads authentic Sentinel-2 GeoTIFF pair and STAC provenance for Demo 3 (Bi-Temporal Change)', async () => {
     const demo3 = DEMO_PRESETS.find((p) => p.id === 'demo3');
     assert.ok(demo3);
     assert.equal(demo3.mode, 'bitemporal');
     assert.equal(demo3.badge, 'CHANGE DETECT');
     assert.equal(demo3.query, 'What changed between these two dates?');
 
-    const config = demo3.load();
+    const config = await demo3.load();
     assert.equal(config.mode, 'bitemporal');
     assert.equal(config.files.length, 2);
-    assert.equal(config.files[0].filename, 'temporal_t1_pre_monsoon.tif');
+
+    // Verify authentic Sentinel-2 GeoTIFF filenames
+    assert.equal(config.files[0].filename, 'S2B_43PGQ_20230528_0_L2A_visual_window_1792262748.tif');
     assert.equal(config.files[0].role, 'primary');
-    assert.equal(config.files[1].filename, 'temporal_t2_post_monsoon.tif');
+    assert.equal(config.files[0].isGeoTIFF, true);
+
+    assert.equal(config.files[1].filename, 'S2A_43PGQ_20231119_0_L2A_visual_window_1792262818.tif');
     assert.equal(config.files[1].role, 'secondary');
+    assert.equal(config.files[1].isGeoTIFF, true);
+
+    // Verify authentic STAC provenance
+    assert.equal(config.files[0].stacProvenance?.scene_id, 'S2B_43PGQ_20230528_0_L2A');
+    assert.equal(config.files[0].stacProvenance?.tile, '43PGQ');
+    assert.equal(config.files[0].stacProvenance?.sensor, 'Sentinel-2B MSI Level-2A');
+    assert.equal(config.files[1].stacProvenance?.scene_id, 'S2A_43PGQ_20231119_0_L2A');
+    assert.equal(config.files[1].stacProvenance?.tile, '43PGQ');
+    assert.equal(config.files[1].stacProvenance?.sensor, 'Sentinel-2A MSI Level-2A');
+
+    // Verify authentic CRS & spatial bounds
+    assert.equal(config.files[0].validation?.raster_metadata?.crs, 'EPSG:32643');
+    assert.equal(config.files[1].validation?.raster_metadata?.crs, 'EPSG:32643');
+    assert.deepEqual(config.aoi_bbox, [77.4491, 13.0597, 77.5444, 13.1531]);
+
+    // Verify honest scientific limitations regarding NDVI and RGB
+    assert.ok(
+      config.files[0].scientificLimitations?.some((l) => l.includes('NDVI') && l.includes('Band 8')),
+      'Must honestly state calibrated NDVI requires near-infrared Band 8'
+    );
   });
 
   test('preserves behavior of Demo 5 (Conflict & Reanalysis)', () => {

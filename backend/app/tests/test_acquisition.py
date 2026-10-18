@@ -181,3 +181,99 @@ def test_stac_retrieve_untrusted_host_blocked():
     resp = service.retrieve(req)
     assert resp.status == "error"
     assert "not in the whitelist" in resp.error
+
+def test_demo_bitemporal_pair_endpoint():
+    """Verify Demo 3 authentic Sentinel-2 GeoTIFF pair endpoint."""
+    res = client.get("/api/v1/acquisition/demo-bitemporal-pair")
+    assert res.status_code == 200
+    data = res.json()
+
+    assert data["status"] == "success"
+    assert data["mode"] == "bitemporal"
+    assert data["query"] == "What changed between these two dates?"
+    assert data["aoi_bbox"] == [77.4491, 13.0597, 77.5444, 13.1531]
+    assert len(data["files"]) == 2
+
+    t1 = data["files"][0]
+    t2 = data["files"][1]
+
+    # Authentic filenames and roles
+    assert t1["filename"] == "S2B_43PGQ_20230528_0_L2A_visual_window_1792262748.tif"
+    assert t1["role"] == "primary"
+    assert t1["isGeoTIFF"] is True
+    assert t1["size"] > 3000000
+    assert t1["dataUrl"].startswith("data:image/tiff;base64,")
+
+    assert t2["filename"] == "S2A_43PGQ_20231119_0_L2A_visual_window_1792262818.tif"
+    assert t2["role"] == "secondary"
+    assert t2["isGeoTIFF"] is True
+    assert t2["size"] > 3000000
+    assert t2["dataUrl"].startswith("data:image/tiff;base64,")
+
+    # Authentic STAC provenance
+    assert t1["stacProvenance"]["scene_id"] == "S2B_43PGQ_20230528_0_L2A"
+    assert t1["stacProvenance"]["tile"] == "43PGQ"
+    assert t1["stacProvenance"]["datetime"] == "2023-05-28T05:26:49Z"
+    assert t1["stacProvenance"]["sensor"] == "Sentinel-2B MSI Level-2A"
+
+    assert t2["stacProvenance"]["scene_id"] == "S2A_43PGQ_20231119_0_L2A"
+    assert t2["stacProvenance"]["tile"] == "43PGQ"
+    assert t2["stacProvenance"]["datetime"] == "2023-11-19T05:27:01Z"
+    assert t2["stacProvenance"]["sensor"] == "Sentinel-2A MSI Level-2A"
+
+    # Authentic raster validation & CRS
+    assert t1["validation"]["status"] == "valid"
+    assert t1["validation"]["raster_metadata"]["crs"] == "EPSG:32643"
+    assert t1["validation"]["raster_metadata"]["width"] == 1024
+    assert t1["validation"]["raster_metadata"]["height"] == 1024
+    assert t1["validation"]["raster_metadata"]["bands"] == 3
+
+    assert t2["validation"]["status"] == "valid"
+    assert t2["validation"]["raster_metadata"]["crs"] == "EPSG:32643"
+    assert t2["validation"]["raster_metadata"]["width"] == 1024
+    assert t2["validation"]["raster_metadata"]["height"] == 1024
+    assert t2["validation"]["raster_metadata"]["bands"] == 3
+
+    # Honest scientific limitations on RGB vs calibrated NDVI
+    assert any("Band 8" in lim for lim in t1["scientificLimitations"])
+    assert any("NDVI" in lim for lim in t1["scientificLimitations"])
+
+def test_demo_bitemporal_pair_analysis_execution():
+    """Verify full remote sensing change detection execution using the authentic Demo 3 pair."""
+    pair_res = client.get("/api/v1/acquisition/demo-bitemporal-pair")
+    assert pair_res.status_code == 200
+    pair = pair_res.json()
+
+    payload = {
+        "images": [
+            {
+                "data": f["dataUrl"],
+                "mimeType": "image/tiff",
+                "filename": f["filename"],
+                "role": f["role"],
+                "asset_category": f["assetCategory"],
+                "provenance": f["stacProvenance"],
+                "scientific_limitations": f["scientificLimitations"]
+            }
+            for f in pair["files"]
+        ],
+        "query": pair["query"],
+        "mode": pair["mode"],
+        "aoi_bbox": pair["aoi_bbox"]
+    }
+
+    res = client.post("/api/v1/analyze", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+
+    meta = data.get("metadata", {})
+    assert meta.get("georeferenced") is True
+    assert meta.get("crs") == "EPSG:32643"
+    assert meta.get("bounds") == [765590.0, 1445120.0, 775830.0, 1455360.0]
+
+    # Verify co-registration assertion and authentic provenance in result
+    assert "Inputs are verified co-registered" in data.get("answer", "")
+    temporal_prov = meta.get("temporal_provenance", {})
+    assert temporal_prov.get("t1", {}).get("catalog_id") == "S2B_43PGQ_20230528_0_L2A"
+    assert temporal_prov.get("t2", {}).get("catalog_id") == "S2A_43PGQ_20231119_0_L2A"
+

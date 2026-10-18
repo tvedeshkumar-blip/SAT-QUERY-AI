@@ -15,7 +15,7 @@ import {
   HelpCircle,
   Play
 } from 'lucide-react';
-import { AnalysisMode, AnalysisResponse, ChatMessage } from '../types';
+import { AnalysisMode, AnalysisResponse, ChatMessage, WorkspaceContext } from '../types';
 import { sendChatMessage, checkChatHealth } from '../services/api';
 import { extractStructuredEvidence } from '../utils/evidenceExtractor';
 
@@ -27,6 +27,7 @@ interface QuestionPanelProps {
   mode: AnalysisMode;
   presetQueries: string[];
   analysisResponse?: AnalysisResponse | null;
+  workspaceContext?: WorkspaceContext | null;
 }
 
 export const QuestionPanel: React.FC<QuestionPanelProps> = ({
@@ -37,6 +38,7 @@ export const QuestionPanel: React.FC<QuestionPanelProps> = ({
   mode,
   presetQueries,
   analysisResponse = null,
+  workspaceContext = null,
 }) => {
   // Conversation session state
   const [conversationId, setConversationId] = useState<string>(() => `conv_${Date.now().toString(36)}`);
@@ -137,6 +139,7 @@ export const QuestionPanel: React.FC<QuestionPanelProps> = ({
         conversation_id: conversationId,
         history: historyPayload,
         evidence: activeEvidence || undefined,
+        workspace_context: workspaceContext || undefined,
       });
 
       const assistantTimestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -239,12 +242,17 @@ export const QuestionPanel: React.FC<QuestionPanelProps> = ({
 
         {/* Action Controls: New Chat & Health Check */}
         <div className="flex items-center gap-2">
-          {activeEvidence && (
+          {activeEvidence ? (
             <span className="hidden sm:inline-flex items-center gap-1 text-[11px] font-mono text-cyan-300 bg-cyan-950/50 px-2 py-1 rounded-md border border-cyan-900">
               <Database className="w-3 h-3 text-cyan-400" />
               Evidence Attached: {analysisResponse?.actual_model_used || analysisResponse?.task}
             </span>
-          )}
+          ) : workspaceContext && workspaceContext.scene_count > 0 ? (
+            <span className="hidden sm:inline-flex items-center gap-1 text-[11px] font-mono text-teal-300 bg-teal-950/50 px-2 py-1 rounded-md border border-teal-900" title="Workspace scene metadata staged">
+              <Database className="w-3 h-3 text-teal-400" />
+              {workspaceContext.scene_count} Scene{workspaceContext.scene_count > 1 ? 's' : ''} Staged
+            </span>
+          ) : null}
 
           <button
             onClick={verifyHealth}

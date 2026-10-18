@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { AnalysisMode, AnalysisResponse, PresetPhoto, AOIBounds, AOIAnalysisConfig, MapOverlayConfig, CompositeInspectorData } from '../types';
 import { ImageUploader, UploadedFileState } from '../components/ImageUploader';
 import { QuestionPanel } from '../components/QuestionPanel';
@@ -12,6 +12,7 @@ import { CompositeMaskInspector } from '../components/CompositeMaskInspector';
 import { submitSatQueryAnalysis, AnalyzePayload } from '../services/api';
 import { EARTH_OBSERVATION_PRESETS } from '../utils/presetPhotos';
 import { validateBiTemporalDateRanges } from '../utils/dateValidation';
+import { buildWorkspaceContext } from '../utils/workspaceContext';
 
 import { Sparkles, AlertCircle } from 'lucide-react';
 
@@ -38,14 +39,26 @@ export const WorkspacePage: React.FC = () => {
   const currentPresets = EARTH_OBSERVATION_PRESETS.filter((p) => p.mode === mode);
   const sampleQueries = currentPresets.flatMap((p) => p.sampleQueries).slice(0, 4);
 
+  // Structured summary of imported scenes and spatial extent for chatbot grounding
+  const workspaceContext = useMemo(() => {
+    const aoiCoords = selectedAOI
+      ? [selectedAOI[0], selectedAOI[1], selectedAOI[2], selectedAOI[3]]
+      : undefined;
+    return buildWorkspaceContext(files, mode, aoiCoords);
+  }, [files, mode, selectedAOI]);
+
   const handleLoadDemo = (config: {
     mode: AnalysisMode;
     query: string;
     files: UploadedFileState[];
+    aoi_bbox?: number[];
   }) => {
     setMode(config.mode);
     setQuery(config.query);
     setFiles(config.files);
+    if (config.aoi_bbox && config.aoi_bbox.length === 4) {
+      setSelectedAOI(config.aoi_bbox as AOIBounds);
+    }
     setResponse(null);
     setErrorMsg(null);
   };
@@ -204,6 +217,7 @@ export const WorkspacePage: React.FC = () => {
             mode={mode}
             presetQueries={sampleQueries}
             analysisResponse={response}
+            workspaceContext={workspaceContext}
           />
         </div>
       </div>

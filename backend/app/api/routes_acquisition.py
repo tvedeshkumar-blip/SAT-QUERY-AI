@@ -428,5 +428,104 @@ def get_composite_mask_inspector(request: CompositeInspectorRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+_CACHED_DEMO_BITEMPORAL_PAIR = None
 
+@router.get("/acquisition/demo-bitemporal-pair")
+def get_demo_bitemporal_pair():
+    """
+    Serves the authentic Sentinel-2 T1 (Pre-Monsoon) and T2 (Post-Monsoon)
+    STAC-acquired GeoTIFFs from data/retrieved/ for Demo 3 (Bi-Temporal Change Detection).
+    Preserves authentic GeoTIFF bytes, CRS (EPSG:32643), spatial bounds, and STAC provenance.
+    """
+    global _CACHED_DEMO_BITEMPORAL_PAIR
+    if _CACHED_DEMO_BITEMPORAL_PAIR is not None:
+        return _CACHED_DEMO_BITEMPORAL_PAIR
 
+    import base64
+    t1_filename = "S2B_43PGQ_20230528_0_L2A_visual_window_1792262748.tif"
+    t2_filename = "S2A_43PGQ_20231119_0_L2A_visual_window_1792262818.tif"
+
+    t1_path = os.path.join(stac_service.retrieval_dir, t1_filename)
+    t2_path = os.path.join(stac_service.retrieval_dir, t2_filename)
+
+    if not os.path.exists(t1_path) or not os.path.exists(t2_path):
+        raise HTTPException(
+            status_code=404,
+            detail="Real Sentinel-2 bi-temporal GeoTIFF scenes not found in data/retrieved/."
+        )
+
+    with open(t1_path, "rb") as f1:
+        t1_bytes = f1.read()
+    with open(t2_path, "rb") as f2:
+        t2_bytes = f2.read()
+
+    t1_b64 = "data:image/tiff;base64," + base64.b64encode(t1_bytes).decode("utf-8")
+    t2_b64 = "data:image/tiff;base64," + base64.b64encode(t2_bytes).decode("utf-8")
+
+    t1_provenance = {
+        "provider": "Element84 Earth Search (AWS)",
+        "catalog_url": "https://earth-search.aws.element84.com/v1",
+        "collection": "sentinel-2-l2a",
+        "scene_id": "S2B_43PGQ_20230528_0_L2A",
+        "datetime": "2023-05-28T05:26:49Z",
+        "sensor": "Sentinel-2B MSI Level-2A",
+        "modality": "OPTICAL",
+        "asset_key": "visual",
+        "tile": "43PGQ",
+        "cloud_cover": 0.0
+    }
+
+    t2_provenance = {
+        "provider": "Element84 Earth Search (AWS)",
+        "catalog_url": "https://earth-search.aws.element84.com/v1",
+        "collection": "sentinel-2-l2a",
+        "scene_id": "S2A_43PGQ_20231119_0_L2A",
+        "datetime": "2023-11-19T05:27:01Z",
+        "sensor": "Sentinel-2A MSI Level-2A",
+        "modality": "OPTICAL",
+        "asset_key": "visual",
+        "tile": "43PGQ",
+        "cloud_cover": 0.0
+    }
+
+    t1_val = AssetValidator.validate_asset(t1_path, filename=t1_filename, provenance=t1_provenance)
+    t2_val = AssetValidator.validate_asset(t2_path, filename=t2_filename, provenance=t2_provenance)
+
+    # Scientific limitation: Explicitly clarify that visual True-Color (RGB) rasters do not contain NIR Band 8
+    scientific_limitations = [
+        "True-color (RGB) visual Sentinel-2 imagery contains visible reflectance bands (B04, B03, B02).",
+        "Calibrated NDVI requires near-infrared Band 8 (B08), which is not present in RGB-only visual assets."
+    ]
+
+    payload = {
+        "status": "success",
+        "mode": "bitemporal",
+        "query": "What changed between these two dates?",
+        "aoi_bbox": [77.4491, 13.0597, 77.5444, 13.1531],
+        "files": [
+            {
+                "dataUrl": t1_b64,
+                "filename": t1_filename,
+                "role": "primary",
+                "isGeoTIFF": True,
+                "size": len(t1_bytes),
+                "assetCategory": "scientific_raster",
+                "stacProvenance": t1_provenance,
+                "validation": t1_val,
+                "scientificLimitations": scientific_limitations
+            },
+            {
+                "dataUrl": t2_b64,
+                "filename": t2_filename,
+                "role": "secondary",
+                "isGeoTIFF": True,
+                "size": len(t2_bytes),
+                "assetCategory": "scientific_raster",
+                "stacProvenance": t2_provenance,
+                "validation": t2_val,
+                "scientificLimitations": scientific_limitations
+            }
+        ]
+    }
+    _CACHED_DEMO_BITEMPORAL_PAIR = payload
+    return payload

@@ -240,3 +240,165 @@ def test_7_no_gemini_dependency():
         assert "from google import genai" not in module_source, f"genai import found in {mod.__file__}"
         assert "GenericVLMSynthesisAdapter" not in module_source, f"Gemini adapter found in {mod.__file__}"
         assert "gemini-2.5-flash" not in module_source, f"Gemini model ID found in {mod.__file__}"
+
+
+def test_8_no_imported_scenes_no_evidence_safeguard():
+    """Verify safeguard when no workspace scenes are imported and no analysis evidence exists."""
+    context_str = format_evidence_context(evidence=None, workspace_context=None)
+    assert "[EVIDENCE STATUS: NO ACTIVE RASTER EVIDENCE SUPPLIED]" in context_str
+    assert "clearly state that no raster evidence is currently attached" in context_str
+    assert "ACTIVE WORKSPACE SCENE METADATA" not in context_str
+
+
+def test_9_imported_workspace_scenes_without_analysis_evidence():
+    """
+    Verify prompt grounding when T1/T2 scenes are imported in workspace but perception pipeline has not run.
+    Ensures:
+    1. Scene metadata is available for metadata queries.
+    2. Model is strictly instructed not to fabricate pixel changes and to direct user to 'Execute Pipeline'.
+    """
+    lm_client = LMStudioClient(base_url="http://127.0.0.1:1234/v1", default_model="rs-llm")
+    bot = SatQueryChatbot(client=lm_client)
+
+    captured_payloads = []
+
+    def mock_post(url, json=None, **kwargs):
+        captured_payloads.append(json)
+        return make_mock_response(200, {
+            "model": "rs-llm",
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": "Scenes S2A_20230601 and S2B_20231201 are loaded in EPSG:32643. To detect pixel changes, click Execute Pipeline."
+            }}]
+        })
+
+    workspace_ctx = {
+        "mode": "bitemporal",
+        "scene_count": 2,
+        "scenes": [
+            {
+                "role": "primary",
+                "scene_id": "S2A_MSIL2A_20230601T052651_N0509_R105_T43PGQ",
+                "filename": "S2A_20230601_T43PGQ_B04.tif",
+                "datetime": "2023-06-01T05:26:51Z",
+                "collection": "sentinel-2-l2a",
+                "sensor": "MSI",
+                "platform": "Sentinel-2",
+                "modality": "OPTICAL",
+                "crs": "EPSG:32643",
+                "dimensions": {"width": 512, "height": 512},
+                "spatial_extent": [72.8, 18.9, 73.0, 19.1]
+            },
+            {
+                "role": "secondary",
+                "scene_id": "S2B_MSIL2A_20231201T052709_N0510_R105_T43PGQ",
+                "filename": "S2B_20231201_T43PGQ_B04.tif",
+                "datetime": "2023-12-01T05:27:09Z",
+                "collection": "sentinel-2-l2a",
+                "sensor": "MSI",
+                "platform": "Sentinel-2",
+                "modality": "OPTICAL",
+                "crs": "EPSG:32643",
+                "dimensions": {"width": 512, "height": 512},
+                "spatial_extent": [72.8, 18.9, 73.0, 19.1]
+            }
+        ],
+        "aoi_bbox": [72.8, 18.9, 73.0, 19.1]
+    }
+
+    with patch.object(lm_client, "is_reachable", return_value=True):
+        with patch("httpx.Client.post", side_effect=mock_post):
+            res = bot.chat(
+                message="What scenes are currently imported in my workspace?",
+                workspace_context=workspace_ctx,
+                evidence=None
+            )
+
+            assert res.status == "success"
+            assert len(captured_payloads) == 1
+            system_msg = captured_payloads[0]["messages"][0]["content"]
+
+            # 1. Contains imported workspace scene metadata
+            assert "ACTIVE WORKSPACE SCENE METADATA (PIPELINE NOT YET EXECUTED)" in system_msg
+            assert "S2A_MSIL2A_20230601T052651_N0509_R105_T43PGQ" in system_msg
+            assert "S2B_MSIL2A_20231201T052709_N0510_R105_T43PGQ" in system_msg
+            assert "EPSG:32643" in system_msg
+            assert "Sentinel-2" in system_msg
+
+            # 2. Strict instructions to avoid pixel hallucinations and guide to Execute Pipeline
+            assert "Execute Pipeline" in system_msg
+            assert "NEVER fabricate, hallucinate, or guess pixel changes" in system_msg
+            assert "DO NOT possess direct pixel-level inspection" in system_msg
+
+            # 3. Does not contain the false 'no active raster evidence' blocker
+            assert "[EVIDENCE STATUS: NO ACTIVE RASTER EVIDENCE SUPPLIED]" not in system_msg
+
+
+def test_10_existing_analysis_evidence_with_and_without_workspace_context():
+    """Verify that actual specialist perception telemetry is preserved and properly formatted."""
+    evidence_data = {
+        "model": "BIT-CD",
+        "task": "change_detection",
+        "changed_area_percent": 14.5,
+        "change_detected": True
+    }
+
+    workspace_ctx = {
+        "mode": "bitemporal",
+        "scene_count": 2,
+        "scenes": [
+            {"role": "primary", "scene_id": "T1_SCENE_001"},
+            {"role": "secondary", "scene_id": "T2_SCENE_002"}
+        ]
+    }
+
+    # Evidence only
+    context_evidence_only = format_evidence_context(evidence=evidence_data, workspace_context=None)
+    assert "VERIFIED SATQUERY SPECIALIST EVIDENCE" in context_evidence_only
+    assert "BIT-CD" in context_evidence_only
+    assert "14.5" in context_evidence_only
+    assert "ACTIVE WORKSPACE SCENE METADATA" not in context_evidence_only
+
+    # Evidence + Workspace Context
+    context_both = format_evidence_context(evidence=evidence_data, workspace_context=workspace_ctx)
+    assert "VERIFIED SATQUERY SPECIALIST EVIDENCE" in context_both
+    assert "ACTIVE WORKSPACE SCENE METADATA" in context_both
+    assert "T1_SCENE_001" in context_both
+    assert "T2_SCENE_002" in context_both
+
+
+def test_11_api_endpoint_with_workspace_context():
+    """Verify that POST /api/v1/chat successfully accepts and processes workspace_context."""
+    with patch.object(satquery_chatbot, "is_available", return_value=True):
+        captured_chat_kwargs = {}
+
+        def mock_chat(**kwargs):
+            captured_chat_kwargs.update(kwargs)
+            return ChatResponse(
+                response="Scenes S2A and S2B are staged.",
+                model="test-llm",
+                provider="LM Studio",
+                status="success"
+            )
+
+        with patch.object(satquery_chatbot, "chat", side_effect=mock_chat):
+            chat_req = {
+                "message": "Which dates are covered by the imported scenes?",
+                "conversation_id": "test-ws-conv",
+                "workspace_context": {
+                    "mode": "bitemporal",
+                    "scene_count": 2,
+                    "scenes": [
+                        {"role": "primary", "scene_id": "S2A_20230601", "datetime": "2023-06-01"},
+                        {"role": "secondary", "scene_id": "S2B_20231201", "datetime": "2023-12-01"}
+                    ]
+                }
+            }
+            resp = client.post("/api/v1/chat", json=chat_req)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "success"
+            assert data["response"] == "Scenes S2A and S2B are staged."
+            assert captured_chat_kwargs.get("workspace_context") is not None
+            assert captured_chat_kwargs["workspace_context"]["scene_count"] == 2
+

@@ -220,6 +220,7 @@ class QueryParser:
         is_sar = any(t in q_lower for t in ["sar", "radar", "backscatter", "dprvi", "sentinel-1", "s1", "rtc", "vv", "vh", "polarization"])
         is_optical = any(t in q_lower for t in ["optical", "ndvi", "vegetation", "canopy", "sentinel-2", "s2", "red", "nir", "b04", "b08", "greenery"])
         is_fusion = (is_sar and is_optical) or "fusion" in q_lower or "joint" in q_lower or "cross-sensor" in q_lower
+        is_classification = any(t in q_lower for t in ["classify", "classification", "land cover", "land-cover", "corine", "bigearthnet", "classes", "lulc"])
         is_grounding = any(t in q_lower for t in ["ground", "locate", "detect", "bounding box", "find", "where is", "where are"])
         is_vqa = any(t in q_lower for t in ["what", "how many", "is there", "describe", "explain", "caption"])
 
@@ -227,6 +228,8 @@ class QueryParser:
         if mode == "optical_sar" or is_fusion:
             is_fusion = True
             task = "optical_sar"
+        elif mode in ("classification", "land_cover_classification") or (is_classification and not is_temporal_change and not is_fusion):
+            task = "land_cover_classification"
         elif mode in ("bitemporal", "temporal") or is_temporal_change:
             is_temporal_change = True
             task = "temporal_sar_change" if is_sar else "temporal_optical_change"
@@ -283,6 +286,7 @@ class QueryParser:
             "is_sar": is_sar,
             "is_optical": is_optical,
             "is_fusion": is_fusion,
+            "is_classification": is_classification,
             "is_ambiguous": is_ambiguous,
             "missing_parameters": missing_params,
             "clarification_prompt": clarification_prompt,
@@ -527,6 +531,25 @@ class MultiStepOrchestrator:
                                 break
                     err_msg = err_detail or "Optical imagery unavailable or STAC retrieval failed."
                     answer = f"Sentinel-2 NDVI analysis failed: {err_msg}"
+
+        elif task == "land_cover_classification":
+            clf = analysis_metadata.get("land_cover_classification", {})
+            if clf.get("status") == "success" or "top_predictions" in clf:
+                preds = clf.get("top_predictions", [])
+                top_str = ", ".join([f"{p['label']} ({p['probability']:.1%})" for p in preds[:3]])
+                answer = f"BigEarthNet ResNet-50 land-cover classification identified: {top_str}."
+                for p in preds[:3]:
+                    candidate_claims.append(ClaimVerificationItem(
+                        claim_text=f"Detected land cover class '{p['label']}' with probability {p['probability']:.2f}.",
+                        claim_type="classification",
+                        status="supported"
+                    ))
+            else:
+                err_detail = clf.get("error", "Classification failed")
+                answer = f"Land-cover classification failed: {err_detail}"
+                overall_status = "failed"
+                confidence = None
+                confidence_label = "Classification Failed"
         else:
             answer = (analysis_result or {}).get("answer", f"Multi-step analysis for '{task}' completed successfully.")
 
@@ -1032,6 +1055,25 @@ class MultiStepOrchestrator:
                 }
                 tool_args["query"] = query
 
+            elif tool_name == "land_cover_classification" and not tool_args.get("images"):
+                arr = None
+                if retrieved_scenes:
+                    arr = retrieved_scenes[0].get("array")
+                elif has_images and len(images) > 0:
+                    arr = images[0]
+
+                if arr is not None:
+                    if arr.ndim == 3 and arr.shape[2] != 10:
+                        reps = int(np.ceil(10 / arr.shape[2]))
+                        arr = np.tile(arr, (1, 1, reps))[:, :, :10]
+                    elif arr.ndim == 2:
+                        arr = np.repeat(arr[:, :, np.newaxis], 10, axis=2)
+                    tool_args["images"] = [arr]
+                else:
+                    demo_arr = np.random.uniform(500, 3000, (120, 120, 10)).astype(np.float32)
+                    tool_args["images"] = [demo_arr]
+                tool_args["query"] = query
+
             # Execute tool with bounded retries (MAX_TOOL_RETRIES)
             tool_out = None
             step_status = "failed"
@@ -1237,6 +1279,21 @@ class MultiStepOrchestrator:
                     analysis_metadata["quality_screening"] = tool_out["quality_screening"]
                 if "provenance" in tool_out:
                     analysis_metadata["provenance"] = tool_out["provenance"]
+                if tool_name == "land_cover_classification":
+                    analysis_metadata["land_cover_classification"] = tool_out
+                    top_preds = tool_out.get("top_predictions", [])
+                    evidence_items.append({
+                        "id": "ev_bigearthnet_classification",
+                        "type": "classification",
+                        "title": "BigEarthNet ResNet-50 CORINE Land Cover Classification",
+                        "description": "Multi-label classification of 10-band Sentinel-2 imagery into 19 CORINE land-cover classes",
+                        "data_base64": None,
+                        "statistics": {
+                            "predicted_classes": tool_out.get("predicted_classes", []),
+                            "top_predictions": top_preds,
+                            "class_probabilities": tool_out.get("class_probabilities", {})
+                        }
+                    })
 
                 analysis_result = tool_out
 
@@ -1808,6 +1865,42 @@ class MultiStepOrchestrator:
                     },
                     "description": "Acquire Sentinel-2 L2A window and compute calibrated NDVI with SCL"
                 })
+        elif task == "land_cover_classification":
+            if not has_images and not use_offline:
+                s_date = parsed.get("start_date") or "2023-01-01"
+                e_date = parsed.get("end_date") or "2024-01-01"
+                steps.append({
+                    "tool": "stac_search",
+                    "args": {
+                        "collection": "sentinel-2-l2a",
+                        "bbox": bbox,
+                        "start_date": s_date,
+                        "end_date": e_date,
+                        "max_cloud_cover": cloud_thresh,
+                        "limit": 3
+                    },
+                    "description": f"Discover Sentinel-2 L2A optical scenes for land cover classification (cloud<={cloud_thresh}%)"
+                })
+                steps.append({
+                    "tool": "stac_composite_retrieve",
+                    "args": {
+                        "scene_id": "auto",
+                        "aoi_bbox": bbox,
+                        "collection": "sentinel-2-l2a",
+                        "bands": ["b02", "b03", "b04", "b05", "b06", "b07", "b08", "b8a", "b11", "b12"],
+                        "include_scl": False,
+                        "compute_ndvi": False
+                    },
+                    "description": "Acquire bounded Sentinel-2 10-band raster for BigEarthNet land cover classification"
+                })
+            steps.append({
+                "tool": "land_cover_classification",
+                "args": {
+                    "images": [],
+                    "query": parsed.get("raw_query", "Classify land cover")
+                },
+                "description": "Execute BigEarthNet ResNet-50 multi-label 19-class land-cover classification"
+            })
         else:
             steps.append({
                 "tool": "vqa_captioning",

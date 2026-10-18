@@ -423,11 +423,38 @@ export interface ChatMessage {
   error?: string | null;
 }
 
+export interface WorkspaceSceneSummary {
+  role: string;
+  scene_id?: string;
+  filename: string;
+  datetime?: string;
+  collection?: string;
+  sensor?: string;
+  platform?: string;
+  modality?: string;
+  asset_key?: string;
+  asset_category?: string;
+  is_geotiff?: boolean;
+  crs?: string;
+  dimensions?: { width: number; height: number };
+  spatial_extent?: number[] | { [key: string]: any };
+  cloud_cover?: number;
+  scientific_limitations?: string[];
+}
+
+export interface WorkspaceContext {
+  mode: string;
+  scene_count: number;
+  scenes: WorkspaceSceneSummary[];
+  aoi_bbox?: number[];
+}
+
 export interface ChatRequestPayload {
   message: string;
   conversation_id?: string;
   history?: { role: 'system' | 'user' | 'assistant'; content: string }[];
   evidence?: Record<string, any> | any[] | null;
+  workspace_context?: WorkspaceContext | Record<string, any> | null;
   model?: string;
   temperature?: number;
   max_tokens?: number;

@@ -49,7 +49,7 @@ def test_single_image_vqa():
     assert data["task"] in ["vqa", "captioning"]
     assert "answer" in data
     assert "trace" in data
-    assert data["implementation_status"] in ("baseline", "demo", "production_model")
+    assert data["implementation_status"] in ("baseline", "demo", "production_model", "pretrained_model")
 
 def test_bitemporal_change_detection():
     img_a = create_dummy_base64_image(color=(50, 100, 150))

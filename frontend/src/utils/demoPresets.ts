@@ -1,5 +1,6 @@
 import type { AnalysisMode, UploadedFileState } from '../types/index.ts';
 import { generateSyntheticSatelliteScene } from './demoData.ts';
+import { fetchDemoBitemporalPair } from '../services/api.ts';
 
 export interface DemoPresetItem {
   id: string;
@@ -12,6 +13,96 @@ export interface DemoPresetItem {
     mode: AnalysisMode;
     query: string;
     files: UploadedFileState[];
+    aoi_bbox?: number[];
+  } | Promise<{
+    mode: AnalysisMode;
+    query: string;
+    files: UploadedFileState[];
+    aoi_bbox?: number[];
+  }>;
+}
+
+export function getFallbackRealDemo3Preset() {
+  return {
+    mode: 'bitemporal' as const,
+    query: 'What changed between these two dates?',
+    aoi_bbox: [77.4491, 13.0597, 77.5444, 13.1531],
+    files: [
+      {
+        dataUrl: 'data:image/tiff;base64,SUkqAAgAAAARAP4ABAABAAAAAAAAAAAB',
+        filename: 'S2B_43PGQ_20230528_0_L2A_visual_window_1792262748.tif',
+        role: 'primary' as const,
+        isGeoTIFF: true,
+        size: 3149278,
+        assetCategory: 'scientific_raster',
+        stacProvenance: {
+          provider: 'Element84 Earth Search (AWS)',
+          catalog_url: 'https://earth-search.aws.element84.com/v1',
+          collection: 'sentinel-2-l2a',
+          scene_id: 'S2B_43PGQ_20230528_0_L2A',
+          datetime: '2023-05-28T05:26:49Z',
+          sensor: 'Sentinel-2B MSI Level-2A',
+          modality: 'OPTICAL',
+          asset_key: 'visual',
+          tile: '43PGQ',
+          cloud_cover: 0.0
+        },
+        validation: {
+          status: 'valid',
+          file_format: 'GeoTIFF',
+          asset_category: 'scientific_raster',
+          scientific_status: 'calibrated_surface_reflectance',
+          raster_metadata: {
+            width: 1024,
+            height: 1024,
+            bands: 3,
+            crs: 'EPSG:32643',
+            crs_display: 'WGS 84 / UTM zone 43N (EPSG:32643)'
+          }
+        },
+        scientificLimitations: [
+          'True-color (RGB) visual Sentinel-2 imagery contains visible reflectance bands (B04, B03, B02).',
+          'Calibrated NDVI requires near-infrared Band 8 (B08), which is not present in RGB-only visual assets.'
+        ]
+      },
+      {
+        dataUrl: 'data:image/tiff;base64,SUkqAAgAAAARAP4ABAABAAAAAAAAAAAB',
+        filename: 'S2A_43PGQ_20231119_0_L2A_visual_window_1792262818.tif',
+        role: 'secondary' as const,
+        isGeoTIFF: true,
+        size: 3149278,
+        assetCategory: 'scientific_raster',
+        stacProvenance: {
+          provider: 'Element84 Earth Search (AWS)',
+          catalog_url: 'https://earth-search.aws.element84.com/v1',
+          collection: 'sentinel-2-l2a',
+          scene_id: 'S2A_43PGQ_20231119_0_L2A',
+          datetime: '2023-11-19T05:27:01Z',
+          sensor: 'Sentinel-2A MSI Level-2A',
+          modality: 'OPTICAL',
+          asset_key: 'visual',
+          tile: '43PGQ',
+          cloud_cover: 0.0
+        },
+        validation: {
+          status: 'valid',
+          file_format: 'GeoTIFF',
+          asset_category: 'scientific_raster',
+          scientific_status: 'calibrated_surface_reflectance',
+          raster_metadata: {
+            width: 1024,
+            height: 1024,
+            bands: 3,
+            crs: 'EPSG:32643',
+            crs_display: 'WGS 84 / UTM zone 43N (EPSG:32643)'
+          }
+        },
+        scientificLimitations: [
+          'True-color (RGB) visual Sentinel-2 imagery contains visible reflectance bands (B04, B03, B02).',
+          'Calibrated NDVI requires near-infrared Band 8 (B08), which is not present in RGB-only visual assets.'
+        ]
+      }
+    ]
   };
 }
 
@@ -69,27 +160,22 @@ export const DEMO_PRESETS: DemoPresetItem[] = [
     mode: 'bitemporal',
     query: 'What changed between these two dates?',
     badge: 'CHANGE DETECT',
-    load: () => {
-      const t1 = generateSyntheticSatelliteScene('urban_t1');
-      const t2 = generateSyntheticSatelliteScene('urban_t2');
-      return {
-        mode: 'bitemporal',
-        query: 'What changed between these two dates?',
-        files: [
-          {
-            dataUrl: t1,
-            filename: 'temporal_t1_pre_monsoon.tif',
-            role: 'primary',
-            isGeoTIFF: true
-          },
-          {
-            dataUrl: t2,
-            filename: 'temporal_t2_post_monsoon.tif',
-            role: 'secondary',
-            isGeoTIFF: true
-          }
-        ]
-      };
+    load: async () => {
+      try {
+        if (typeof window !== 'undefined') {
+          const resp = await fetchDemoBitemporalPair();
+          return {
+            mode: resp.mode,
+            query: resp.query,
+            files: resp.files,
+            aoi_bbox: resp.aoi_bbox
+          };
+        }
+        return getFallbackRealDemo3Preset();
+      } catch (err) {
+        console.warn('Backend bi-temporal demo fetch fallback:', err);
+        return getFallbackRealDemo3Preset();
+      }
     }
   },
   {

@@ -24,7 +24,7 @@ from app.schemas.acquisition import (
 )
 from app.remote_sensing.geotiff import parse_geotiff_or_image
 from app.remote_sensing.quality import QualityScreener, QualityScreeningError
-from app.remote_sensing.preprocessing import convert_array_to_base64_png
+from app.remote_sensing.preprocessing import convert_array_to_base64_png, make_json_safe
 from app.remote_sensing.bands import compute_calibrated_ndvi, VEGETATION_NDVI_THRESHOLD
 from app.remote_sensing.sar import compute_calibrated_dual_pol_sar, DPRVI_FORMULA_REFERENCE
 from app.acquisition.asset_validator import AssetValidator
@@ -868,12 +868,28 @@ class STACAcquisitionService:
                         scl_eval["alignment"] = align_meta
                         scl_rgb = QualityScreener.generate_scl_rgb_preview(aligned_scl)
                         scl_eval["scl_preview_base64"] = convert_array_to_base64_png(scl_rgb)
-                        quality_screening_data = scl_eval
-                        raster_meta["quality_screening"] = scl_eval
-                        raster_meta["scl_mask"] = scl_eval["clear_mask"]
+
+                        clear_mask_b64 = convert_array_to_base64_png(scl_eval["clear_mask"].astype(np.uint8) * 255)
+                        uncertain_mask_b64 = convert_array_to_base64_png(scl_eval["uncertain_mask"].astype(np.uint8) * 255)
+                        excluded_mask_b64 = convert_array_to_base64_png(scl_eval["excluded_mask"].astype(np.uint8) * 255)
+                        unknown_mask_b64 = convert_array_to_base64_png(scl_eval["unknown_mask"].astype(np.uint8) * 255)
+                        clean_scl = make_json_safe({
+                            **scl_eval,
+                            "clear_mask": clear_mask_b64,
+                            "clear_mask_base64": clear_mask_b64,
+                            "uncertain_mask": uncertain_mask_b64,
+                            "excluded_mask": excluded_mask_b64,
+                            "unknown_mask": unknown_mask_b64
+                        })
+                        quality_screening_data = {
+                            "optical": clean_scl,
+                            **clean_scl
+                        }
+                        raster_meta["quality_screening"] = quality_screening_data
+                        raster_meta["scl_mask"] = clear_mask_b64
                     except Exception as scl_err:
                         logger.warning(f"Companion SCL retrieval/screening failed safely: {scl_err}")
-                        quality_screening_data = {
+                        failed_screening = {
                             "is_evaluated": False,
                             "status": "screening_failed",
                             "error": str(scl_err),
@@ -881,9 +897,13 @@ class STACAcquisitionService:
                                 f"Companion SCL quality screening failed ({scl_err}). Primary raster preserved without atmospheric filtering."
                             ]
                         }
+                        quality_screening_data = {
+                            "optical": failed_screening,
+                            **failed_screening
+                        }
                         limitations.append(f"SCL quality screening failed: {scl_err}")
                 else:
-                    quality_screening_data = {
+                    unavail_screening = {
                         "is_evaluated": False,
                         "status": "unavailable",
                         "reason": "SCL asset not available in scene catalog",
@@ -891,11 +911,25 @@ class STACAcquisitionService:
                             "Scene catalog does not provide an SCL asset; atmospheric cloud screening could not be performed."
                         ]
                     }
+                    quality_screening_data = {
+                        "optical": unavail_screening,
+                        **unavail_screening
+                    }
                     limitations.append("SCL quality asset unavailable; unmasked optical reflectance.")
             else:
                 sar_eval = QualityScreener.evaluate_sar_quality(arr, meta)
-                quality_screening_data = sar_eval
-                raster_meta["quality_screening"] = sar_eval
+                valid_mask_b64 = convert_array_to_base64_png(sar_eval["valid_mask"].astype(np.uint8) * 255)
+                clean_sar = make_json_safe({
+                    **sar_eval,
+                    "valid_mask": valid_mask_b64,
+                    "valid_mask_base64": valid_mask_b64
+                })
+                quality_screening_data = {
+                    "sar": clean_sar,
+                    **clean_sar
+                }
+                raster_meta["quality_screening"] = quality_screening_data
+                raster_meta["sar_mask"] = valid_mask_b64
                 limitations.extend(sar_eval.get("scientific_limitations", []))
 
         # Distinguish failed or invalid windowed raster payloads from successful retrieval
@@ -910,11 +944,11 @@ class STACAcquisitionService:
                 mime_type="image/tiff",
                 size_bytes=len(raw_bytes),
                 data_base64="",
-                metadata=raster_meta,
+                metadata=make_json_safe(raster_meta),
                 scientific_limitations=limitations,
-                validation=validation_report,
-                provenance=provenance_data,
-                quality_screening=quality_screening_data,
+                validation=make_json_safe(validation_report),
+                provenance=make_json_safe(provenance_data),
+                quality_screening=make_json_safe(quality_screening_data),
                 error=f"Windowed retrieval validation failed: {val_err}"
             )
 
@@ -927,11 +961,11 @@ class STACAcquisitionService:
             mime_type="image/tiff",
             size_bytes=len(raw_bytes),
             data_base64=full_b64,
-            metadata=raster_meta,
+            metadata=make_json_safe(raster_meta),
             scientific_limitations=limitations,
-            validation=validation_report,
-            provenance=provenance_data,
-            quality_screening=quality_screening_data
+            validation=make_json_safe(validation_report),
+            provenance=make_json_safe(provenance_data),
+            quality_screening=make_json_safe(quality_screening_data)
         )
 
     def retrieve_composite_window(self, req: STACCompositeRetrieveRequest) -> STACCompositeRetrieveResponse:
@@ -1214,15 +1248,31 @@ class STACAcquisitionService:
                 provenance=provenance_data
             )
 
-            raster_meta = validation_report.get("raster_metadata", {})
+            clean_dprvi = None
             if dprvi_result_data:
-                raster_meta["dprvi_result"] = dprvi_result_data
+                clean_dprvi = dict(dprvi_result_data)
+                if "valid_mask" in clean_dprvi and isinstance(clean_dprvi["valid_mask"], np.ndarray):
+                    clean_dprvi["valid_mask"] = convert_array_to_base64_png(clean_dprvi["valid_mask"].astype(np.uint8) * 255)
+                clean_dprvi.pop("dprvi_array", None)
+                clean_dprvi.pop("cross_pol_array", None)
+                clean_dprvi = make_json_safe(clean_dprvi)
+
+            clean_sar_screening = None
             if sar_screening_data:
-                raster_meta["sar_quality_screening"] = sar_screening_data
+                clean_sar_screening = dict(sar_screening_data)
+                if "valid_mask" in clean_sar_screening and isinstance(clean_sar_screening["valid_mask"], np.ndarray):
+                    clean_sar_screening["valid_mask"] = convert_array_to_base64_png(clean_sar_screening["valid_mask"].astype(np.uint8) * 255)
+                clean_sar_screening = make_json_safe(clean_sar_screening)
+
+            raster_meta = validation_report.get("raster_metadata", {})
+            if clean_dprvi:
+                raster_meta["dprvi_result"] = clean_dprvi
+            if clean_sar_screening:
+                raster_meta["sar_quality_screening"] = clean_sar_screening
 
             all_limitations = limitations + list(validation_report.get("scientific_limitations", []))
-            if dprvi_result_data:
-                all_limitations += list(dprvi_result_data.get("scientific_limitations", []))
+            if clean_dprvi:
+                all_limitations += list(clean_dprvi.get("scientific_limitations", []))
 
             if validation_report.get("status") == "invalid":
                 val_err = validation_report.get("error") or "Dual-pol SAR raster validation failed: invalid GeoTIFF."
@@ -1235,13 +1285,13 @@ class STACAcquisitionService:
                     mime_type="image/tiff",
                     size_bytes=len(raw_bytes),
                     data_base64="",
-                    metadata=raster_meta,
+                    metadata=make_json_safe(raster_meta),
                     scientific_limitations=list(dict.fromkeys(all_limitations)),
-                    provenance=provenance_data,
+                    provenance=make_json_safe(provenance_data),
                     bands_retrieved=["VV", "VH"],
-                    dprvi_result=dprvi_result_data,
-                    sar_quality_screening=sar_screening_data,
-                    validation=validation_report,
+                    dprvi_result=clean_dprvi,
+                    sar_quality_screening=clean_sar_screening,
+                    validation=make_json_safe(validation_report),
                     error=f"Dual-pol composite validation failed: {val_err}"
                 )
 
@@ -1254,13 +1304,13 @@ class STACAcquisitionService:
                 mime_type="image/tiff",
                 size_bytes=len(raw_bytes),
                 data_base64=full_b64,
-                metadata=raster_meta,
+                metadata=make_json_safe(raster_meta),
                 scientific_limitations=list(dict.fromkeys(all_limitations)),
-                provenance=provenance_data,
+                provenance=make_json_safe(provenance_data),
                 bands_retrieved=["VV", "VH"],
-                dprvi_result=dprvi_result_data,
-                sar_quality_screening=sar_screening_data,
-                validation=validation_report
+                dprvi_result=clean_dprvi,
+                sar_quality_screening=clean_sar_screening,
+                validation=make_json_safe(validation_report)
             )
 
         # Resolve asset keys for B04 (Red), B08 (NIR), and SCL
@@ -1573,11 +1623,33 @@ class STACAcquisitionService:
             provenance=provenance_data
         )
 
-        raster_meta = validation_report.get("raster_metadata", {})
+        clean_ndvi = None
         if ndvi_result_data:
-            raster_meta["ndvi_result"] = ndvi_result_data
+            clean_ndvi = dict(ndvi_result_data)
+            if "valid_mask" in clean_ndvi and isinstance(clean_ndvi["valid_mask"], np.ndarray):
+                clean_ndvi["valid_mask"] = convert_array_to_base64_png(clean_ndvi["valid_mask"].astype(np.uint8) * 255)
+            clean_ndvi.pop("ndvi_array", None)
+            if "scl_evaluation" in clean_ndvi and isinstance(clean_ndvi["scl_evaluation"], dict):
+                clean_scl_eval = dict(clean_ndvi["scl_evaluation"])
+                for m_k in ("clear_mask", "uncertain_mask", "excluded_mask", "unknown_mask"):
+                    if m_k in clean_scl_eval and isinstance(clean_scl_eval[m_k], np.ndarray):
+                        clean_scl_eval[m_k] = convert_array_to_base64_png(clean_scl_eval[m_k].astype(np.uint8) * 255)
+                clean_ndvi["scl_evaluation"] = clean_scl_eval
+            clean_ndvi = make_json_safe(clean_ndvi)
+
+        clean_scl_screening = None
         if scl_screening_data:
-            raster_meta["quality_screening"] = scl_screening_data
+            clean_scl_screening = dict(scl_screening_data)
+            for m_k in ("clear_mask", "uncertain_mask", "excluded_mask", "unknown_mask"):
+                if m_k in clean_scl_screening and isinstance(clean_scl_screening[m_k], np.ndarray):
+                    clean_scl_screening[m_k] = convert_array_to_base64_png(clean_scl_screening[m_k].astype(np.uint8) * 255)
+            clean_scl_screening = make_json_safe(clean_scl_screening)
+
+        raster_meta = validation_report.get("raster_metadata", {})
+        if clean_ndvi:
+            raster_meta["ndvi_result"] = clean_ndvi
+        if clean_scl_screening:
+            raster_meta["quality_screening"] = clean_scl_screening
 
         if validation_report.get("status") == "invalid":
             val_err = validation_report.get("error") or "Multispectral optical raster validation failed: invalid GeoTIFF."
@@ -1590,13 +1662,13 @@ class STACAcquisitionService:
                 mime_type="image/tiff",
                 size_bytes=len(raw_bytes),
                 data_base64="",
-                metadata=raster_meta,
+                metadata=make_json_safe(raster_meta),
                 scientific_limitations=limitations + list(validation_report.get("scientific_limitations", [])),
-                provenance=provenance_data,
+                provenance=make_json_safe(provenance_data),
                 bands_retrieved=["B04", "B08"] + (["SCL"] if aligned_scl is not None else []),
-                ndvi_result=ndvi_result_data,
-                quality_screening=scl_screening_data,
-                validation=validation_report,
+                ndvi_result=clean_ndvi,
+                quality_screening=clean_scl_screening,
+                validation=make_json_safe(validation_report),
                 error=f"Optical composite validation failed: {val_err}"
             )
 
@@ -1609,13 +1681,13 @@ class STACAcquisitionService:
             mime_type="image/tiff",
             size_bytes=len(raw_bytes),
             data_base64=full_b64,
-            metadata=raster_meta,
+            metadata=make_json_safe(raster_meta),
             scientific_limitations=limitations + list(validation_report.get("scientific_limitations", [])),
-            provenance=provenance_data,
+            provenance=make_json_safe(provenance_data),
             bands_retrieved=["B04", "B08"] + (["SCL"] if aligned_scl is not None else []),
-            ndvi_result=ndvi_result_data,
-            quality_screening=scl_screening_data,
-            validation=validation_report
+            ndvi_result=clean_ndvi,
+            quality_screening=clean_scl_screening,
+            validation=make_json_safe(validation_report)
         )
 
     def _retrieve_local_sample_composite_window(self, req: STACCompositeRetrieveRequest) -> STACCompositeRetrieveResponse:
@@ -1804,15 +1876,31 @@ class STACAcquisitionService:
                     provenance=prov_data
                 )
 
-                raster_meta = validation_report.get("raster_metadata", {})
+                clean_dprvi = None
                 if dprvi_result:
-                    raster_meta["dprvi_result"] = dprvi_result
+                    clean_dprvi = dict(dprvi_result)
+                    if "valid_mask" in clean_dprvi and isinstance(clean_dprvi["valid_mask"], np.ndarray):
+                        clean_dprvi["valid_mask"] = convert_array_to_base64_png(clean_dprvi["valid_mask"].astype(np.uint8) * 255)
+                    clean_dprvi.pop("dprvi_array", None)
+                    clean_dprvi.pop("cross_pol_array", None)
+                    clean_dprvi = make_json_safe(clean_dprvi)
+
+                clean_sar_screen = None
                 if sar_screen:
-                    raster_meta["sar_quality_screening"] = sar_screen
+                    clean_sar_screen = dict(sar_screen)
+                    if "valid_mask" in clean_sar_screen and isinstance(clean_sar_screen["valid_mask"], np.ndarray):
+                        clean_sar_screen["valid_mask"] = convert_array_to_base64_png(clean_sar_screen["valid_mask"].astype(np.uint8) * 255)
+                    clean_sar_screen = make_json_safe(clean_sar_screen)
+
+                raster_meta = validation_report.get("raster_metadata", {})
+                if clean_dprvi:
+                    raster_meta["dprvi_result"] = clean_dprvi
+                if clean_sar_screen:
+                    raster_meta["sar_quality_screening"] = clean_sar_screen
 
                 all_limitations = list(sar_screen.get("scientific_limitations", [])) + list(validation_report.get("scientific_limitations", []))
-                if dprvi_result:
-                    all_limitations += list(dprvi_result.get("scientific_limitations", []))
+                if clean_dprvi:
+                    all_limitations += list(clean_dprvi.get("scientific_limitations", []))
                 all_limitations.append("Synthetic demonstration fixture: not authentic calibrated Sentinel-1 RTC telemetry.")
                 if is_out_of_bounds:
                     all_limitations.append(aoi_limitation)
@@ -1826,13 +1914,13 @@ class STACAcquisitionService:
                     mime_type="image/tiff",
                     size_bytes=len(raw_bytes),
                     data_base64=full_b64,
-                    metadata=raster_meta,
+                    metadata=make_json_safe(raster_meta),
                     scientific_limitations=list(dict.fromkeys(all_limitations)),
-                    provenance=prov_data,
+                    provenance=make_json_safe(prov_data),
                     bands_retrieved=["VV", "VH"],
-                    dprvi_result=dprvi_result,
-                    sar_quality_screening=sar_screen,
-                    validation=validation_report
+                    dprvi_result=clean_dprvi,
+                    sar_quality_screening=clean_sar_screen,
+                    validation=make_json_safe(validation_report)
                 )
 
             # Prepare B04 and B08 bands from data
@@ -1893,11 +1981,33 @@ class STACAcquisitionService:
                 provenance=prov_data
             )
 
-            raster_meta = validation_report.get("raster_metadata", {})
+            clean_ndvi = None
             if ndvi_result:
-                raster_meta["ndvi_result"] = ndvi_result
+                clean_ndvi = dict(ndvi_result)
+                if "valid_mask" in clean_ndvi and isinstance(clean_ndvi["valid_mask"], np.ndarray):
+                    clean_ndvi["valid_mask"] = convert_array_to_base64_png(clean_ndvi["valid_mask"].astype(np.uint8) * 255)
+                clean_ndvi.pop("ndvi_array", None)
+                if "scl_evaluation" in clean_ndvi and isinstance(clean_ndvi["scl_evaluation"], dict):
+                    clean_scl_eval = dict(clean_ndvi["scl_evaluation"])
+                    for m_k in ("clear_mask", "uncertain_mask", "excluded_mask", "unknown_mask"):
+                        if m_k in clean_scl_eval and isinstance(clean_scl_eval[m_k], np.ndarray):
+                            clean_scl_eval[m_k] = convert_array_to_base64_png(clean_scl_eval[m_k].astype(np.uint8) * 255)
+                    clean_ndvi["scl_evaluation"] = clean_scl_eval
+                clean_ndvi = make_json_safe(clean_ndvi)
+
+            clean_scl_eval = None
             if scl_eval:
-                raster_meta["quality_screening"] = scl_eval
+                clean_scl_eval = dict(scl_eval)
+                for m_k in ("clear_mask", "uncertain_mask", "excluded_mask", "unknown_mask"):
+                    if m_k in clean_scl_eval and isinstance(clean_scl_eval[m_k], np.ndarray):
+                        clean_scl_eval[m_k] = convert_array_to_base64_png(clean_scl_eval[m_k].astype(np.uint8) * 255)
+                clean_scl_eval = make_json_safe(clean_scl_eval)
+
+            raster_meta = validation_report.get("raster_metadata", {})
+            if clean_ndvi:
+                raster_meta["ndvi_result"] = clean_ndvi
+            if clean_scl_eval:
+                raster_meta["quality_screening"] = clean_scl_eval
 
             opt_limitations = list(validation_report.get("scientific_limitations", []))
             opt_limitations.append("Synthetic demonstration fixture: not authentic calibrated Sentinel-2 L2A telemetry.")
@@ -1913,13 +2023,13 @@ class STACAcquisitionService:
                 mime_type="image/tiff",
                 size_bytes=len(raw_bytes),
                 data_base64=full_b64,
-                metadata=raster_meta,
+                metadata=make_json_safe(raster_meta),
                 scientific_limitations=list(dict.fromkeys(opt_limitations)),
-                provenance=prov_data,
+                provenance=make_json_safe(prov_data),
                 bands_retrieved=["B04", "B08", "SCL"],
-                ndvi_result=ndvi_result,
-                quality_screening=scl_eval,
-                validation=validation_report
+                ndvi_result=clean_ndvi,
+                quality_screening=clean_scl_eval,
+                validation=make_json_safe(validation_report)
             )
         except Exception as e:
             return STACCompositeRetrieveResponse(
@@ -2048,8 +2158,18 @@ class STACAcquisitionService:
             if getattr(req, "screen_quality", False):
                 if "sar" in req.scene_id.lower() or "risat" in req.scene_id.lower():
                     sar_eval = QualityScreener.evaluate_sar_quality(data, meta)
-                    quality_screening_data = sar_eval
-                    validation_report.setdefault("raster_metadata", {})["quality_screening"] = sar_eval
+                    valid_mask_b64 = convert_array_to_base64_png(sar_eval["valid_mask"].astype(np.uint8) * 255)
+                    clean_sar = make_json_safe({
+                        **sar_eval,
+                        "valid_mask": valid_mask_b64,
+                        "valid_mask_base64": valid_mask_b64
+                    })
+                    quality_screening_data = {
+                        "sar": clean_sar,
+                        **clean_sar
+                    }
+                    validation_report.setdefault("raster_metadata", {})["quality_screening"] = quality_screening_data
+                    validation_report.setdefault("raster_metadata", {})["sar_mask"] = valid_mask_b64
                 else:
                     # Synthetic clear-sky SCL for local demonstration rasters
                     h_val = meta.get("height", data.shape[0] if data.ndim == 2 else data.shape[0])
@@ -2057,10 +2177,28 @@ class STACAcquisitionService:
                     synth_scl = np.full((h_val, w_val), 4, dtype=np.uint8)  # Class 4 = Vegetation
                     scl_eval = QualityScreener.evaluate_scl(synth_scl)
                     scl_rgb = QualityScreener.generate_scl_rgb_preview(synth_scl)
-                    scl_eval["scl_preview_base64"] = convert_array_to_base64_png(scl_rgb)
-                    quality_screening_data = scl_eval
-                    validation_report.setdefault("raster_metadata", {})["quality_screening"] = scl_eval
-                    validation_report.setdefault("raster_metadata", {})["scl_mask"] = scl_eval["clear_mask"]
+                    scl_preview_b64 = convert_array_to_base64_png(scl_rgb)
+
+                    clear_mask_b64 = convert_array_to_base64_png(scl_eval["clear_mask"].astype(np.uint8) * 255)
+                    uncertain_mask_b64 = convert_array_to_base64_png(scl_eval["uncertain_mask"].astype(np.uint8) * 255)
+                    excluded_mask_b64 = convert_array_to_base64_png(scl_eval["excluded_mask"].astype(np.uint8) * 255)
+                    unknown_mask_b64 = convert_array_to_base64_png(scl_eval["unknown_mask"].astype(np.uint8) * 255)
+
+                    clean_scl = make_json_safe({
+                        **scl_eval,
+                        "scl_preview_base64": scl_preview_b64,
+                        "clear_mask": clear_mask_b64,
+                        "clear_mask_base64": clear_mask_b64,
+                        "uncertain_mask": uncertain_mask_b64,
+                        "excluded_mask": excluded_mask_b64,
+                        "unknown_mask": unknown_mask_b64
+                    })
+                    quality_screening_data = {
+                        "optical": clean_scl,
+                        **clean_scl
+                    }
+                    validation_report.setdefault("raster_metadata", {})["quality_screening"] = quality_screening_data
+                    validation_report.setdefault("raster_metadata", {})["scl_mask"] = clear_mask_b64
 
             return STACRetrieveResponse(
                 status="success",
@@ -2071,11 +2209,11 @@ class STACAcquisitionService:
                 mime_type="image/tiff",
                 size_bytes=len(raw_bytes),
                 data_base64=full_b64,
-                metadata=validation_report.get("raster_metadata", {}),
+                metadata=make_json_safe(validation_report.get("raster_metadata", {})),
                 scientific_limitations=validation_report.get("scientific_limitations", []),
-                validation=validation_report,
-                provenance=prov_data,
-                quality_screening=quality_screening_data
+                validation=make_json_safe(validation_report),
+                provenance=make_json_safe(prov_data),
+                quality_screening=make_json_safe(quality_screening_data)
             )
         except Exception as e:
             return STACRetrieveResponse(

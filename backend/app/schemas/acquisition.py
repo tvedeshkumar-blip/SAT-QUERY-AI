@@ -1,5 +1,6 @@
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, field_serializer
+from app.remote_sensing.preprocessing import make_json_safe
 
 class STACSearchRequest(BaseModel):
     bbox: List[float] = Field(
@@ -90,6 +91,10 @@ class STACValidateAssetResponse(BaseModel):
     scientific_limitations: List[str] = Field(default_factory=list)
     provenance: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
+
+    @field_serializer("raster_metadata", "provenance", mode="wrap", check_fields=False)
+    def serialize_dict_fields(self, v: Any, handler) -> Any:
+        return handler(make_json_safe(v))
 
 class STACRetrieveRequest(BaseModel):
     scene_id: str = Field(..., description="ID of the scene to retrieve")
@@ -190,6 +195,10 @@ class STACRetrieveResponse(BaseModel):
     )
     error: Optional[str] = None
 
+    @field_serializer("metadata", "quality_screening", "provenance", mode="wrap", check_fields=False)
+    def serialize_retrieve_dict_fields(self, v: Any, handler) -> Any:
+        return handler(make_json_safe(v))
+
 
 class STACCompositeRetrieveRequest(BaseModel):
     scene_id: str = Field(..., description="ID of the Sentinel-2 or Sentinel-1 scene to retrieve")
@@ -256,6 +265,10 @@ class STACCompositeRetrieveResponse(BaseModel):
     sar_quality_screening: Optional[Dict[str, Any]] = Field(default=None, description="Sentinel-1 backscatter quality screening")
     validation: Optional[STACValidateAssetResponse] = None
     error: Optional[str] = None
+
+    @field_serializer("metadata", "provenance", "ndvi_result", "dprvi_result", "quality_screening", "sar_quality_screening", mode="wrap", check_fields=False)
+    def serialize_composite_dict_fields(self, v: Any, handler) -> Any:
+        return handler(make_json_safe(v))
 
 
 class STACTemporalPairValidateRequest(BaseModel):

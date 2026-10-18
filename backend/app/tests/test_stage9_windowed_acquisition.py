@@ -541,3 +541,138 @@ def test_14_existing_acquisition_endpoints_compatible():
     assert ret_data["status"] == "success"
     assert ret_data["category"] == "scientific_raster"
     assert "data_base64" in ret_data
+
+
+def test_15_retrieve_window_endpoint_with_screen_quality_serialization():
+    """
+    Regression Test for HTTP 500 / PydanticSerializationError on POST /api/v1/acquisition/retrieve-window:
+    Verifies that when screen_quality=True is requested (as sent by the frontend UI when clicking
+    'Acquire Window (AOI Crop)'), all NumPy arrays, boolean masks, and nested evaluations
+    are converted to JSON-serializable representations (base64 PNG data URIs and Python primitives)
+    without raising pydantic_core.PydanticSerializationError.
+    """
+    # 1. Local sample regression check with screen_quality=True
+    local_payload = {
+        "scene_id": "local_sample_cartosat_optical_bengaluru",
+        "asset_key": "visual",
+        "aoi_bbox": [80.375, 12.848, 80.378, 12.852],
+        "screen_quality": True
+    }
+    r_local = client.post("/api/v1/acquisition/retrieve-window", json=local_payload)
+    assert r_local.status_code == 200, f"Expected 200 but got {r_local.status_code}: {r_local.text}"
+    local_data = r_local.json()
+    assert local_data["status"] == "success"
+    assert local_data["quality_screening"] is not None
+    assert "optical" in local_data["quality_screening"]
+    assert local_data["quality_screening"]["optical"]["screened"] is True
+    assert local_data["quality_screening"]["clear_mask"].startswith("data:image/png;base64,")
+    assert local_data["metadata"]["scl_mask"].startswith("data:image/png;base64,")
+
+    # 2. Simulated online Sentinel-2 scene with companion SCL asset
+    simulated_scene_id = "S2A_SIMULATED_SERIALIZATION_001"
+    stac_service._scene_cache[simulated_scene_id] = {
+        "provider": "Element84 Earth Search (AWS)",
+        "catalog_url": "https://earth-search.aws.element84.com/v1",
+        "collection": "sentinel-2-l2a",
+        "datetime": "2024-03-28T05:27:01Z",
+        "raw_assets": {
+            "visual": {
+                "href": "https://sentinel-cogs.s3.us-west-2.amazonaws.com/test_visual.tif",
+                "type": "image/tiff"
+            },
+            "scl": {
+                "href": "https://sentinel-cogs.s3.us-west-2.amazonaws.com/test_scl.tif",
+                "type": "image/tiff"
+            }
+        }
+    }
+
+    sim_opt_data = np.full((32, 32, 3), 120, dtype=np.uint8)
+    sim_scl_data = np.full((32, 32), 4, dtype=np.uint8)  # Class 4 = Vegetation
+    sim_meta = {
+        "crs": "EPSG:32643",
+        "transform": [10.0, 0.0, 500000.0, 0.0, -10.0, 2000000.0],
+        "nodata": 0,
+        "bands": 3,
+        "width": 32,
+        "height": 32,
+        "tags": {"SENSOR": "Sentinel-2A"}
+    }
+    sim_scl_meta = {
+        "crs": "EPSG:32643",
+        "transform": [10.0, 0.0, 500000.0, 0.0, -10.0, 2000000.0],
+        "nodata": 0,
+        "bands": 1,
+        "width": 32,
+        "height": 32
+    }
+
+    def mock_read_window(url, bbox_wgs84, max_bytes=None):
+        if "scl" in url.lower():
+            return sim_scl_data, sim_scl_meta
+        return sim_opt_data, sim_meta
+
+    with patch.object(SafeWindowedCOGReader, "read_cog_window", side_effect=mock_read_window):
+        online_payload = {
+            "scene_id": simulated_scene_id,
+            "asset_key": "visual",
+            "aoi_bbox": [80.375, 12.848, 80.378, 12.852],
+            "screen_quality": True
+        }
+        r_online = client.post("/api/v1/acquisition/retrieve-window", json=online_payload)
+        assert r_online.status_code == 200, f"Expected 200 but got {r_online.status_code}: {r_online.text}"
+        online_data = r_online.json()
+        assert online_data["status"] == "success"
+        assert online_data["quality_screening"] is not None
+        assert online_data["quality_screening"]["optical"]["screened"] is True
+        assert online_data["quality_screening"]["clear_mask"].startswith("data:image/png;base64,")
+        assert online_data["quality_screening"]["clear_mask_base64"].startswith("data:image/png;base64,")
+        assert online_data["metadata"]["scl_mask"].startswith("data:image/png;base64,")
+        assert online_data["metadata"]["width"] == 32
+        assert online_data["metadata"]["height"] == 32
+        assert online_data["metadata"]["crs"] == "EPSG:32643"
+        # Validate that validation.raster_metadata also contains valid string masks
+        assert online_data["validation"]["raster_metadata"]["scl_mask"].startswith("data:image/png;base64,")
+
+    # 3. Simulated online Sentinel-1 SAR scene with RTC quality screening
+    simulated_sar_id = "S1A_SIMULATED_SERIALIZATION_001"
+    stac_service._scene_cache[simulated_sar_id] = {
+        "provider": "Microsoft Planetary Computer",
+        "catalog_url": "https://planetarycomputer.microsoft.com/api/stac/v1",
+        "collection": "sentinel-1-rtc",
+        "datetime": "2024-03-28T00:00:00Z",
+        "raw_assets": {
+            "vv": {
+                "href": "https://sentinel1euwestrtc.blob.core.windows.net/test_vv.tif",
+                "type": "image/tiff"
+            }
+        }
+    }
+
+    sim_sar_data = np.full((32, 32), 0.05, dtype=np.float32)
+    sim_sar_meta = {
+        "crs": "EPSG:32643",
+        "transform": [10.0, 0.0, 500000.0, 0.0, -10.0, 2000000.0],
+        "nodata": -32768.0,
+        "bands": 1,
+        "width": 32,
+        "height": 32,
+        "tags": {"SENSOR": "Sentinel-1A"}
+    }
+
+    with patch.object(SafeWindowedCOGReader, "read_cog_window", return_value=(sim_sar_data, sim_sar_meta)):
+        sar_payload = {
+            "scene_id": simulated_sar_id,
+            "asset_key": "vv",
+            "aoi_bbox": [80.375, 12.848, 80.378, 12.852],
+            "screen_quality": True
+        }
+        r_sar = client.post("/api/v1/acquisition/retrieve-window", json=sar_payload)
+        assert r_sar.status_code == 200, f"Expected 200 but got {r_sar.status_code}: {r_sar.text}"
+        sar_data = r_sar.json()
+        assert sar_data["status"] == "success"
+        assert sar_data["quality_screening"] is not None
+        assert sar_data["quality_screening"]["sar"]["screened"] is True
+        assert sar_data["quality_screening"]["valid_mask"].startswith("data:image/png;base64,")
+        assert sar_data["metadata"]["sar_mask"].startswith("data:image/png;base64,")
+

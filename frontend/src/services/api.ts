@@ -1,7 +1,8 @@
-import { AnalysisMode, AnalysisResponse, BenchmarkResult } from '../types';
+import type { AnalysisMode, AnalysisResponse, BenchmarkResult, UploadedFileState } from '../types/index.ts';
 
 function getApiBaseUrl(): string {
-  const envUrl = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '');
+  const env = typeof import.meta !== 'undefined' ? (import.meta as any).env : undefined;
+  const envUrl = (env?.VITE_API_BASE_URL || (typeof process !== 'undefined' ? process.env?.VITE_API_BASE_URL : '') || '').trim().replace(/\/+$/, '');
   if (!envUrl) return '/api/v1';
   return envUrl.endsWith('/api/v1') ? envUrl : `${envUrl}/api/v1`;
 }
@@ -329,6 +330,21 @@ export async function searchOpticalSARPair(
     throw new Error(errorData.detail || `Optical+SAR search failed (${res.status})`);
   }
 
+  return await res.json();
+}
+
+export async function fetchDemoBitemporalPair(): Promise<{
+  status: string;
+  mode: AnalysisMode;
+  query: string;
+  aoi_bbox?: number[];
+  files: UploadedFileState[];
+}> {
+  const res = await fetch(`${API_BASE}/acquisition/demo-bitemporal-pair`);
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(errorData.detail || `Failed to fetch bi-temporal demo pair (${res.status})`);
+  }
   return await res.json();
 }
 

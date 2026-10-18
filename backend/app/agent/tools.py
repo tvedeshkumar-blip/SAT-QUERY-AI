@@ -333,6 +333,20 @@ class DeterministicVerifierTool(AgentTool):
         }
 
 
+class LandCoverClassificationTool(AgentTool):
+    """Tool for multi-label remote sensing land-cover classification (BigEarthNet ResNet-50)."""
+    def __init__(self):
+        super().__init__(
+            name="land_cover_classification",
+            description="Classify Sentinel-2 10-band multispectral rasters into 19 CORINE land-cover classes.",
+            category="vision"
+        )
+
+    def run(self, images: List[Any], query: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
+        model = model_registry.get("classification")
+        return model.predict(images=images, query=query, metadata=metadata, **kwargs)
+
+
 class AgentToolRegistry:
     """Central registry and lookup dispatcher for all remote sensing agent tools."""
     def __init__(self):
@@ -351,6 +365,7 @@ class AgentToolRegistry:
             VisualGroundingTool(),
             NeuralChangeDetectionTool(),
             VQACaptioningTool(),
+            LandCoverClassificationTool(),
             DeterministicVerifierTool(),
         ]
         for t in tools:

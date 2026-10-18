@@ -1,5 +1,5 @@
-import React from 'react';
-import { Sparkles, ArrowRight } from 'lucide-react';
+import React, { useState } from 'react';
+import { Sparkles, ArrowRight, Loader2 } from 'lucide-react';
 import { AnalysisMode } from '../types';
 import { UploadedFileState } from './ImageUploader';
 import { DEMO_PRESETS, DemoPresetItem } from '../utils/demoPresets';
@@ -12,11 +12,25 @@ interface DemoPresetsBarProps {
     mode: AnalysisMode;
     query: string;
     files: UploadedFileState[];
+    aoi_bbox?: number[];
   }) => void;
 }
 
 export const DemoPresetsBar: React.FC<DemoPresetsBarProps> = ({ onLoadDemo }) => {
   const demos = DEMO_PRESETS;
+  const [loadingDemoId, setLoadingDemoId] = useState<string | null>(null);
+
+  const handleDemoClick = async (d: DemoPresetItem) => {
+    try {
+      setLoadingDemoId(d.id);
+      const config = await d.load();
+      onLoadDemo(config);
+    } catch (err) {
+      console.error('Failed to load demo preset:', err);
+    } finally {
+      setLoadingDemoId(null);
+    }
+  };
 
   return (
     <div className="glass-panel rounded-2xl p-5 border border-slate-800 bg-slate-900/70 shadow-2xl space-y-3">
@@ -44,15 +58,20 @@ export const DemoPresetsBar: React.FC<DemoPresetsBarProps> = ({ onLoadDemo }) =>
         {demos.map((d) => (
           <button
             key={d.id}
-            onClick={() => onLoadDemo(d.load())}
-            className="text-left p-3.5 rounded-xl bg-slate-950/80 hover:bg-slate-900 border border-slate-800/80 hover:border-cyan-500/50 transition-all group flex flex-col justify-between space-y-2 hover:shadow-lg hover:shadow-cyan-500/10"
+            onClick={() => handleDemoClick(d)}
+            disabled={loadingDemoId !== null}
+            className="text-left p-3.5 rounded-xl bg-slate-950/80 hover:bg-slate-900 border border-slate-800/80 hover:border-cyan-500/50 transition-all group flex flex-col justify-between space-y-2 hover:shadow-lg hover:shadow-cyan-500/10 disabled:opacity-60"
           >
             <div>
               <div className="flex items-center justify-between gap-1 mb-1.5">
                 <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800">
                   {d.badge}
                 </span>
-                <ArrowRight className="w-3 h-3 text-slate-500 group-hover:text-cyan-400 group-hover:translate-x-0.5 transition-all" />
+                {loadingDemoId === d.id ? (
+                  <Loader2 className="w-3 h-3 text-cyan-400 animate-spin" />
+                ) : (
+                  <ArrowRight className="w-3 h-3 text-slate-500 group-hover:text-cyan-400 group-hover:translate-x-0.5 transition-all" />
+                )}
               </div>
 
               <h4 className="text-xs font-bold text-slate-200 group-hover:text-cyan-300 transition-colors">

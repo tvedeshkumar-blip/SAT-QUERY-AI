@@ -17,6 +17,7 @@ def satquery_chat(request: ChatRequest):
         message=request.message,
         history=request.history,
         evidence=request.evidence,
+        workspace_context=request.workspace_context,
         model=request.model,
         conversation_id=request.conversation_id,
         temperature=request.temperature,

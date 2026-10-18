@@ -38,6 +38,7 @@ class SatQueryChatbot:
         message: str,
         history: Optional[List[Union[ChatMessage, Dict[str, str]]]] = None,
         evidence: Optional[Union[Dict[str, Any], List[Any]]] = None,
+        workspace_context: Optional[Union[Dict[str, Any], List[Any]]] = None,
         model: Optional[str] = None,
         conversation_id: Optional[str] = None,
         temperature: Optional[float] = None,
@@ -50,6 +51,7 @@ class SatQueryChatbot:
             message: User query or follow-up question.
             history: Prior conversation turns.
             evidence: Optional structured SatQuery telemetry (e.g. BIT-CD, OWL-ViT, indices).
+            workspace_context: Optional structured metadata summary of scenes imported into the workspace.
             model: Optional model override.
             conversation_id: Session identifier.
             temperature: Sampling temperature.
@@ -78,8 +80,11 @@ class SatQueryChatbot:
         # 1. Assemble messages array
         messages: List[Dict[str, str]] = []
 
-        # System prompt with evidence injection
-        full_system_prompt = SATQUERY_SYSTEM_PROMPT + format_evidence_context(evidence)
+        # System prompt with evidence and workspace context injection
+        full_system_prompt = SATQUERY_SYSTEM_PROMPT + format_evidence_context(
+            evidence=evidence,
+            workspace_context=workspace_context
+        )
         messages.append({
             "role": "system",
             "content": full_system_prompt

@@ -34,6 +34,10 @@ class ChatRequest(BaseModel):
         default=None, 
         description="Optional structured SatQuery specialist evidence (e.g. BIT-CD, OWL-ViT, spectral indices, metadata)"
     )
+    workspace_context: Optional[Union[Dict[str, Any], List[Any]]] = Field(
+        default=None,
+        description="Optional structured summary of scenes and metadata loaded in the active workspace"
+    )
     model: Optional[str] = Field(
         default=None, 
         description="Optional model override to pass to LM Studio"
