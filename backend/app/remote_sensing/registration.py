@@ -338,10 +338,14 @@ def align_image_pair(
 
         # 1b. Check if grids are already identical
         same_dims = (h_a, w_a) == (h_b, w_b)
-        same_bounds = (bounds_a == bounds_b)
-        same_transforms = (transform_a == transform_b and transform_a is not None)
+        same_bounds = False
+        if bounds_a and bounds_b and len(bounds_a) == 4 and len(bounds_b) == 4:
+            same_bounds = all(abs(float(a) - float(b)) < 1e-3 for a, b in zip(bounds_a, bounds_b))
+        same_transforms = False
+        if transform_a and transform_b and len(transform_a) >= 6 and len(transform_b) >= 6:
+            same_transforms = all(abs(float(a) - float(b)) < 1e-3 for a, b in zip(transform_a[:6], transform_b[:6]))
 
-        if crs_matched and same_dims and (same_transforms or same_bounds):
+        if crs_matched and same_dims and same_transforms and same_bounds:
             img_b_aligned = img_b.copy()
             shared_valid_mask = src_valid_a & src_valid_b
             valid_px = int(np.count_nonzero(shared_valid_mask))
@@ -364,7 +368,18 @@ def align_image_pair(
                 "valid_mask": shared_valid_mask,
                 "valid_pixel_count": valid_px,
                 "total_pixel_count": int(w_a * h_a),
-                "notes": "Verified identical pixel grid co-registration and CRS matching."
+                "grid_checks": {
+                    "crs_matched": True,
+                    "transform_matched": True,
+                    "bounds_matched": True,
+                    "dimensions_matched": True,
+                    "pixel_size_meters": [abs(float(transform_a[0])), abs(float(transform_a[4]))] if len(transform_a) >= 5 else [10.0, 10.0]
+                },
+                "notes": (
+                    f"Verified identical spatial reference ({crs_a}), matching affine geotransform, "
+                    f"matching bounding coordinates, and identical {w_a}x{h_a} pixel grid dimensions. "
+                    f"Full geospatial co-registration verified directly from raster headers without reprojection."
+                )
             }
             return img_a, img_b_aligned, registration_info
 

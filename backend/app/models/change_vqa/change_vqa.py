@@ -91,6 +91,10 @@ class ChangeVQA(BaseModel):
         return {
             "answer": answer,
             "changed_area_percent": change_pct,
+            "change_area_percentage": change_pct,
+            "changed_pixels": cd_result.get("changed_pixels"),
+            "total_pixels": cd_result.get("total_pixels"),
+            "change_detected": cd_result.get("change_detected", False),
             "cluster_count": cluster_count,
 
             # Actual execution information

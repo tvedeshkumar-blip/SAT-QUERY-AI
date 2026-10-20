@@ -279,6 +279,11 @@ export const WorkspacePage: React.FC = () => {
             primaryImageUrl={primaryFile?.previewDataUrl || primaryFile?.previewUrl || primaryFile?.dataUrl || EARTH_OBSERVATION_PRESETS[0].imageUrl}
             secondaryImageUrl={secondaryFile?.previewDataUrl || secondaryFile?.previewUrl || secondaryFile?.dataUrl || EARTH_OBSERVATION_PRESETS[0].imageUrlSecondary}
             mode={response.mode}
+            t1Date={primaryFile?.stacProvenance?.datetime || (response.metadata?.temporal_provenance?.t1?.datetime as string | undefined)}
+            t2Date={secondaryFile?.stacProvenance?.datetime || (response.metadata?.temporal_provenance?.t2?.datetime as string | undefined)}
+            t1Label={primaryFile?.stacProvenance?.scene_id || primaryFile?.filename}
+            t2Label={secondaryFile?.stacProvenance?.scene_id || secondaryFile?.filename}
+            metadata={response.metadata}
           />
 
           {/* Collapsible Execution Trace */}

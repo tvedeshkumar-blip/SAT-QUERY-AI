@@ -372,13 +372,24 @@ class ScientificReportBuilder:
                 if "optical" in name_l or "reflectance" in name_l or "boa" in cal_l:
                     if "optical_input" in valid_artifact_ids:
                         matched_art_ids.append("optical_input")
+                    elif "ev_t1_before" in valid_artifact_ids:
+                        matched_art_ids.append("ev_t1_before")
                 if "sar" in name_l or "power" in name_l or "gamma" in cal_l or "sigma" in cal_l:
                     if "sar_input" in valid_artifact_ids:
                         matched_art_ids.append("sar_input")
+                if "change" in name_l or "bitemporal" in name_l or "delta" in name_l:
+                    if "ev_change_map" in valid_artifact_ids:
+                        matched_art_ids.append("ev_change_map")
+                    elif "ev_temporal_optical_change_map" in valid_artifact_ids:
+                        matched_art_ids.append("ev_temporal_optical_change_map")
+                    elif "ev_temporal_sar_change_map" in valid_artifact_ids:
+                        matched_art_ids.append("ev_temporal_sar_change_map")
                 if not matched_art_ids and valid_artifact_ids:
                     # If specific modality not matched, leave empty or link joint mask if applicable
                     if "mask" in pm.mask_applied.lower() and pm.mask_applied in valid_artifact_ids:
                         matched_art_ids.append(pm.mask_applied)
+                    elif "ev_change_map" in valid_artifact_ids:
+                        matched_art_ids.append("ev_change_map")
 
                 physical_measurements.append(PhysicalMeasurementReportItem(
                     name=pm.name,

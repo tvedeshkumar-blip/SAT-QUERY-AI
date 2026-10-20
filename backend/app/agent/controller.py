@@ -3,6 +3,7 @@ import time
 from datetime import datetime
 import logging
 from typing import Dict, Any, List
+import numpy as np
 
 from app.schemas.analysis import (
     AnalysisRequest, 
@@ -612,6 +613,20 @@ class AgentController:
         )
 
         # Step 12: Stage 7 Evidence-Grounded Scientific Verification
+        reg_info = result.get("registration_info")
+        if not reg_info and len(parsed_arrays) >= 2:
+            reg_info = {
+                "georeferenced": bool(metadata_list[0].get("crs") and metadata_list[1].get("crs")),
+                "co_registered": registration_valid,
+                "spatial_overlap_percent": spatial_overlap_pct,
+                "crs_matched": bool(metadata_list[0].get("crs") == metadata_list[1].get("crs")),
+                "registration_method": "dual_scene_validator"
+            }
+        if reg_info and isinstance(reg_info, dict):
+            reg_info = {k: v for k, v in reg_info.items() if not isinstance(v, np.ndarray)}
+        if reg_info and metadata_list:
+            metadata_list[0]["registration_info"] = reg_info
+
         proto_resp = {
             "id": req_id,
             "task": task,
@@ -627,6 +642,10 @@ class AgentController:
             "model_status": result.get("model_status"),
             "model_provenance": result.get("model_provenance"),
             "evidence": evidence_objects,
+            "registration_info": reg_info,
+            "changed_pixels": result.get("changed_pixels"),
+            "total_pixels": result.get("total_pixels"),
+            "changed_area_percent": result.get("changed_area_percent"),
             "metadata": metadata_list[0] if metadata_list else {}
         }
         evidence_pkg = EvidencePackageBuilder.from_analysis_response(proto_resp, raw_metadata=metadata_list[0] if metadata_list else {})
@@ -661,6 +680,10 @@ class AgentController:
                 "fallback_used": result.get("fallback_used", False),
                 "model_status": result.get("model_status"),
                 "evidence": evidence_objects,
+                "registration_info": reg_info,
+                "changed_pixels": result.get("changed_pixels"),
+                "total_pixels": result.get("total_pixels"),
+                "changed_area_percent": result.get("changed_area_percent"),
                 "metadata": metadata_list[0] if metadata_list else {},
                 "verification": verification_result,
                 "trace": trace.to_dict(),

@@ -97,3 +97,211 @@ def test_6_missing_weights_do_not_produce_trained_claims():
             assert m["is_remote_sensing_adapted"] is False
         elif m["implementation_status"] == "unavailable":
             assert m["is_trained"] is False
+
+
+def test_7_bitemporal_coregistration_integrity_and_no_contradiction():
+    """Rule 7: Real co-registered GeoTIFF scenes must resolve co_registered=True without contradiction."""
+    t1_path = "data/retrieved/S2B_43PGQ_20230528_0_L2A_visual_window_1792262748.tif"
+    t2_path = "data/retrieved/S2A_43PGQ_20231119_0_L2A_visual_window_1792262818.tif"
+    if os.path.exists(t1_path) and os.path.exists(t2_path):
+        with open(t1_path, "rb") as f:
+            b64_1 = base64.b64encode(f.read()).decode("utf-8")
+        with open(t2_path, "rb") as f:
+            b64_2 = base64.b64encode(f.read()).decode("utf-8")
+        fn1, fn2 = os.path.basename(t1_path), os.path.basename(t2_path)
+    else:
+        b64_1 = create_raw_tif_b64(with_crs_tag=True)
+        b64_2 = create_raw_tif_b64(with_crs_tag=True)
+        fn1, fn2 = "scene_t1.tif", "scene_t2.tif"
+
+    payload = {
+        "query": "What changed between May 2023 and November 2023 in this scene?",
+        "mode": "bitemporal",
+        "images": [
+            {
+                "data": b64_1,
+                "filename": fn1,
+                "role": "primary",
+                "modality": "OPTICAL",
+                "asset_category": "scientific_multispectral",
+                "provenance": {
+                    "collection": "sentinel-2-l2a",
+                    "scene_id": fn1,
+                    "datetime": "2023-05-28T05:46:49Z",
+                    "bands": ["B04", "B03", "B02"],
+                    "asset_key": "visual"
+                }
+            },
+            {
+                "data": b64_2,
+                "filename": fn2,
+                "role": "secondary",
+                "modality": "OPTICAL",
+                "asset_category": "scientific_multispectral",
+                "provenance": {
+                    "collection": "sentinel-2-l2a",
+                    "scene_id": fn2,
+                    "datetime": "2023-11-19T05:51:21Z",
+                    "bands": ["B04", "B03", "B02"],
+                    "asset_key": "visual"
+                }
+            }
+        ]
+    }
+
+    res = client.post("/api/v1/analyze", json=payload)
+    assert res.status_code == 200, res.text
+    data = res.json()
+
+    # Deterministic verifier must pass with zero contradictions
+    verification = data.get("verification", {})
+    assert verification.get("deterministic_passed") is True
+    assert len(verification.get("contradictions", [])) == 0
+
+    # Registration status must establish co_registered=True
+    report = data.get("reproducible_report", {})
+    prov = report.get("provenance", {})
+    reg_status = prov.get("registration_status", {})
+    assert reg_status.get("co_registered") is True
+    assert reg_status.get("georeferenced") is True
+
+    # Provenance source assets must match actual scenes
+    assert fn1 in prov.get("source_asset_ids", [])
+    assert fn2 in prov.get("source_asset_ids", [])
+
+    # Quantitative measurements must be grounded in ev_change_map
+    measurements = report.get("physical_measurements", [])
+    assert len(measurements) >= 3
+    pm_names = [pm["name"] for pm in measurements]
+    assert "bitemporal_changed_pixel_count" in pm_names
+    assert "bitemporal_total_scene_pixels" in pm_names
+    assert "bitemporal_difference_threshold" in pm_names
+
+    for pm in measurements:
+        assert len(pm["source_artifact_ids"]) > 0
+        assert "ev_change_map" in pm["source_artifact_ids"]
+
+
+def test_8_unreferenced_bitemporal_never_claims_coregistration():
+    """Rule 8: Unreferenced or CRS-absent rasters must never claim co-registration or physical area."""
+    buf1 = io.BytesIO()
+    Image.new("RGB", (64, 64), color=(60, 60, 60)).save(buf1, format="PNG")
+    b64_1 = base64.b64encode(buf1.getvalue()).decode("utf-8")
+
+    buf2 = io.BytesIO()
+    Image.new("RGB", (64, 64), color=(120, 120, 120)).save(buf2, format="PNG")
+    b64_2 = base64.b64encode(buf2.getvalue()).decode("utf-8")
+
+    payload = {
+        "query": "Identify changes between these dates.",
+        "mode": "bitemporal",
+        "images": [
+            {"data": b64_1, "filename": "unref_t1.png", "role": "primary"},
+            {"data": b64_2, "filename": "unref_t2.png", "role": "secondary"}
+        ]
+    }
+
+    res = client.post("/api/v1/analyze", json=payload)
+    assert res.status_code == 200, res.text
+    data = res.json()
+
+    # Must NOT claim co-registration
+    report = data.get("reproducible_report", {})
+    reg_status = report.get("provenance", {}).get("registration_status", {})
+    assert reg_status.get("co_registered") is False
+    assert reg_status.get("georeferenced") is False
+
+    # Verifier must pass without contradiction
+    v = data.get("verification", {})
+    assert v.get("deterministic_passed") is True
+    assert len(v.get("contradictions", [])) == 0
+
+    # Physical area in hectares must NOT be reported without uniform metric CRS
+    pm_names = [pm["name"] for pm in report.get("physical_measurements", [])]
+    assert "bitemporal_changed_area_hectares" not in pm_names
+
+
+def test_9_bitemporal_baseline_discloses_fallback_and_no_neural_claim():
+    """Rule 9: PixelDifferenceChangeBaseline must disclose fallback and not claim neural model."""
+    t1_path = "data/retrieved/S2B_43PGQ_20230528_0_L2A_visual_window_1792262748.tif"
+    t2_path = "data/retrieved/S2A_43PGQ_20231119_0_L2A_visual_window_1792262818.tif"
+    if os.path.exists(t1_path) and os.path.exists(t2_path):
+        with open(t1_path, "rb") as f:
+            b64_1 = base64.b64encode(f.read()).decode("utf-8")
+        with open(t2_path, "rb") as f:
+            b64_2 = base64.b64encode(f.read()).decode("utf-8")
+    else:
+        b64_1 = create_raw_tif_b64(with_crs_tag=True)
+        b64_2 = create_raw_tif_b64(with_crs_tag=True)
+
+    payload = {
+        "query": "Detect change map",
+        "mode": "bitemporal",
+        "images": [
+            {"data": b64_1, "filename": "t1.tif", "role": "primary"},
+            {"data": b64_2, "filename": "t2.tif", "role": "secondary"}
+        ]
+    }
+
+    res = client.post("/api/v1/analyze", json=payload)
+    assert res.status_code == 200, res.text
+    data = res.json()
+
+    assert data.get("fallback_used") is True
+    assert data.get("actual_model_used") == "PixelDifferenceChangeBaseline"
+    assert data.get("implementation_status") == "baseline"
+
+    # Verifier confirms no neural model claim was accepted
+    v = data.get("verification", {})
+    assert v.get("deterministic_passed") is True
+    assert len(v.get("contradictions", [])) == 0
+
+
+def test_10_missing_bands_keep_ndvi_sar_unavailable():
+    """Rule 10: RGB visual inputs must not fabricate calibrated NDVI or SAR measurements."""
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), color=(100, 150, 100)).save(buf, format="PNG")
+    b64_rgb = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+    payload = {
+        "query": "Calculate NDVI vegetation index and radar backscatter.",
+        "mode": "single",
+        "images": [
+            {"data": b64_rgb, "filename": "rgb_visual.png", "role": "primary"}
+        ]
+    }
+
+    res = client.post("/api/v1/analyze", json=payload)
+    assert res.status_code == 200, res.text
+    data = res.json()
+
+    # Calibrated NDVI and SAR measurements must remain absent/unavailable from RGB-only inputs
+    rep = data.get("reproducible_report", {})
+    pms = rep.get("physical_measurements", [])
+    assert not any("ndvi" in pm["name"].lower() or "dprvi" in pm["name"].lower() or "gamma" in pm["name"].lower() for pm in pms)
+    prov = rep.get("provenance", {})
+    assert prov.get("ndvi_status") is None or prov.get("ndvi_status") != "available"
+    assert prov.get("dprvi_status") is None or prov.get("dprvi_status") != "available"
+
+    # Verifier must reject genuine calibrated NDVI claims on RGB-only inputs
+    from app.agent.verifier import DeterministicVerifier, EvidencePackageBuilder
+    from app.schemas.verification import ClaimVerificationItem
+
+    evidence_pkg = EvidencePackageBuilder.from_analysis_response({
+        "metadata": {"asset_category": "visual_preview"},
+        "evidence": [{"id": "visual_rgb", "type": "preview"}]
+    })
+
+    claim = ClaimVerificationItem(
+        claim_text="Genuine calibrated NDVI for this vegetation scene is 0.65.",
+        claim_type="measurement",
+        status="supported",
+        cited_artifact_ids=["visual_rgb"]
+    )
+
+    passed, failures, evaluated, contradictions = DeterministicVerifier.verify(
+        evidence_package=evidence_pkg,
+        candidate_claims=[claim]
+    )
+    assert passed is False
+    assert any("RGB-only" in f or "B04" in f or "zero physical" in f for f in failures)
