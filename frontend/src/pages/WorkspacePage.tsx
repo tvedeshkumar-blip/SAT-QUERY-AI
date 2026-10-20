@@ -57,7 +57,23 @@ export const WorkspacePage: React.FC = () => {
     setQuery(config.query);
     setFiles(config.files);
     if (config.aoi_bbox && config.aoi_bbox.length === 4) {
-      setSelectedAOI(config.aoi_bbox as AOIBounds);
+      const bounds = config.aoi_bbox as AOIBounds;
+      setSelectedAOI(bounds);
+      const primary = config.files.find((f) => f.role === 'primary' || f.role === 'optical');
+      if (primary && (primary.previewDataUrl || primary.previewUrl)) {
+        setActiveOverlay({
+          imageUrl: primary.previewDataUrl || primary.previewUrl || primary.dataUrl,
+          bounds: bounds,
+          opacity: 0.85,
+          title: `Sentinel-2 T1 (${primary.stacProvenance?.datetime?.split('T')[0] || 'Pre-Monsoon'})`,
+          layerKey: 'scl_mask',
+          period: 't1'
+        });
+      } else {
+        setActiveOverlay(null);
+      }
+    } else {
+      setActiveOverlay(null);
     }
     setResponse(null);
     setErrorMsg(null);
@@ -260,8 +276,8 @@ export const WorkspacePage: React.FC = () => {
           {/* Evidence Viewer */}
           <EvidenceViewer
             evidenceList={response.evidence}
-            primaryImageUrl={primaryFile?.dataUrl || EARTH_OBSERVATION_PRESETS[0].imageUrl}
-            secondaryImageUrl={secondaryFile?.dataUrl || EARTH_OBSERVATION_PRESETS[0].imageUrlSecondary}
+            primaryImageUrl={primaryFile?.previewDataUrl || primaryFile?.previewUrl || primaryFile?.dataUrl || EARTH_OBSERVATION_PRESETS[0].imageUrl}
+            secondaryImageUrl={secondaryFile?.previewDataUrl || secondaryFile?.previewUrl || secondaryFile?.dataUrl || EARTH_OBSERVATION_PRESETS[0].imageUrlSecondary}
             mode={response.mode}
           />
 

@@ -30,6 +30,7 @@ export function getFallbackRealDemo3Preset() {
     files: [
       {
         dataUrl: 'data:image/tiff;base64,SUkqAAgAAAARAP4ABAABAAAAAAAAAAAB',
+        previewUrl: '/api/v1/acquisition/demo-bitemporal-preview/t1',
         filename: 'S2B_43PGQ_20230528_0_L2A_visual_window_1792262748.tif',
         role: 'primary' as const,
         isGeoTIFF: true,
@@ -67,6 +68,7 @@ export function getFallbackRealDemo3Preset() {
       },
       {
         dataUrl: 'data:image/tiff;base64,SUkqAAgAAAARAP4ABAABAAAAAAAAAAAB',
+        previewUrl: '/api/v1/acquisition/demo-bitemporal-preview/t2',
         filename: 'S2A_43PGQ_20231119_0_L2A_visual_window_1792262818.tif',
         role: 'secondary' as const,
         isGeoTIFF: true,

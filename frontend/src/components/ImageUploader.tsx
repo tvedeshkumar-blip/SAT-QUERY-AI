@@ -140,7 +140,7 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
             {primaryFile ? (
               <div className="w-full flex items-center gap-3">
                 <img
-                  src={primaryFile.dataUrl}
+                  src={primaryFile.previewDataUrl || primaryFile.previewUrl || primaryFile.dataUrl}
                   alt="Primary scene preview"
                   className="w-16 h-16 object-cover rounded-lg border border-slate-700 shadow-md"
                 />
@@ -216,7 +216,7 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
               {secondaryFile ? (
                 <div className="w-full flex items-center gap-3">
                   <img
-                    src={secondaryFile.dataUrl}
+                    src={secondaryFile.previewDataUrl || secondaryFile.previewUrl || secondaryFile.dataUrl}
                     alt="Secondary scene preview"
                     className="w-16 h-16 object-cover rounded-lg border border-slate-700 shadow-md"
                   />

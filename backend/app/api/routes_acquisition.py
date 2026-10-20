@@ -488,6 +488,21 @@ def get_demo_bitemporal_pair():
         "cloud_cover": 0.0
     }
 
+    t1_preview_path = os.path.join(stac_service.retrieval_dir, "S2B_43PGQ_20230528_preview.jpg")
+    t2_preview_path = os.path.join(stac_service.retrieval_dir, "S2A_43PGQ_20231119_preview.jpg")
+    if os.path.exists(t1_preview_path) and os.path.exists(t2_preview_path):
+        with open(t1_preview_path, "rb") as p1:
+            t1_preview_b64 = "data:image/jpeg;base64," + base64.b64encode(p1.read()).decode("utf-8")
+        with open(t2_preview_path, "rb") as p2:
+            t2_preview_b64 = "data:image/jpeg;base64," + base64.b64encode(p2.read()).decode("utf-8")
+    else:
+        import rasterio
+        from app.remote_sensing.preprocessing import convert_array_to_base64_png
+        with rasterio.open(t1_path) as ds1:
+            t1_preview_b64 = convert_array_to_base64_png(ds1.read())
+        with rasterio.open(t2_path) as ds2:
+            t2_preview_b64 = convert_array_to_base64_png(ds2.read())
+
     t1_val = AssetValidator.validate_asset(t1_path, filename=t1_filename, provenance=t1_provenance)
     t2_val = AssetValidator.validate_asset(t2_path, filename=t2_filename, provenance=t2_provenance)
 
@@ -505,6 +520,8 @@ def get_demo_bitemporal_pair():
         "files": [
             {
                 "dataUrl": t1_b64,
+                "previewDataUrl": t1_preview_b64,
+                "previewUrl": "/api/v1/acquisition/demo-bitemporal-preview/t1",
                 "filename": t1_filename,
                 "role": "primary",
                 "isGeoTIFF": True,
@@ -516,6 +533,8 @@ def get_demo_bitemporal_pair():
             },
             {
                 "dataUrl": t2_b64,
+                "previewDataUrl": t2_preview_b64,
+                "previewUrl": "/api/v1/acquisition/demo-bitemporal-preview/t2",
                 "filename": t2_filename,
                 "role": "secondary",
                 "isGeoTIFF": True,
@@ -529,3 +548,17 @@ def get_demo_bitemporal_pair():
     }
     _CACHED_DEMO_BITEMPORAL_PAIR = payload
     return payload
+
+@router.get("/acquisition/demo-bitemporal-preview/{scene}")
+def get_demo_bitemporal_preview(scene: str):
+    """
+    Serves authentic browser-displayable JPEG preview bytes for Demo 3 scenes ('t1' or 't2').
+    """
+    from fastapi.responses import FileResponse
+    filename = "S2B_43PGQ_20230528_preview.jpg" if scene == "t1" else ("S2A_43PGQ_20231119_preview.jpg" if scene == "t2" else None)
+    if not filename:
+        raise HTTPException(status_code=404, detail="Scene must be 't1' or 't2'")
+    preview_path = os.path.join(stac_service.retrieval_dir, filename)
+    if not os.path.exists(preview_path):
+        raise HTTPException(status_code=404, detail=f"Preview file not found: {filename}")
+    return FileResponse(preview_path, media_type="image/jpeg")

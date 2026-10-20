@@ -120,7 +120,7 @@ class BigEarthNetResNet50Classifier(BaseModel):
             model_name=model_id,
             task_type="land_cover_classification",
             implementation_status="unavailable",
-            is_trained=True,
+            is_trained=False,
             is_remote_sensing_adapted=True,
             license="MIT",
             version="0.2.0",
@@ -233,6 +233,7 @@ class BigEarthNetResNet50Classifier(BaseModel):
 
             self.model = model
             self._is_loaded = True
+            self.is_trained = True
             self.implementation_status = "pretrained_model"
             self._load_error = None
             logger.info(f"Successfully loaded '{self.model_id}' weights from '{resolved_weight_path}'.")

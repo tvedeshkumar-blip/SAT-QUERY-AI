@@ -238,6 +238,27 @@ def test_demo_bitemporal_pair_endpoint():
     assert any("Band 8" in lim for lim in t1["scientificLimitations"])
     assert any("NDVI" in lim for lim in t1["scientificLimitations"])
 
+    # Authentic preview rendering paths for browser display
+    assert t1["previewDataUrl"].startswith("data:image/")
+    assert t2["previewDataUrl"].startswith("data:image/")
+    assert t1["previewUrl"] == "/api/v1/acquisition/demo-bitemporal-preview/t1"
+    assert t2["previewUrl"] == "/api/v1/acquisition/demo-bitemporal-preview/t2"
+
+def test_demo_bitemporal_preview_image_endpoints():
+    """Verify authentic JPEG/PNG preview image endpoints for Demo 3 browser rendering."""
+    res_t1 = client.get("/api/v1/acquisition/demo-bitemporal-preview/t1")
+    assert res_t1.status_code == 200
+    assert "image/jpeg" in res_t1.headers["content-type"]
+    assert len(res_t1.content) > 50000
+
+    res_t2 = client.get("/api/v1/acquisition/demo-bitemporal-preview/t2")
+    assert res_t2.status_code == 200
+    assert "image/jpeg" in res_t2.headers["content-type"]
+    assert len(res_t2.content) > 50000
+
+    res_invalid = client.get("/api/v1/acquisition/demo-bitemporal-preview/invalid_scene")
+    assert res_invalid.status_code == 404
+
 def test_demo_bitemporal_pair_analysis_execution():
     """Verify full remote sensing change detection execution using the authentic Demo 3 pair."""
     pair_res = client.get("/api/v1/acquisition/demo-bitemporal-pair")

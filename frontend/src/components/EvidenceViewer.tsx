@@ -297,7 +297,7 @@ export const EvidenceViewer: React.FC<EvidenceViewerProps> = ({
               </div>
               <div className="p-2 flex items-center justify-center flex-1 overflow-auto">
                 <img
-                  src={currentDisplayImage}
+                  src={selectedEvidence?.data_base64 || selectedEvidence?.artifact_url || secondaryImageUrl || currentDisplayImage}
                   alt="Evidence artifact"
                   className="max-h-[380px] object-contain transition-transform duration-200"
                   style={{ transform: `scale(${zoomLevel})`, opacity: opacity }}

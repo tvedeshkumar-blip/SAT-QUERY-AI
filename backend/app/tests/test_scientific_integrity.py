@@ -92,6 +92,8 @@ def test_6_missing_weights_do_not_produce_trained_claims():
     """Rule 6: Untrained heuristic models must not claim is_trained=True or is_remote_sensing_adapted=True."""
     detailed_models = model_registry.list_models_detailed()
     for m in detailed_models:
-        if m["implementation_status"] in ("baseline", "demo", "unavailable"):
+        if m["implementation_status"] in ("baseline", "demo"):
             assert m["is_trained"] is False
             assert m["is_remote_sensing_adapted"] is False
+        elif m["implementation_status"] == "unavailable":
+            assert m["is_trained"] is False

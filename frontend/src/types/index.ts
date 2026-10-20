@@ -17,6 +17,8 @@ export type TaskType =
 export interface UploadedFileState {
   file?: File;
   dataUrl: string;
+  previewDataUrl?: string;
+  previewUrl?: string;
   filename: string;
   size?: number;
   role: 'primary' | 'secondary' | 'optical' | 'sar';
