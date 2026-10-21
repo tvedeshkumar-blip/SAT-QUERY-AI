@@ -6,15 +6,49 @@ import { ModelRegistryPage } from './pages/ModelRegistryPage';
 import { ArchitecturePage } from './pages/ArchitecturePage';
 import { checkBackendHealth } from './services/api';
 
+type TabType = 'workspace' | 'benchmarks' | 'models' | 'architecture';
+
+const parseTabFromLocation = (): TabType => {
+  const hash = window.location.hash.replace('#', '').toLowerCase();
+  if (['workspace', 'benchmarks', 'models', 'architecture'].includes(hash)) {
+    return hash as TabType;
+  }
+  const params = new URLSearchParams(window.location.search);
+  const tab = params.get('tab')?.toLowerCase();
+  if (tab && ['workspace', 'benchmarks', 'models', 'architecture'].includes(tab)) {
+    return tab as TabType;
+  }
+  return 'workspace';
+};
+
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'workspace' | 'benchmarks' | 'models' | 'architecture'>('workspace');
+  const [activeTab, setActiveTabState] = useState<TabType>(parseTabFromLocation);
   const [isBackendConnected, setIsBackendConnected] = useState<boolean>(false);
 
   useEffect(() => {
     checkBackendHealth().then((health) => {
       setIsBackendConnected(health.status === 'ok');
     });
+
+    const handleLocationChange = () => {
+      const tab = parseTabFromLocation();
+      setActiveTabState(tab);
+    };
+
+    window.addEventListener('hashchange', handleLocationChange);
+    window.addEventListener('popstate', handleLocationChange);
+    return () => {
+      window.removeEventListener('hashchange', handleLocationChange);
+      window.removeEventListener('popstate', handleLocationChange);
+    };
   }, []);
+
+  const setActiveTab = (tab: TabType) => {
+    setActiveTabState(tab);
+    if (window.location.hash !== `#${tab}`) {
+      window.location.hash = tab;
+    }
+  };
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-cyan-500/30 selection:text-cyan-200">

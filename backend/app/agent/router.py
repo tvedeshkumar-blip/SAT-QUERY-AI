@@ -82,7 +82,92 @@ class IntentClassifier:
                 classifier_type="rule_based"
             )
 
+        if mode_hint in ("classification", "land_cover", "land_cover_classification"):
+            return RoutingDecision(
+                task="land_cover_classification",
+                reason="User explicitly selected Land Cover Classification mode.",
+                required_modalities=["MULTISPECTRAL"],
+                required_image_count=1,
+                selected_models=["BigEarthNetResNet50Classifier"],
+                classifier_type="explicit_user_override"
+            )
+
+        if mode_hint in ("vqa", "single_vqa", "single_image_vqa"):
+            return RoutingDecision(
+                task="vqa",
+                reason="User explicitly selected Single-Image VQA mode.",
+                required_modalities=["OPTICAL"],
+                required_image_count=1,
+                selected_models=["GenericVLMOrchestrator"],
+                classifier_type="explicit_user_override"
+            )
+
+        if mode_hint in ("caption", "captioning"):
+            return RoutingDecision(
+                task="captioning",
+                reason="User explicitly selected Image Captioning mode.",
+                required_modalities=["OPTICAL"],
+                required_image_count=1,
+                selected_models=["ClassicalSpectralCaptionerBaseline"],
+                classifier_type="explicit_user_override"
+            )
+
+        if mode_hint == "grounding":
+            return RoutingDecision(
+                task="grounding",
+                reason="User explicitly selected Visual Grounding mode.",
+                required_modalities=["OPTICAL"],
+                required_image_count=1,
+                selected_models=["GroundingProvider", "google/owlvit-base-patch32", "ClassicalBaselineGrounder"],
+                classifier_type="explicit_user_override"
+            )
+
         # Single image tasks
+        if mode_hint == "single":
+            if any(w in q for w in ["highlight", "detect", "ground", "find", "locate", "outline", "mask", "box", "segment", "where is", "where are", "show me", "show", "pinpoint", "bounding box"]):
+                return RoutingDecision(
+                    task="grounding",
+                    reason="Single-image mode with feature localization prompt.",
+                    required_modalities=["OPTICAL"],
+                    required_image_count=1,
+                    selected_models=["GroundingProvider", "google/owlvit-base-patch32", "ClassicalBaselineGrounder"],
+                    classifier_type="explicit_user_override"
+                )
+            return RoutingDecision(
+                task="vqa",
+                reason="User selected Single-Image mode; routed to remote sensing visual question answering.",
+                required_modalities=["OPTICAL"],
+                required_image_count=1,
+                selected_models=["GenericVLMOrchestrator"],
+                classifier_type="explicit_user_override"
+            )
+
+        # Interrogative VQA questions (e.g. "What type of land cover dominates this image?") route to VQA.
+        # Descriptive prompts (e.g. "Describe the visible land cover in this satellite image") route to VQA/captioning.
+        # Explicit classification requests (e.g. "Classify land cover", "BigEarthNet classification", "CORINE classes") route to land_cover_classification.
+        has_question_or_desc = (
+            q.startswith(("what", "which", "is there", "are there", "how many", "describe", "explain", "summarize", "tell me", "identify")) or
+            "?" in q or
+            "visible" in q or
+            "visual" in q
+        )
+        is_explicit_classification = (
+            not has_question_or_desc and (
+                any(w in q for w in ["classify", "classification", "corine", "bigearthnet", "lulc"]) or
+                (("classes" in q or "categories" in q) and ("land cover" in q or "land use" in q)) or
+                (("land cover" in q or "land use" in q) and any(w in q for w in ["mapping", "map classes", "prediction", "predict"]))
+            )
+        )
+        if is_explicit_classification:
+            return RoutingDecision(
+                task="land_cover_classification",
+                reason="Single scene provided with land-cover classification query.",
+                required_modalities=["MULTISPECTRAL"],
+                required_image_count=1,
+                selected_models=["BigEarthNetResNet50Classifier"],
+                classifier_type="rule_based"
+            )
+
         if any(w in q for w in ["highlight", "detect", "ground", "find", "locate", "outline", "mask", "box", "segment", "where is", "where are", "show me", "show", "pinpoint", "bounding box"]):
             return RoutingDecision(
                 task="grounding",

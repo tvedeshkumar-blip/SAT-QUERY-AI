@@ -343,6 +343,11 @@ class LandCoverClassificationTool(AgentTool):
         )
 
     def run(self, images: List[Any], query: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
+        if not images or len(images) == 0:
+            return {
+                "status": "failed",
+                "error": "No input satellite raster provided for land-cover classification. Sentinel-2 10-band multispectral data is required."
+            }
         model = model_registry.get("classification")
         return model.predict(images=images, query=query, metadata=metadata, **kwargs)
 

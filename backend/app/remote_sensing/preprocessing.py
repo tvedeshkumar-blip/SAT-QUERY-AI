@@ -100,6 +100,22 @@ def robust_remote_sensing_preprocess(
             output_arr = normalize_to_uint8(arr_clean)
             provenance["preprocessing"] = "standard_rgb_pass_through"
             provenance["normalization"] = "percentile_2_98"
+        elif band_count == 4 and (meta.get("color_mode") == "RGBA" or meta.get("has_alpha") or not meta.get("is_geotiff")):
+            # RGBA image: handle alpha channel properly
+            rgb_bands = arr_clean[:, :, :3]
+            alpha_band = arr_clean[:, :, 3]
+            if np.any(alpha_band < 254.0):
+                alpha_norm = np.clip(alpha_band / 255.0, 0.0, 1.0)[:, :, None]
+                blended = rgb_bands * alpha_norm + 255.0 * (1.0 - alpha_norm)
+                output_arr = normalize_to_uint8(blended)
+                provenance["preprocessing"] = "rgba_alpha_blended_to_rgb"
+                provenance["alpha_blended"] = True
+            else:
+                output_arr = normalize_to_uint8(rgb_bands)
+                provenance["preprocessing"] = "rgba_alpha_opaque_to_rgb"
+            provenance["is_visual_preview"] = True
+            provenance["nir_preserved"] = False
+            provenance["normalization"] = "percentile_2_98"
         elif band_count >= 4:
             # Multispectral (e.g. B, G, R, NIR) -> Extract natural color RGB (bands 1,2,3)
             # and preserve NIR band in metadata

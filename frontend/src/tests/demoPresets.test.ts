@@ -6,10 +6,23 @@ import type { AnalysisMode } from '../types/index.ts';
 
 describe('Demo Presets: Dynamic Orchestration & Preset Verification', () => {
 
-  test('verifies all 5 required ISRO demonstration presets are registered', () => {
-    assert.equal(DEMO_PRESETS.length, 5);
+  test('verifies all required ISRO demonstration presets and Demo 6 BigEarthNet are registered', () => {
+    assert.equal(DEMO_PRESETS.length, 6);
     const ids = DEMO_PRESETS.map((p) => p.id);
-    assert.deepEqual(ids, ['demo1', 'demo2', 'demo3', 'demo4', 'demo5']);
+    assert.deepEqual(ids, ['demo1', 'demo2', 'demo3', 'demo4', 'demo5', 'demo6']);
+  });
+
+  test('Demo 6 is configured for BigEarthNetv2 10-band land-cover classification', () => {
+    const demo6 = DEMO_PRESETS.find((p) => p.id === 'demo6');
+    assert.ok(demo6, 'Demo 6 must exist');
+    assert.equal(demo6.id, 'demo6');
+    assert.equal(demo6.mode, 'classification');
+    assert.equal(demo6.badge, 'BIGEARTHNET-V2');
+    const cfg = demo6.load() as any;
+    assert.equal(cfg.mode, 'classification');
+    assert.equal(cfg.files.length, 1);
+    assert.equal(cfg.files[0].isGeoTIFF, true);
+    assert.equal(cfg.files[0].validation.raster_metadata.bands, 10);
   });
 
   test('Demo 4 is configured for dynamic multi-step orchestration with verified Mumbai query', () => {

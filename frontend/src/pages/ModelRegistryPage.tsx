@@ -103,6 +103,21 @@ export const ModelRegistryPage: React.FC = () => {
               implementation_status: 'baseline',
               is_trained: false,
               is_remote_sensing_adapted: false
+            },
+            {
+              name: 'BigEarthNetResNet50Classifier',
+              task: 'Land-Cover Multi-Label Classification',
+              implementation: 'BigEarthNetResNet50Classifier (ResNet-50 10-Band Multi-Label Classifier)',
+              version: '0.2.0',
+              model_source: 'BIFOLD-BigEarthNetv2-0/resnet50-s2-v0.2.0 (reBEN)',
+              license: 'MIT',
+              modality: 'SENTINEL-2 MULTISPECTRAL (10 BANDS)',
+              input_requirements: '10 Sentinel-2 bands (B02, B03, B04, B05, B06, B07, B08, B8A, B11, B12)',
+              device_requirements: 'CPU / GPU',
+              status: 'loaded',
+              implementation_status: 'pretrained_model',
+              is_trained: true,
+              is_remote_sensing_adapted: true
             }
           ]);
         }

@@ -1,4 +1,4 @@
-export type AnalysisMode = 'single' | 'optical_sar' | 'bitemporal' | 'orchestration' | 'temporal';
+export type AnalysisMode = 'single' | 'optical_sar' | 'bitemporal' | 'orchestration' | 'temporal' | 'classification';
 
 export type TaskType = 
   | 'vqa' 
@@ -12,7 +12,9 @@ export type TaskType =
   | 'sentinel2_ndvi'
   | 'sentinel1_rtc_dprvi'
   | 'orchestration'
-  | 'temporal_multimodal_clarification';
+  | 'temporal_multimodal_clarification'
+  | 'classification'
+  | 'land_cover_classification';
 
 export interface UploadedFileState {
   file?: File;
@@ -203,6 +205,30 @@ export interface TemporalSARChangePayload {
   scientific_limitations?: string[];
 }
 
+export interface ClassificationPredictionItem {
+  label: string;
+  probability: number;
+}
+
+export interface ClassificationResult {
+  model_name: string;
+  primary_model?: string;
+  actual_model_used?: string;
+  task: string;
+  answer?: string;
+  confidence?: number;
+  confidence_label?: string;
+  implementation_status: string;
+  bands_used: string[];
+  input_shape: number[];
+  target_spatial_size: number[];
+  threshold: number;
+  predicted_classes: string[];
+  class_probabilities: Record<string, number>;
+  top_predictions: ClassificationPredictionItem[];
+  metadata?: Record<string, any>;
+}
+
 export interface AnalysisResponse {
   id: string;
   task: TaskType;
@@ -219,6 +245,7 @@ export interface AnalysisResponse {
   model_status?: string;
   model_provenance?: Record<string, any>;
   evidence: VisualEvidence[];
+  classification_result?: ClassificationResult | null;
   structured_evidence?: any;
   trace: ExecutionTrace;
   metadata?: Record<string, any>;

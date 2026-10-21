@@ -215,5 +215,47 @@ export const DEMO_PRESETS: DemoPresetItem[] = [
         ]
       };
     }
+  },
+  {
+    id: 'demo6',
+    title: 'Demo 6: BigEarthNet Land Cover',
+    subtitle: '10-Band Sentinel-2 ResNet-50 CORINE Multi-Label',
+    mode: 'classification',
+    query: 'Classify 19-class CORINE land-cover categories for this Sentinel-2 multispectral scene',
+    badge: 'BIGEARTHNET-V2',
+    load: () => {
+      const img = generateSyntheticSatelliteScene('agricultural');
+      return {
+        mode: 'classification' as const,
+        query: 'Classify 19-class CORINE land-cover categories for this Sentinel-2 multispectral scene',
+        files: [
+          {
+            dataUrl: img,
+            filename: 'sentinel2_10band_multispectral_patch.tif',
+            role: 'primary',
+            isGeoTIFF: true,
+            assetCategory: 'multispectral_cube',
+            validation: {
+              status: 'valid',
+              file_format: 'GeoTIFF',
+              asset_category: 'multispectral_cube',
+              scientific_status: 'calibrated_surface_reflectance',
+              raster_metadata: {
+                width: 120,
+                height: 120,
+                bands: 10,
+                band_names: ['B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B11', 'B12'],
+                crs: 'EPSG:32643',
+                crs_display: 'WGS 84 / UTM zone 43N (EPSG:32643)'
+              }
+            },
+            scientificLimitations: [
+              'BigEarthNetv2 ResNet-50 requires exactly 10 Sentinel-2 bands in ESA/reBEN order.',
+              'Visual RGB screenshots lack multispectral bands B05-B12 and cannot be processed by this specialist model.'
+            ]
+          }
+        ]
+      };
+    }
   }
 ];

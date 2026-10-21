@@ -98,6 +98,7 @@ class AnalysisResponseSchema(BaseModel):
     model_status: Optional[str] = Field(default=None, description="Model status: loaded, checkpoint_not_found, baseline, etc.")
     model_provenance: Optional[Dict[str, Any]] = Field(default=None, description="Detailed model provenance metadata")
     evidence: List[VisualEvidenceSchema]
+    classification_result: Optional[Dict[str, Any]] = Field(default=None, description="Detailed multi-label classification outputs")
     trace: ExecutionTraceSchema
     metadata: Dict[str, Any] = Field(default_factory=dict)
     confidence_breakdown: Optional[ConfidenceBreakdownSchema] = None

@@ -20,17 +20,33 @@ def query_alias(request: AnalysisRequest):
 
 @router.post("/analyze/vqa", response_model=AnalysisResponseSchema)
 def analyze_vqa(request: AnalysisRequest):
-    request.mode = "single"
+    if not request.images or len(request.images) == 0:
+        raise HTTPException(status_code=400, detail="No image provided. Single-Image VQA requires an input satellite image.")
+    request.mode = "vqa"
     return analyze_imagery(request)
 
 @router.post("/analyze/caption", response_model=AnalysisResponseSchema)
 def analyze_caption(request: AnalysisRequest):
-    request.mode = "single"
+    if not request.images or len(request.images) == 0:
+        raise HTTPException(status_code=400, detail="No image provided. Captioning requires an input satellite image.")
+    request.mode = "captioning"
     return analyze_imagery(request)
 
 @router.post("/analyze/grounding", response_model=AnalysisResponseSchema)
 def analyze_grounding(request: AnalysisRequest):
-    request.mode = "single"
+    if not request.images or len(request.images) == 0:
+        raise HTTPException(status_code=400, detail="No image provided. Visual grounding requires an input satellite image.")
+    request.mode = "grounding"
+    return analyze_imagery(request)
+
+@router.post("/analyze/classify", response_model=AnalysisResponseSchema)
+def analyze_classify(request: AnalysisRequest):
+    request.mode = "classification"
+    return analyze_imagery(request)
+
+@router.post("/analyze/classification", response_model=AnalysisResponseSchema)
+def analyze_classification_alias(request: AnalysisRequest):
+    request.mode = "classification"
     return analyze_imagery(request)
 
 @router.post("/analyze/change", response_model=AnalysisResponseSchema)

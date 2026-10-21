@@ -17,8 +17,19 @@ def parse_geotiff_or_image(image_base64: str, filename: Optional[str] = None) ->
     CRITICAL INTEGRITY RULE: Never guesses CRS (e.g. EPSG:32644 fallback is forbidden).
     If CRS is not in metadata or tags, metadata['crs'] = None.
     """
-    clean_b64 = image_base64.split(",")[-1] if "," in image_base64 else image_base64
-    image_bytes = base64.b64decode(clean_b64)
+    raw_str = (image_base64 or "").strip()
+    if raw_str.startswith(("http://", "https://")):
+        import httpx
+        try:
+            resp = httpx.get(raw_str, timeout=10.0, follow_redirects=True)
+            if resp.status_code != 200:
+                raise ValueError(f"Failed to fetch image from URL '{raw_str}': HTTP {resp.status_code}")
+            image_bytes = resp.content
+        except Exception as e:
+            raise ValueError(f"Failed to fetch image from URL: {e}")
+    else:
+        clean_b64 = raw_str.split(",")[-1] if "," in raw_str else raw_str
+        image_bytes = base64.b64decode(clean_b64)
 
     fname = (filename or "uploaded_raster.png").lower()
     is_tiff_name = fname.endswith(".tif") or fname.endswith(".tiff")
@@ -164,10 +175,21 @@ def parse_geotiff_or_image(image_base64: str, filename: Optional[str] = None) ->
                 metadata["resolution"] = None
 
         # Convert to numpy array
-        if pil_img.mode not in ("RGB", "L", "RGBA"):
-            pil_img = pil_img.convert("RGB")
+        metadata["color_mode"] = pil_img.mode
+        metadata["format"] = pil_img.format
+        if pil_img.mode == "RGBA" and not is_tiff:
+            metadata["has_alpha"] = True
+            # Composite transparent alpha pixels onto a clean neutral background (e.g. white)
+            bg = Image.new("RGBA", pil_img.size, (255, 255, 255, 255))
+            composited = Image.alpha_composite(bg, pil_img)
+            pil_rgb = composited.convert("RGB")
+            arr = np.array(pil_rgb)
+            metadata["alpha_handling"] = "composited_white_background"
+        else:
+            if pil_img.mode not in ("RGB", "L", "RGBA"):
+                pil_img = pil_img.convert("RGB")
+            arr = np.array(pil_img)
 
-        arr = np.array(pil_img)
         metadata["width"] = int(pil_img.width)
         metadata["height"] = int(pil_img.height)
         metadata["bands"] = int(arr.shape[2] if arr.ndim == 3 else 1)

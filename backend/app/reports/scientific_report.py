@@ -24,7 +24,7 @@ from app.schemas.verification import (
     HeuristicIndicatorItem,
     VerificationResponseSchema,
 )
-from app.agent.verifier import EvidencePackageBuilder
+# EvidencePackageBuilder imported locally in build_report if needed
 
 logger = logging.getLogger("satquery.reports.scientific")
 
@@ -65,6 +65,7 @@ class ScientificReportBuilder:
         # 1. Build or retrieve EvidencePackageSchema
         if evidence_package is None:
             try:
+                from app.agent.verifier import EvidencePackageBuilder
                 evidence_package = EvidencePackageBuilder.from_analysis_response(resp_data, raw_metadata=metadata)
             except Exception as e:
                 logger.warning(f"Could not build evidence package from response: {e}")
@@ -358,6 +359,18 @@ class ScientificReportBuilder:
                 provenance.joint_valid_pixel_count = sar_chg.get("joint_valid_pixel_count")
             provenance.dprvi_assumption_violations_count = sar_chg.get("dprvi_assumption_violations", {}).get("total_count", 0)
 
+        temp_prov = metadata.get("temporal_provenance")
+        if isinstance(temp_prov, dict):
+            if not provenance.temporal_t1_datetime:
+                provenance.temporal_t1_datetime = temp_prov.get("t1", {}).get("datetime")
+            if not provenance.temporal_t2_datetime:
+                provenance.temporal_t2_datetime = temp_prov.get("t2", {}).get("datetime")
+
+        if not provenance.temporal_t1_datetime and acquisition_timestamps:
+            provenance.temporal_t1_datetime = acquisition_timestamps[0]
+            if len(acquisition_timestamps) > 1:
+                provenance.temporal_t2_datetime = acquisition_timestamps[1]
+
         # 3. Physical Measurements
         physical_measurements: List[PhysicalMeasurementReportItem] = []
         valid_artifact_ids = set()
@@ -592,6 +605,19 @@ def generate_scientific_markdown(report: ScientificReportSchema) -> str:
         lines.append(f"| **Terrain Layover/Shadow Mask** | `{prov.sar_terrain_mask_status or 'unavailable_from_stac_provider'}` | Provider geometric mask unavailable; terrain relief shadows not masked |")
         if prov.dprvi_status == "unsupported_zero_valid_pixels":
             lines.append(f"| **Calculation Status** | `unsupported_zero_valid_pixels` | Zero valid radar pixels observed; numerical dual-pol statistics suppressed |")
+
+    if prov.temporal_t1_datetime and prov.temporal_t2_datetime and prov.vegetation_loss_pct is None and prov.radar_canopy_loss_pct is None:
+        lines.append("")
+        lines.append("### Bi-Temporal Optical Acquisition & Registration Provenance")
+        lines.append("")
+        lines.append("| Metric / Parameter | Value | Description / Standard |")
+        lines.append("| :--- | :--- | :--- |")
+        lines.append(f"| **T1 Acquisition (Pre-Event)** | `{prov.temporal_t1_datetime}` | Baseline optical acquisition timestamp |")
+        lines.append(f"| **T2 Acquisition (Post-Event)** | `{prov.temporal_t2_datetime}` | Comparison optical acquisition timestamp |")
+        co_reg = prov.registration_status.get("co_registered", False) if isinstance(prov.registration_status, dict) else False
+        reg_m = prov.registration_status.get("registration_method", "N/A") if isinstance(prov.registration_status, dict) else "N/A"
+        lines.append(f"| **Co-Registration Status** | `{co_reg} ({reg_m})` | Spatial alignment verification |")
+        lines.append("| **Scientific Classification** | `Candidate Spectral Delta (Unconfirmed)` | Raw pixel differences require independent ground verification |")
 
     if prov.delta_ndvi_mean is not None or (prov.temporal_t1_datetime and prov.vegetation_loss_pct is not None):
         lines.append("")

@@ -68,9 +68,15 @@ class ChangeVQA(BaseModel):
                 f"{cluster_count} distinct spatial clusters."
             )
 
+        scientific_note = (
+            " [Scientific Reliability Note]: Candidate pixel differences reflect raw optical reflectance variance (delta > 35 DN) and are heavily inflated by cloud cover and atmospheric haze in the May 2023 pre-monsoon acquisition relative to the November 2023 post-monsoon scene, alongside seasonal vegetation phenology. "
+            "Because input assets contain RGB visible bands only, scene classification layer (SCL) cloud masks and NIR bands are unavailable; algorithmic cloud masking was not performed. "
+            "Candidate pixel differences are unconfirmed candidate clusters and do not constitute confirmed real-world land-cover alterations."
+        )
+
         answer = (
             f"Bi-temporal change analysis: {change_pct:.2f}% of the scene exhibited "
-            f"measurable spectral difference. {co_reg_note} {attribution_text}"
+            f"candidate spectral difference (threshold > 35 DN). {co_reg_note} {attribution_text}{scientific_note}"
         )
 
         # Preserve the actual provider/model telemetry.

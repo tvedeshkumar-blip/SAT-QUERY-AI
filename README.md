@@ -83,6 +83,7 @@ SatQuery AI utilizes dedicated task adapters and explicitly labeled baselines:
 | **`PixelDifferenceChangeBaseline`** | Temporal Change Baseline | Baseline (Spectral differencing + overlap check) | Pixel difference mask + `changed_area_percent` statistics |
 | **`EvidenceGroundedChangeVQA`** | Change VQA | Baseline (Evidence-grounded language synthesis) | Natural-language reasoning grounded strictly on difference metrics |
 | **`OpticalSARVisualizationBaseline`** | Cross-Modal Fusion | Baseline (Linear composite & backscatter slicing) | Fused dual-modality composite highlighting specular water and corner reflectors |
+| **`BigEarthNetResNet50Classifier`** | Land-Cover Multi-Label Classification | Pretrained Neural Model (`BIFOLD-BigEarthNetv2-0/resnet50-s2-v0.2.0` / `v0.1.1`) | 19 CORINE land-cover probabilities [0.0, 1.0], predicted classes, and ranked breakdown |
 
 ---
 
@@ -276,13 +277,41 @@ satellite-photo-explorer/
 
 ## 🛠️ 7. Quickstart Guide
 
-### Option A: Local Development
+### Environment Configuration
+Copy `env.example` to `.env` (or configure your shell environment):
+```bash
+cp env.example .env
+```
+Key configuration parameters (use placeholders; never commit real secrets):
+```env
+PORT=8000
+DEVICE=auto
+BACKEND_URL=http://127.0.0.1:8000
+CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+
+# Optional Vision-Language Model API (Google Gemini 3.8 Flash)
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-3.8-flash
+
+# Optional Local LM Studio Checkpoint
+LMSTUDIO_BASE_URL=http://127.0.0.1:1234/v1
+LMSTUDIO_VLM_MODEL=qwen2.5-vl-3b-instruct
+
+# Optional Local Checkpoint Paths
+RS_VLM_MODEL_ID=microsoft/Florence-2-base
+RS_VLM_CHECKPOINT_PATH=models/weights/florence_2_base/
+```
+
+### Running the Application
 
 #### 1. Backend (Terminal 1)
 ```bash
-cd backend
-pip install -r requirements.txt
+# Windows PowerShell
+$env:PYTHONPATH="backend"
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# Linux / macOS
+PYTHONPATH=backend python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 - API Documentation (Swagger): `http://127.0.0.1:8000/docs`
 - Health Endpoint: `http://127.0.0.1:8000/health`
@@ -293,50 +322,72 @@ cd frontend
 npm install
 npm run dev
 ```
-- Workspace UI: `http://127.0.0.1:3000`
+- Workspace UI: `http://localhost:3000`
 
 ---
 
-### Option B: Docker Compose (Single Command)
+## 🧪 8. Automated Testing & Verification
+
+### Run Backend Tests (74 Passed, 1 Skipped)
 ```bash
-docker-compose up --build
-```
-- Frontend: `http://localhost:3000`
-- Backend API: `http://localhost:8000`
+# Windows PowerShell
+$env:PYTHONPATH="backend"
+python -m pytest backend/app/tests/test_vqa_e2e_repair.py backend/app/tests/test_routing.py backend/app/tests/test_vqa_provider.py backend/app/tests/test_bigearthnet_model.py backend/app/tests/test_bigearthnet_lifecycle.py backend/app/tests/test_scientific_integrity.py
 
----
-
-## 🧪 8. Automated Testing & System Validation
-
-### Run Unit Tests (34 Tests in <1s)
-```bash
-python -m pytest backend/app/tests/ -v
+# Linux / macOS
+PYTHONPATH=backend python -m pytest backend/app/tests/test_vqa_e2e_repair.py backend/app/tests/test_routing.py backend/app/tests/test_vqa_provider.py backend/app/tests/test_bigearthnet_model.py backend/app/tests/test_bigearthnet_lifecycle.py backend/app/tests/test_scientific_integrity.py
 ```
 
-### Run End-to-End System Validation (11 Acceptance Gates)
+### Run Frontend Tests (133 Passed across 20 Suites)
 ```bash
-python backend/scripts/validate_system.py
+cd frontend
+npm test
 ```
 
-### Generate Real Sample GeoTIFF Rasters
+### Run Frontend Production Build
 ```bash
-python backend/scripts/generate_sample_geotiffs.py
+cd frontend
+npm run build
 ```
 
 ---
 
-## 🚀 9. Cloud Deployment
+## 🔍 9. Single-Image VQA Workflow Verification
 
-- **Frontend (Vercel):** Configured via [`vercel.json`](file:///vercel.json) with client-side SPA route rewrites.
-- **Backend (Render):** Configured via [`render.yaml`](file:///render.yaml) for Python 3.11 with automatic Uvicorn service instantiation.
-- **Production Container:** High-performance multi-stage Docker builds with Nginx HTTP/2 gzip compression.
+1. Start backend and frontend as shown above.
+2. Open `http://localhost:3000`.
+3. In the Mode Selector, select **`Single-Image VQA`** (mode `'single'`).
+4. In **Input Slot 1 (Visual Preview)**, upload any satellite preview image (e.g., `data/retrieved/S2A_43PGQ_20231119_preview.jpg` or any RGB/RGBA PNG/JPEG).
+5. Submit a visual inquiry:
+   > *"Describe the visible land cover in this satellite image. Identify apparent vegetation, buildings, roads, and water where visible. Distinguish observations from uncertain interpretations. Do not claim to have performed multispectral analysis."*
+6. Review the result:
+   - The response is generated via genuine live provider execution (`gemini-3.8-flash` if `GEMINI_API_KEY` is present, or the local pixel statistics baseline).
+   - Execution metadata honestly records `primary_model="Florence-2-base"`, `actual_model_used="gemini-3.8-flash"`, `fallback_used=true`, `confidence=null`.
+   - The analysis distinguishes direct visual observations from interpretations and never claims unperformed multispectral analysis.
 
 ---
 
-## 📄 10. License & Submission Dossier
+## 🌲 10. BigEarthNet Land-Cover Classification Requirements
+
+- **Strict 10-Band Requirement:** BigEarthNet ResNet-50 requires exactly 10 calibrated Sentinel-2 L2A multispectral bands:
+  `B02`, `B03`, `B04`, `B05`, `B06`, `B07`, `B08`, `B8A`, `B11`, `B12`.
+- **Validation Rejection of Visual Previews:** Any 3-channel (RGB) or 4-channel (RGBA) browse preview submitted to `Land-Cover Clf` mode is rejected immediately with a 400 Validation Error explaining the missing spectral channels. The system will never hallucinate classification scores from visual screenshots.
+
+---
+
+## ⚠️ 11. Current Limitations & Scientific Disclosures
+
+1. **Local Florence-2 Checkpoint:** The 230M parameter Florence-2 PyTorch weights are not mounted in `models/weights/florence_2_base/` by default. The system transparently routes to `GoogleGeminiProvider` (`gemini-3.8-flash`) or the local procedural baseline, truthfully logging `fallback_used=True`.
+2. **Sentinel-2 L2A Full Tiles:** Large multi-band Sentinel-2 L2A raw rasters (~50-100MB per granule) are not bundled in repository source control. End-to-end classification testing on raw tiles requires providing valid 10-band GeoTIFFs or querying windowed STAC assets.
+3. **Uncalibrated Confidence:** General vision-language models do not output calibrated Bayesian or physical confidence scores. Confidence is honestly returned as `null` / `"Not calibrated"`.
+
+---
+
+## 📄 12. License & Submission Dossier
 
 Developed for the **ISRO Problem Statement 26167** technical evaluation.  
-For detailed architectural breakdowns and judge demonstration workflows, refer to:
+For detailed architectural breakdowns and evaluator demonstration workflows, refer to:
 - [ISRO Submission Dossier](file:///docs/ISRO_SUBMISSION_SUMMARY.md)
 - [Evaluator Demo Guide](file:///docs/DEMO_GUIDE.md)
 - [Architecture Specification](file:///docs/ARCHITECTURE.md)
+- [Model Registry Contract](file:///docs/MODEL_REGISTRY.md)

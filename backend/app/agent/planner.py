@@ -30,6 +30,11 @@ class AgentPlanner:
             selected_models = ["GroundingProvider", "google/owlvit-base-patch32"]
             fallback_models = ["ClassicalBaselineGrounder"]
             evidence_required = ["ev_grounding_overlay", "ev_grounding_mask"]
+        elif task in ("classification", "land_cover_classification"):
+            required_inputs = ["multispectral_scene"]
+            selected_models = ["BigEarthNetResNet50Classifier"]
+            fallback_models = []
+            evidence_required = ["ev_bigearthnet_classification"]
         else: # vqa
             required_inputs = ["single_scene", "natural_language_question"]
             selected_models = ["GenericVLMOrchestrator"]

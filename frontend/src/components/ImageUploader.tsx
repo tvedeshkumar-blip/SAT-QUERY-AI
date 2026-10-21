@@ -67,7 +67,7 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
           <p className="text-xs text-slate-400 mt-0.5">Select image ingestion modality & analysis configuration</p>
         </div>
 
-        <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
+        <div className="flex flex-wrap items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
           <button
             onClick={() => setMode('single')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
@@ -76,7 +76,7 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            [ Single Image ]
+            [ Single-Image VQA ]
           </button>
 
           <button
@@ -100,17 +100,29 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
           >
             [ Optical + SAR ]
           </button>
+
+          <button
+            onClick={() => setMode('classification')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              mode === 'classification'
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            [ Land-Cover Clf ]
+          </button>
         </div>
       </div>
 
       {/* Upload Inputs Grid */}
-      <div className={`grid grid-cols-1 ${mode !== 'single' ? 'md:grid-cols-2' : ''} gap-4`}>
+      <div className={`grid grid-cols-1 ${mode === 'bitemporal' || mode === 'optical_sar' ? 'md:grid-cols-2' : ''} gap-4`}>
         
         {/* Input Slot 1 */}
         <div className="relative group">
           <label className="block text-xs font-mono font-semibold text-slate-300 mb-1.5 flex items-center justify-between">
             <span>
-              {mode === 'single' && 'SATELLITE RASTER INPUT'}
+              {mode === 'single' && 'SATELLITE RASTER INPUT (VISUAL VQA / PREVIEW)'}
+              {mode === 'classification' && 'SENTINEL-2 10-BAND MULTISPECTRAL RASTER'}
               {mode === 'bitemporal' && 'EARLIER SCENE (TIME T1)'}
               {mode === 'optical_sar' && 'OPTICAL / MULTISPECTRAL RASTER'}
             </span>
@@ -175,15 +187,19 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
             ) : (
               <div className="space-y-1.5">
                 <Upload className="w-6 h-6 text-slate-400 mx-auto group-hover:text-cyan-400 transition-colors" />
-                <p className="text-xs text-slate-300 font-medium">Drop satellite image or click to browse</p>
-                <p className="text-[10px] text-slate-500 font-mono">GeoTIFF (.tif, .tiff), PNG, JPEG</p>
+                <p className="text-xs text-slate-300 font-medium">
+                  {mode === 'classification' ? 'Drop 10-band Sentinel-2 L2A GeoTIFF' : 'Drop satellite preview image or raster'}
+                </p>
+                <p className="text-[10px] text-slate-500 font-mono">
+                  {mode === 'classification' ? 'Requires bands B02-B12 (.tif, .tiff)' : 'PNG, JPEG, GeoTIFF (.tif, .tiff)'}
+                </p>
               </div>
             )}
           </div>
         </div>
 
         {/* Input Slot 2 (Conditional for Bi-Temporal or Optical+SAR) */}
-        {mode !== 'single' && (
+        {(mode === 'bitemporal' || mode === 'optical_sar') && (
           <div className="relative group">
             <label className="block text-xs font-mono font-semibold text-slate-300 mb-1.5 flex items-center justify-between">
               <span>

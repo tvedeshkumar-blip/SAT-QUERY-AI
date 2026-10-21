@@ -1063,15 +1063,9 @@ class MultiStepOrchestrator:
                     arr = images[0]
 
                 if arr is not None:
-                    if arr.ndim == 3 and arr.shape[2] != 10:
-                        reps = int(np.ceil(10 / arr.shape[2]))
-                        arr = np.tile(arr, (1, 1, reps))[:, :, :10]
-                    elif arr.ndim == 2:
-                        arr = np.repeat(arr[:, :, np.newaxis], 10, axis=2)
                     tool_args["images"] = [arr]
                 else:
-                    demo_arr = np.random.uniform(500, 3000, (120, 120, 10)).astype(np.float32)
-                    tool_args["images"] = [demo_arr]
+                    tool_args["images"] = []
                 tool_args["query"] = query
 
             # Execute tool with bounded retries (MAX_TOOL_RETRIES)

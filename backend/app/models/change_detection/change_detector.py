@@ -167,14 +167,15 @@ class PixelDifferenceChangeBaseline(BaseChangeDetector):
             georef_note = " [Geospatial Notice]: Input imagery lacks verified spatial co-registration."
 
         scientific_caveat = (
-            " [Scientific Caveat]: Detected regions represent raw pixel spectral reflectance differences and model candidate clusters; "
-            "they do not constitute confirmed real-world land cover alterations without independent ground verification "
-            "(potential confounders: illumination angle, atmospheric turbidity, seasonal vegetation phenology, and registration tolerances)."
+            " [Scientific Caveat & Reliability Note]: Detected regions represent candidate pixel-level spectral reflectance differences (threshold > 35 DN). "
+            "In optical imagery, substantial differences frequently arise from atmospheric turbidity, cloud cover, shadow variations, illumination geometry, and seasonal vegetation phenology. "
+            "Because input assets contain RGB visible bands only, scene classification layer (SCL) cloud masks and NIR bands are unavailable; algorithmic cloud masking was not performed. "
+            "Candidate differences do not constitute confirmed real-world land-cover alterations without independent ground verification or multispectral cloud screening."
         )
 
         answer = (
             f"Bi-temporal spectral difference analysis completed across {w}x{h} scene. "
-            f"Observed pixel-level spectral reflectance delta > {self.threshold} across "
+            f"Observed candidate pixel-level spectral reflectance delta > {self.threshold} across "
             f"{change_ratio:.2f}% of the scene area ({changed_pixels:,} of {total_pixels:,} pixels). "
             f"Change detected: {'Yes' if change_detected else 'No'}. "
             f"Identified {len(boxes)} primary change cluster regions. "
@@ -201,7 +202,7 @@ class PixelDifferenceChangeBaseline(BaseChangeDetector):
                     "change_detected": change_detected,
                     "change_cluster_count": len(boxes),
                     "candidate_change_clusters": len(boxes),
-                    "confirmed_real_world_status": "Unconfirmed without field verification (optical confounders: seasonal phenology, illumination angle, registration tolerances)",
+                    "confirmed_real_world_status": "Unconfirmed candidate clusters (optical confounders: cloud cover and atmospheric haze, illumination angle, seasonal phenology; SCL cloud mask unavailable in RGB visual assets)",
                     "georeferenced": reg_info.get("georeferenced", False),
                     "co_registered": reg_info.get("co_registered"),
                     "registration_method": reg_info.get("registration_method")

@@ -109,10 +109,10 @@ class ModelRegistry:
         # 7. Land-Cover Multi-Label Classification
         land_cover_clf = BigEarthNetResNet50Classifier()
         clf_metadata = {
-            "implementation": "BigEarthNetResNet50Classifier (ResNet-50 10-Band Multi-Label Classifier)",
-            "model_source": "BIFOLD-BigEarthNetv2-0/resnet50-s2-v0.2.0 (reBEN)",
+            "implementation": f"BigEarthNetResNet50Classifier (ResNet-50 10-Band Multi-Label Classifier: {land_cover_clf.model_id.split('/')[-1]})",
+            "model_source": f"{land_cover_clf.model_id} (reBEN)",
             "modality": "SENTINEL-2 MULTISPECTRAL (10 BANDS)",
-            "input_requirements": "10 Sentinel-2 bands (B02, B03, B04, B05, B06, B07, B08, B8A, B11, B12)",
+            "input_requirements": f"10 Sentinel-2 bands ({', '.join(land_cover_clf.band_names)})",
             "device_requirements": "CPU / GPU",
             "license": "MIT"
         }

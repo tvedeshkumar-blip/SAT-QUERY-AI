@@ -305,3 +305,84 @@ def test_10_missing_bands_keep_ndvi_sar_unavailable():
     )
     assert passed is False
     assert any("RGB-only" in f or "B04" in f or "zero physical" in f for f in failures)
+
+
+def test_11_demo3_area_and_registration_validation():
+    """Rule 11: Demo 3 changed area must derive from authentic 10m x 10m pixel dimensions and verified co-registration."""
+    import rasterio
+
+    t1_path = "data/retrieved/S2B_43PGQ_20230528_0_L2A_visual_window_1792262748.tif"
+    t2_path = "data/retrieved/S2A_43PGQ_20231119_0_L2A_visual_window_1792262818.tif"
+    if not (os.path.exists(t1_path) and os.path.exists(t2_path)):
+        return
+
+    with rasterio.open(t1_path) as ds1:
+        res1 = ds1.res
+        crs1 = str(ds1.crs)
+        transform1 = list(ds1.transform[:6])
+        bounds1 = list(ds1.bounds)
+        w1, h1 = ds1.width, ds1.height
+        masks1 = ds1.read_masks()
+
+    with rasterio.open(t2_path) as ds2:
+        res2 = ds2.res
+        crs2 = str(ds2.crs)
+        transform2 = list(ds2.transform[:6])
+        bounds2 = list(ds2.bounds)
+        w2, h2 = ds2.width, ds2.height
+        masks2 = ds2.read_masks()
+
+    # 1. Pixel dimensions and units
+    assert res1 == (10.0, 10.0)
+    assert res2 == (10.0, 10.0)
+    assert crs1 == "EPSG:32643"
+    assert crs2 == "EPSG:32643"
+    assert w1 == 1024 and h1 == 1024
+    assert w2 == 1024 and h2 == 1024
+
+    # 2. Valid data extent (zero nodata)
+    assert np.all(masks1 == 255)
+    assert np.all(masks2 == 255)
+
+    # 3. Identical grid verification
+    assert crs1 == crs2
+    assert transform1 == transform2
+    assert bounds1 == bounds2
+
+    # 4. End-to-end pipeline verification
+    with open(t1_path, "rb") as f1, open(t2_path, "rb") as f2:
+        b64_1 = base64.b64encode(f1.read()).decode("utf-8")
+        b64_2 = base64.b64encode(f2.read()).decode("utf-8")
+
+    payload = {
+        "query": "What changed between these two dates?",
+        "mode": "bitemporal",
+        "images": [
+            {"data": b64_1, "filename": os.path.basename(t1_path), "role": "primary"},
+            {"data": b64_2, "filename": os.path.basename(t2_path), "role": "secondary"}
+        ]
+    }
+
+    res = client.post("/api/v1/analyze", json=payload)
+    assert res.status_code == 200, res.text
+    data = res.json()
+
+    ev_map = next(e for e in data["evidence"] if e["id"] == "ev_change_map")
+    stats = ev_map["statistics"]
+
+    # Verify pixel count and area
+    assert stats["total_scene_pixels"] == 1048576
+    assert stats["changed_pixel_count"] == 853675
+    assert stats["changed_area_percent"] == "81.41%"
+    assert stats["changed_area_hectares"] == 8536.75  # 853675 * (10m * 10m) / 10000 = 8536.75 ha
+    assert stats["registration_method"] == "identical_grid_co_registered"
+    assert stats["co_registered"] is True
+    assert stats["georeferenced"] is True
+    assert "Unconfirmed" in stats["confirmed_real_world_status"]
+
+    # Verify reproducible report provenance has T1 and T2 timestamps
+    rep = data["reproducible_report"]
+    prov = rep["provenance"]
+    assert prov.get("temporal_t1_datetime") is not None
+    assert prov.get("temporal_t2_datetime") is not None
+

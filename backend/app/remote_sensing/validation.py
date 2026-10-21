@@ -32,11 +32,24 @@ class InputValidator:
         if not data_b64 or not data_b64.strip():
             raise ValidationError("Image payload is empty or invalid.")
 
-        clean_b64 = data_b64.split(",")[-1]
-        try:
-            raw_bytes = base64.b64decode(clean_b64, validate=True)
-        except Exception:
-            raise ValidationError("Failed to decode base64 image data: malformed encoding.")
+        raw_str = data_b64.strip()
+        if raw_str.startswith(("http://", "https://")):
+            import httpx
+            try:
+                resp = httpx.get(raw_str, timeout=10.0, follow_redirects=True)
+                if resp.status_code != 200:
+                    raise ValidationError(f"Failed to fetch image from URL '{raw_str}': HTTP {resp.status_code}")
+                raw_bytes = resp.content
+            except ValidationError:
+                raise
+            except Exception as e:
+                raise ValidationError(f"Failed to fetch image from URL: {e}")
+        else:
+            clean_b64 = raw_str.split(",")[-1]
+            try:
+                raw_bytes = base64.b64decode(clean_b64, validate=True)
+            except Exception:
+                raise ValidationError("Failed to decode base64 image data: malformed encoding.")
 
         size = len(raw_bytes)
         if size == 0:
@@ -56,6 +69,44 @@ class InputValidator:
                 )
 
         return size
+
+    @classmethod
+    def validate_classification_raster(cls, array: np.ndarray, meta: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validates suitability of input raster for BigEarthNetv2 10-band multispectral classification.
+        Rejects visual screenshots, single-band rasters, and missing spectral channels.
+        """
+        bands = meta.get("bands")
+        if bands is None:
+            if array.ndim == 3:
+                bands = array.shape[2] if array.shape[2] in (1, 3, 4, 10, 12, 13) else array.shape[0]
+            else:
+                bands = 1
+
+        is_preview = (
+            meta.get("asset_category") == "visual_preview"
+            or (meta.get("filename") or "").lower().endswith((".jpg", ".jpeg"))
+            or (bands in (1, 3, 4) and not meta.get("is_geotiff"))
+        )
+
+        if is_preview or bands < 10:
+            return {
+                "valid": False,
+                "reason": (
+                    f"Asset has {bands} channel(s). BigEarthNetv2 is a 10-band Sentinel-2 multispectral model "
+                    "requiring bands (B02, B03, B04, B05, B06, B07, B08, B8A, B11, B12). "
+                    "Visual browse screenshots or RGB renderings lack the required spectral bands. "
+                    "Please provide raw Sentinel-2 L2A multispectral data (GeoTIFF) or select single-image VQA/captioning."
+                ),
+                "bands_detected": bands,
+                "is_screenshot_or_preview": is_preview,
+            }
+
+        return {
+            "valid": True,
+            "bands_detected": bands,
+            "is_screenshot_or_preview": False,
+        }
 
     @classmethod
     def _compute_ground_resolution_meters(

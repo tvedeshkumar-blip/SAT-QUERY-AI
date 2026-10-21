@@ -54,6 +54,10 @@ class AgentController:
         if max_cloud_cover is None and request.metadata:
             max_cloud_cover = request.metadata.get("max_cloud_cover")
 
+        # Enforce image requirement for explicit single-image VQA mode
+        if request.mode in ("vqa", "single_vqa", "single_image_vqa") and (not request.images or len(request.images) == 0):
+            raise ValidationError("No image provided. Single-Image VQA requires an input satellite image.")
+
         # Dynamic Multi-Step Orchestration Route
         if not request.images or len(request.images) == 0 or request.mode in ("orchestration", "temporal"):
             from app.agent.orchestrator import agent_orchestrator
@@ -240,6 +244,16 @@ class AgentController:
             prov_1 = getattr(request.images[1], "provenance", {}) or {}
             t1_dt = prov_0.get("datetime") or metadata_list[0].get("datetime")
             t2_dt = prov_1.get("datetime") or metadata_list[1].get("datetime")
+            if not t1_dt and getattr(request.images[0], "filename", None):
+                import re
+                m1 = re.search(r"(\d{4})(\d{2})(\d{2})", request.images[0].filename)
+                if m1:
+                    t1_dt = f"{m1.group(1)}-{m1.group(2)}-{m1.group(3)}T00:00:00Z"
+            if not t2_dt and getattr(request.images[1], "filename", None):
+                import re
+                m2 = re.search(r"(\d{4})(\d{2})(\d{2})", request.images[1].filename)
+                if m2:
+                    t2_dt = f"{m2.group(1)}-{m2.group(2)}-{m2.group(3)}T00:00:00Z"
             if t1_dt and t2_dt and t1_dt == t2_dt:
                 raise ValidationError(
                     f"Degenerate temporal pair: T1 and T2 have identical acquisition timestamps ({t1_dt}). "
@@ -501,11 +515,77 @@ class AgentController:
             )
 
         # Step 7: Select Model Adapter from Registry
-        model_adapter = model_registry.get_model(task)
+        try:
+            model_adapter = model_registry.get_model(task)
+        except Exception as load_err:
+            logger.error(f"Failed to load specialist model for task '{task}': {load_err}")
+            trace.add_step("MODEL_LOADING_FAILED", f"Specialist model load failed: {load_err}")
+            created_at_str = datetime.utcnow().isoformat() + "Z"
+            return AnalysisResponseSchema(
+                id=req_id,
+                task=task,
+                mode=request.mode,
+                answer=f"Specialist model loading failed for task '{task}': {load_err}.",
+                confidence=None,
+                confidence_label="Model Loading Error",
+                models=[task],
+                implementation_status="model_loading_error",
+                primary_model="BigEarthNetResNet50Classifier" if task in ("classification", "land_cover_classification") else ("Florence-2-base" if task == "vqa" else task),
+                actual_model_used="None",
+                fallback_used=False,
+                model_status="model_loading_error",
+                model_provenance={
+                    "task": task,
+                    "error": str(load_err),
+                },
+                evidence=[],
+                trace=trace.to_dict(),
+                metadata=metadata_list[0] if metadata_list else {},
+                is_clarification_required=False,
+                execution_time_ms=round((time.time() - start_time) * 1000, 2),
+                created_at=created_at_str
+            )
+
         trace.add_model(model_adapter.model_name)
         trace.add_step("MODEL_SELECTED", f"Selected adapter: '{model_adapter.model_name}' [{model_adapter.status}]")
 
         # Step 8: Execute Specialist Model
+        if task in ("classification", "land_cover_classification") and parsed_arrays:
+            val_clf = InputValidator.validate_classification_raster(parsed_arrays[0], metadata_list[0])
+            if not val_clf["valid"]:
+                trace.add_step("INPUT_VALIDATION_FAILED", val_clf["reason"])
+                created_at_str = datetime.utcnow().isoformat() + "Z"
+                return AnalysisResponseSchema(
+                    id=req_id,
+                    task=task,
+                    mode=request.mode,
+                    answer=val_clf["reason"],
+                    confidence=None,
+                    confidence_label="Invalid Input (Multispectral 10-Band Required)",
+                    models=[model_adapter.model_name],
+                    implementation_status="invalid_input",
+                    primary_model=model_adapter.model_name,
+                    actual_model_used="None",
+                    fallback_used=False,
+                    model_status="invalid_input",
+                    model_provenance={
+                        "model_id": model_adapter.model_name,
+                        "required_bands": getattr(model_adapter, "band_names", []),
+                        "input_error": val_clf["reason"],
+                    },
+                    evidence=[],
+                    trace=trace.to_dict(),
+                    metadata=metadata_list[0],
+                    is_clarification_required=True,
+                    missing_parameters=["Sentinel-2 10-band multispectral GeoTIFF (B02-B12)"],
+                    suggested_examples=[
+                        "Upload 10-band Sentinel-2 L2A GeoTIFF",
+                        "Switch to Single-Image VQA mode for visual screenshots: 'Describe land cover in this image'"
+                    ],
+                    execution_time_ms=round((time.time() - start_time) * 1000, 2),
+                    created_at=created_at_str
+                )
+
         inference_meta = metadata_list[0].copy()
         if len(metadata_list) >= 2:
             inference_meta["primary"] = metadata_list[0]
@@ -535,6 +615,11 @@ class AgentController:
                 device_used = result.get("model_provenance", {}).get("device", "cpu")
                 trace.add_step("GROUNDING_INFERENCE", f"Executed open-vocabulary neural grounding for query '{request.query}' on device '{device_used}'.")
                 trace.add_step("BOUNDING_BOXES_GENERATED", f"Detected and localized {len(result.get('boxes', []))} bounding box region(s).")
+            elif task in ("classification", "land_cover_classification"):
+                dev_used = getattr(model_adapter, "_device", "cpu")
+                trace.add_step("CLASSIFICATION_INFERENCE", f"Executed BigEarthNet ResNet-50 multi-label forward pass on device '{dev_used}'.")
+                pred_classes = result.get("predicted_classes", [])
+                trace.add_step("LAND_COVER_PREDICTED", f"Identified {len(pred_classes)} CORINE class(es) exceeding threshold {result.get('threshold')}: {', '.join(pred_classes) if pred_classes else 'None'}.")
 
         trace.add_step("MODEL_EXECUTED", f"Executed model '{result.get('actual_model_used', model_adapter.model_name)}' prediction successfully")
 
@@ -648,6 +733,11 @@ class AgentController:
             "changed_area_percent": result.get("changed_area_percent"),
             "metadata": metadata_list[0] if metadata_list else {}
         }
+        if task in ("classification", "land_cover_classification"):
+            proto_resp["classification_result"] = result
+            if metadata_list:
+                metadata_list[0]["classification"] = result
+                metadata_list[0]["land_cover_classification"] = result
         evidence_pkg = EvidencePackageBuilder.from_analysis_response(proto_resp, raw_metadata=metadata_list[0] if metadata_list else {})
         verification_result = scientific_verifier.verify(
             evidence_package=evidence_pkg,
@@ -711,6 +801,7 @@ class AgentController:
             model_status=result.get("model_status"),
             model_provenance=result.get("model_provenance"),
             evidence=evidence_objects,
+            classification_result=result if task in ("classification", "land_cover_classification") else None,
             trace=trace.to_dict(),
             metadata=metadata_list[0],
             confidence_breakdown=confidence_breakdown,

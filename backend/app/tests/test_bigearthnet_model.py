@@ -260,3 +260,189 @@ class TestBigEarthNetOrchestrationIntegration:
         assert clf_ev["id"] == "ev_bigearthnet_classification"
         assert len(clf_ev["statistics"]["top_predictions"]) == 2
 
+
+class TestCandidateCheckpointsAndBandOrdering:
+    """Verifies both v0.1.1 and v0.2.0 candidate specifications, band permutations, and loading."""
+
+    def test_v011_vs_v020_band_order_and_channel_permutations(self):
+        from app.models.classification.bigearthnet_classifier import (
+            V011_BAND_NAMES,
+            V020_BAND_NAMES,
+            V011_CHANNEL_MEANS,
+            V020_CHANNEL_MEANS,
+        )
+        assert len(V011_BAND_NAMES) == 10
+        assert len(V020_BAND_NAMES) == 10
+        assert V011_BAND_NAMES != V020_BAND_NAMES
+
+        # v0.1.1 groups 10m bands first (B02, B03, B04, B08)
+        assert V011_BAND_NAMES[:4] == ["B02", "B03", "B04", "B08"]
+
+        # v0.2.0 conforms to ESA technical order (B02, B03, B04, B05, B06, B07, B08, B8A, B11, B12)
+        assert V020_BAND_NAMES[:4] == ["B02", "B03", "B04", "B05"]
+        assert V020_BAND_NAMES[6] == "B08"
+
+        # Check mean statistics permutation aligns
+        # B08 in v0.2.0 is at idx 6 (~2193.29), in v0.1.1 it is at idx 3
+        assert np.isclose(V020_CHANNEL_MEANS[6], V011_CHANNEL_MEANS[3])
+
+    def test_dynamic_model_id_selection(self):
+        clf_v011 = BigEarthNetResNet50Classifier(model_id="BIFOLD-BigEarthNetv2-0/resnet50-s2-v0.1.1")
+        assert clf_v011.version == "0.1.1"
+        assert clf_v011.band_names[3] == "B08"
+
+        clf_v020 = BigEarthNetResNet50Classifier(model_id="BIFOLD-BigEarthNetv2-0/resnet50-s2-v0.2.0")
+        assert clf_v020.version == "0.2.0"
+        assert clf_v020.band_names[6] == "B08"
+
+    def test_band_reordering_with_explicit_names(self):
+        clf = BigEarthNetResNet50Classifier()
+        # Provide reversed bands
+        reversed_bands = list(reversed(clf.band_names))
+        data = np.random.randn(10, 120, 120).astype(np.float32) * 100.0 + 1000.0
+
+        # Mark channel 0 in reversed bands with distinctive value
+        data[0, :, :] = 9999.0  # which is the last band in clf.band_names (B12)
+        tensor = clf.preprocess(data, band_names=reversed_bands)
+
+        # In output tensor, channel 9 (B12) should contain the 9999.0 values (standardized)
+        assert tensor.shape == (1, 10, 120, 120)
+
+    def test_missing_band_in_custom_names_rejected(self):
+        clf = BigEarthNetResNet50Classifier()
+        incomplete_bands = ["B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "INVALID"]
+        data = np.zeros((10, 120, 120), dtype=np.float32)
+        with pytest.raises(ValueError) as exc:
+            clf.preprocess(data, band_names=incomplete_bands)
+        assert "Missing required Sentinel-2 band" in str(exc.value)
+
+
+class TestGeospatialScreenshotRejection:
+    """Verifies that visual screenshots and RGB rasters are strictly rejected for BigEarthNet."""
+
+    def test_rgb_screenshot_rejection_in_preprocess(self):
+        clf = BigEarthNetResNet50Classifier()
+        # 3-channel visual screenshot
+        rgb_screenshot = np.random.randint(0, 255, (3, 512, 512), dtype=np.uint8)
+        with pytest.raises(ValueError) as exc:
+            clf.preprocess(rgb_screenshot)
+        assert "requires exactly 10 Sentinel-2 bands" in str(exc.value)
+        assert "screenshots lack the required multispectral bands" in str(exc.value)
+
+    def test_input_validator_classification_check(self):
+        from app.remote_sensing.validation import InputValidator
+
+        # 3-channel RGB metadata
+        rgb_meta = {"bands": 3, "asset_category": "visual_preview", "filename": "copernicus_true_color.png"}
+        rgb_arr = np.zeros((512, 512, 3), dtype=np.uint8)
+        val = InputValidator.validate_classification_raster(rgb_arr, rgb_meta)
+        assert val["valid"] is False
+        assert "10-band Sentinel-2 multispectral model" in val["reason"]
+        assert val["is_screenshot_or_preview"] is True
+
+        # Valid 10-band GeoTIFF
+        valid_meta = {"bands": 10, "is_geotiff": True, "filename": "s2_10band.tif"}
+        valid_arr = np.zeros((120, 120, 10), dtype=np.float32)
+        val_ok = InputValidator.validate_classification_raster(valid_arr, valid_meta)
+        assert val_ok["valid"] is True
+
+
+class TestFastAPIClassificationRoutes:
+    """Verifies FastAPI /analyze/classify endpoints and full request lifecycle."""
+
+    @pytest.fixture
+    def test_client(self):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        return TestClient(app)
+
+    def test_models_endpoint_contains_bigearthnet(self, test_client):
+        resp = test_client.get("/api/v1/models")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "models" in data
+        clf_entries = [m for m in data["models"] if m.get("task") in ("classification", "land_cover_classification")]
+        assert len(clf_entries) >= 1
+        entry = clf_entries[0]
+        assert "BigEarthNet" in entry["implementation"]
+        assert entry["license"] == "MIT"
+
+    def test_classify_endpoint_rejects_visual_screenshot_gracefully(self, test_client):
+        import base64
+        from PIL import Image
+        import io
+
+        # Create 3-channel synthetic PNG
+        im = Image.new("RGB", (64, 64), color=(100, 150, 200))
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+        payload = {
+            "query": "Classify land cover",
+            "mode": "classification",
+            "images": [
+                {
+                    "data": b64,
+                    "mimeType": "image/png",
+                    "filename": "screenshot_true_color.png",
+                    "asset_category": "visual_preview",
+                }
+            ]
+        }
+
+        resp = test_client.post("/api/v1/analyze/classify", json=payload)
+        assert resp.status_code == 200
+        data = resp.json()
+        # Enforces scientific honesty: model_status is invalid_input
+        assert data["model_status"] == "invalid_input"
+        assert data["is_clarification_required"] is True
+        assert "multispectral" in data["answer"].lower()
+
+
+class TestBigEarthNetEvaluationHarness:
+    """Verifies the multi-label evaluation harness, metric formulas, and unmounted state."""
+
+    def test_unmounted_evaluation_reports_truthfully(self):
+        adapter = BigEarthNetAdapter()
+        # Mock classifier
+        model = BigEarthNetResNet50Classifier()
+        res = adapter.evaluate(model)
+        assert res["status"] == "not_evaluated"
+        assert res["evaluation_pending"] is True
+        assert "not mounted" in res["message"]
+        assert res["metrics"] is None
+
+    def test_metric_calculations_with_synthetic_evaluated_samples(self):
+        adapter = BigEarthNetAdapter()
+        adapter._is_loaded = True
+
+        # Provide 2 synthetic samples
+        # Sample 1: true classes: ["Arable land", "Urban fabric"]
+        # Sample 2: true classes: ["Inland waters"]
+        s1_img = np.random.uniform(500, 2000, (10, 120, 120)).astype(np.float32)
+        s2_img = np.random.uniform(500, 2000, (10, 120, 120)).astype(np.float32)
+
+        adapter._samples = [
+            {"image": s1_img, "labels": ["Arable land", "Urban fabric"]},
+            {"image": s2_img, "labels": ["Inland waters"]},
+        ]
+
+        class MockEvaluatedModel:
+            def predict(self, images, threshold=0.5):
+                # Returns Arable land for sample 1, and Inland waters for sample 2
+                return {
+                    "predicted_classes": ["Arable land", "Urban fabric"],
+                    "class_probabilities": {"Arable land": 0.9, "Urban fabric": 0.8, "Inland waters": 0.1},
+                }
+
+        res = adapter.evaluate(MockEvaluatedModel())
+        assert res["status"] == "completed"
+        assert res["samples_evaluated"] == 2
+        assert "macro_metrics" in res
+        assert "micro_metrics" in res
+        assert "per_class" in res
+        assert "Arable land" in res["per_class"]
+        assert res["per_class"]["Arable land"]["support"] == 1
+
+

@@ -345,8 +345,8 @@ class GenericVLMSynthesisAdapter(BaseVQAProvider):
     VQA provider utilizing hosted foundation VLM APIs (Google Gemini) with prompt engineering.
     Truthfully flagged as GENERIC_LLM_SYNTHESIS (not remote-sensing fine-tuned).
     """
-    def __init__(self, model_name: str = "gemini-2.5-flash"):
-        self.model_name = model_name
+    def __init__(self, model_name: Optional[str] = None):
+        self.model_name = model_name or os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
     @property
     def provider_name(self) -> str:
@@ -366,9 +366,14 @@ class GenericVLMSynthesisAdapter(BaseVQAProvider):
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY not configured.")
 
+        import base64
         from google import genai
+        from google.genai import types
+
         client = genai.Client(api_key=api_key)
         b64_data = convert_array_to_base64_png(images[0]).split(",")[-1]
+        img_bytes = base64.b64decode(b64_data)
+        img_part = types.Part.from_bytes(data=img_bytes, mime_type="image/png")
         crs_display = metadata.get("crs_display") or metadata.get("crs") or "CRS unavailable"
 
         system_prompt = (
@@ -380,15 +385,15 @@ class GenericVLMSynthesisAdapter(BaseVQAProvider):
         response = client.models.generate_content(
             model=self.model_name,
             contents=[
-                {"inline_data": {"mime_type": "image/png", "data": b64_data}},
-                {"text": f"Question: {query}\nCRS/Metadata: {crs_display}. Answer concisely based only on observable features."}
+                img_part,
+                f"Question: {query}\nCRS/Metadata: {crs_display}. Answer concisely based only on observable features."
             ],
             config={"system_instruction": system_prompt}
         )
 
         return {
             "answer": response.text.strip(),
-            "model_name": "Gemini-2.5-Flash",
+            "model_name": self.model_name,
             "provider": self.provider_name,
             "model_type": "GENERIC_LLM_SYNTHESIS",
             "is_remote_sensing_adapted": False,
@@ -428,31 +433,59 @@ class SpectralStatisticsBaseline(BaseVQAProvider):
         mean_val = float(np.mean(arr_clean))
         std_val = float(np.std(arr_clean))
         
-        # Check water / vegetation spectral signatures
-        water_indicated = False
-        veg_indicated = False
-        if bands >= 3:
-            r_mean = float(np.mean(arr_clean[:, :, 0]))
-            g_mean = float(np.mean(arr_clean[:, :, 1]))
-            b_mean = float(np.mean(arr_clean[:, :, 2]))
-            if b_mean > (r_mean + 10):
-                water_indicated = True
-            if g_mean > (r_mean + 15):
-                veg_indicated = True
+        total_pixels = float(h * w) if h * w > 0 else 1.0
+        r_chan = arr_clean[:, :, 0] if bands >= 3 else arr_clean
+        g_chan = arr_clean[:, :, 1] if bands >= 3 else arr_clean
+        b_chan = arr_clean[:, :, 2] if bands >= 3 else arr_clean
 
-        features = []
-        if water_indicated:
-            features.append("spectral absorption consistent with surface water or deep shadows")
-        if veg_indicated:
-            features.append("elevated green reflectance consistent with vegetative canopy")
-        if not features:
-            features.append(f"mean reflectance {mean_val:.1f} with dispersion {std_val:.1f}")
+        observations = []
+        uncertainties = []
+
+        if bands >= 3:
+            # 1. Vegetation observation: elevated green excess (2*G - R - B)
+            ex_green = 2.0 * g_chan - r_chan - b_chan
+            veg_mask = (ex_green > 10.0) & (g_chan > 35.0)
+            veg_pct = float(np.sum(veg_mask)) / total_pixels * 100.0
+            if veg_pct > 1.0:
+                observations.append(f"Vegetation canopy: Apparent vegetation detected across ~{veg_pct:.1f}% of visible area (elevated green reflectance relative to red/blue)")
+            else:
+                observations.append("Vegetation: Little to no apparent vegetative green canopy clearly visible (<1% area)")
+
+            # 2. Water / absorptive areas: low overall reflectance or blue dominance
+            brightness = (r_chan + g_chan + b_chan) / 3.0
+            water_mask = (brightness < 40.0) | ((b_chan > (r_chan + 10.0)) & (brightness < 75.0))
+            water_pct = float(np.sum(water_mask)) / total_pixels * 100.0
+            if water_pct > 1.0:
+                observations.append(f"Water / deep shadow: Absorptive low-reflectance regions visible across ~{water_pct:.1f}% of area")
+            else:
+                observations.append("Water: No extensive open water bodies or deep absorptive water features clearly identified")
+
+            # 3. Built-up / high-albedo structures (buildings, paved surfaces, concrete)
+            bright_mask = (brightness > 130.0) & (np.abs(r_chan - g_chan) < 25.0) & (np.abs(g_chan - b_chan) < 25.0)
+            bright_pct = float(np.sum(bright_mask)) / total_pixels * 100.0
+            if bright_pct > 1.0:
+                observations.append(f"Built-up / bright surfaces: High-albedo structural features consistent with buildings or paved areas visible across ~{bright_pct:.1f}% of area")
+            else:
+                observations.append("Built-up structures: High-albedo structural features are sparse (<1% area)")
+
+            # 4. Roads / linear corridors
+            uncertainties.append("Roads vs. linear structures: Individual narrow road corridors cannot be definitively confirmed without calibrated sub-meter resolution or vector alignment; linear patterns remain preliminary visual interpretations")
+        else:
+            observations.append(f"Single-channel raster: Mean pixel intensity is {mean_val:.1f} (std={std_val:.1f})")
+            uncertainties.append("Color and multi-band spectral separation unavailable on single-channel imagery")
+
+        uncertainties.append("Botanical vitality and surface material composition cannot be definitively measured without calibrated multispectral surface reflectance bands")
+
+        obs_text = "\n".join(f"- {o}" for o in observations)
+        unc_text = "\n".join(f"- {u}" for u in uncertainties)
 
         answer = (
-            f"Spectral Statistics Baseline ({w}x{h} px, {bands} band(s), {crs_display}): "
-            f"Observed {' & '.join(features)}. "
-            f"Query: '{query}'. "
-            f"(Note: Generic VLM API is unconfigured and RS VLM weights are not mounted; using verified radiometric baseline)."
+            f"Observable Visible Features ({w}x{h} px, {bands} visual channel(s), {crs_display}):\n"
+            f"{obs_text}\n\n"
+            f"Uncertain Interpretations & Limitations:\n"
+            f"{unc_text}\n\n"
+            f"Scientific Note: This answer is grounded in direct 8-bit visible pixel distribution statistics (mean={mean_val:.1f}, std={std_val:.1f}). "
+            f"No calibrated multispectral analysis or BigEarthNet classification was performed."
         )
 
         return {

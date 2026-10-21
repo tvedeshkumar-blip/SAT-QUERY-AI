@@ -54,18 +54,36 @@ def legacy_isro_run_alias(payload: Optional[Dict[str, Any]] = None):
     """
     return run_synthetic_validation(payload)
 
+@router.get("/evaluation/official-status")
 @router.post("/evaluation/official-run")
 def run_official_evaluation(payload: Optional[Dict[str, Any]] = None):
     """
     Endpoint for official ISRO / SAC evaluation when authorized ground truth imagery is mounted.
     Fails safely and honestly when official dataset is not mounted.
     """
+    import os
+    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    repo_root = os.path.dirname(backend_dir)
+    official_dir = os.path.join(repo_root, "data", "official_isro")
+
+    is_mounted = os.path.isdir(official_dir) and len([f for f in os.listdir(official_dir) if not f.startswith(".")]) > 0
+    if not is_mounted:
+        return {
+            "status": "not_mounted",
+            "is_official_evaluation": True,
+            "dataset_mounted": False,
+            "metrics": None,
+            "message": (
+                "Official ISRO / SAC evaluation requires mounted Cartosat-2S and RISAT-1A "
+                "radiometrically calibrated rasters with authorized ground truth shapefiles. "
+                "No official evaluation package is currently mounted in data/official_isro/."
+            )
+        }
+
     return {
-        "status": "not_mounted",
+        "status": "mounted_awaiting_execution",
         "is_official_evaluation": True,
-        "message": (
-            "Official ISRO / SAC evaluation requires mounted Cartosat-2S and RISAT-1A "
-            "radiometrically calibrated rasters with authorized ground truth shapefiles. "
-            "No official evaluation package is currently mounted in data/official_isro/."
-        )
+        "dataset_mounted": True,
+        "package_path": "data/official_isro/",
+        "message": "Authorized evaluation dataset package detected. Ready for formal benchmark execution."
     }

@@ -135,6 +135,11 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
      (response.reproducible_report?.provenance as any)?.radar_canopy_loss_pct !== undefined ?
       response.reproducible_report?.provenance : null);
 
+  const classificationResult = response.classification_result ||
+    response.metadata?.classification ||
+    response.metadata?.land_cover_classification ||
+    (response.evidence?.find(e => e.type === 'classification')?.statistics as any);
+
   const fixtureDisclosure = detectLocalFixtureProvenance(response);
 
   return (
@@ -899,6 +904,135 @@ export const AnalysisResultCard: React.FC<AnalysisResultCardProps> = ({ response
             <span>Terrain Mask: Unavailable from STAC provider (relief shadows unmasked)</span>
             <span>Mode: DUAL_VV_VH</span>
           </div>
+        </div>
+      )}
+
+      {/* BigEarthNet v2.0 Multi-Label Land-Cover Classification Card */}
+      {(classificationResult || response.task === 'classification' || response.task === 'land_cover_classification' || response.mode === 'classification') && (
+        <div className="p-4 rounded-xl bg-slate-950/90 border border-emerald-800/80 space-y-4 text-xs font-mono">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
+            <span className="text-emerald-400 font-bold flex items-center gap-1.5 uppercase tracking-wider">
+              <Layers className="w-4 h-4 text-emerald-400" />
+              BIGEARTHNET v2.0 SENTINEL-2 RESNET-50 MULTI-LABEL CLASSIFICATION
+            </span>
+            <div className="flex items-center gap-1.5">
+              <span className={`px-2 py-0.5 rounded text-[10px] border ${
+                response.model_status === 'invalid_input' || response.implementation_status === 'invalid_input'
+                  ? 'bg-amber-950 text-amber-300 border-amber-800'
+                  : 'bg-emerald-950 text-emerald-300 border-emerald-800'
+              }`}>
+                {response.model_status === 'invalid_input' ? 'INVALID INPUT' : 'PRETRAINED reBEN CHECKPOINT'}
+              </span>
+              <span className="px-2 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-700 text-[10px]">
+                {classificationResult?.model_name || response.primary_model || 'resnet50-s2-v0.2.0'}
+              </span>
+            </div>
+          </div>
+
+          {/* Invalid Input Warning Banner */}
+          {(response.model_status === 'invalid_input' || response.implementation_status === 'invalid_input') && (
+            <div className="p-3 rounded-lg bg-amber-950/50 border border-amber-600/70 text-amber-200 text-xs space-y-1">
+              <div className="flex items-center gap-2 text-amber-300 font-bold">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>MULTISPECTRAL 10-BAND DATA REQUIRED (SCREENSHOT DETECTED)</span>
+              </div>
+              <p className="text-amber-100/90 font-sans leading-relaxed text-[11px]">
+                {response.answer || 'Visual RGB browse images and Copernicus Browser screenshots lack the 10 raw Sentinel-2 multispectral bands (B02-B12) needed for BigEarthNetv2 ResNet-50. Please supply authentic Sentinel-2 L2A GeoTIFF data.'}
+              </p>
+            </div>
+          )}
+
+          {/* Valid Predictions Rendering */}
+          {classificationResult && (
+            <div className="space-y-3">
+              {/* Predicted Classes Badge Group */}
+              <div>
+                <span className="text-slate-400 text-[10px] uppercase tracking-wider block mb-1.5">
+                  Predicted CORINE Land Cover Classes (Threshold &ge; {classificationResult.threshold ?? 0.5}):
+                </span>
+                {classificationResult.predicted_classes && classificationResult.predicted_classes.length > 0 ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {classificationResult.predicted_classes.map((cls: string, idx: number) => (
+                      <span
+                        key={idx}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-950/90 border border-emerald-600 text-emerald-200 text-[11px] font-semibold"
+                      >
+                        <CheckCircle className="w-3 h-3 text-emerald-400" />
+                        {cls}
+                        {classificationResult.class_probabilities?.[cls] !== undefined && (
+                          <span className="text-emerald-400 font-mono text-[10px]">
+                            ({(classificationResult.class_probabilities[cls] * 100).toFixed(1)}%)
+                          </span>
+                        )}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="text-slate-500 italic text-[11px]">
+                    No classes exceeded decision threshold &ge; {classificationResult.threshold ?? 0.5}.
+                  </span>
+                )}
+              </div>
+
+              {/* 19 CORINE Classes Ranked Probability Bars */}
+              {classificationResult.top_predictions && classificationResult.top_predictions.length > 0 && (
+                <div className="space-y-1.5 pt-2 border-t border-slate-800/80">
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+                    <span>Ranked CORINE Classes (Multi-label Sigmoid Probabilities)</span>
+                    <span>19 Output Head Logits</span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-64 overflow-y-auto pr-1">
+                    {classificationResult.top_predictions.map((item: any, idx: number) => {
+                      const prob = Number(item.probability);
+                      const pct = Math.max(0, Math.min(100, Math.round(prob * 100)));
+                      const isPredicted = (classificationResult.predicted_classes || []).includes(item.label);
+                      return (
+                        <div
+                          key={idx}
+                          className={`p-2 rounded-lg border text-[11px] transition-colors ${
+                            isPredicted
+                              ? 'bg-emerald-950/40 border-emerald-800/80 text-emerald-100'
+                              : 'bg-slate-900/60 border-slate-800/60 text-slate-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="font-sans font-medium truncate max-w-[220px]" title={item.label}>
+                              {item.label}
+                            </span>
+                            <span className={`font-mono text-[10px] font-bold ${isPredicted ? 'text-emerald-300' : 'text-slate-400'}`}>
+                              {(prob * 100).toFixed(1)}%
+                            </span>
+                          </div>
+                          <div className="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden border border-slate-800">
+                            <div
+                              className={`h-full rounded-full transition-all duration-500 ${
+                                isPredicted ? 'bg-gradient-to-r from-emerald-500 to-teal-400' : 'bg-slate-700'
+                              }`}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Multispectral Specs & Scientific Disclaimer */}
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/60 text-[10px] text-slate-400">
+                <span>
+                  Bands ({classificationResult.bands_used?.length || 10}):{' '}
+                  <span className="text-slate-200">
+                    {classificationResult.bands_used?.join(', ') || 'B02, B03, B04, B05, B06, B07, B08, B8A, B11, B12'}
+                  </span>
+                </span>
+                <span>Spatial: 120×120 px (~1.2 km patch)</span>
+                <span className="text-amber-400/90 italic">
+                  Note: Sigmoid probabilities are uncalibrated multi-label outputs.
+                </span>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
