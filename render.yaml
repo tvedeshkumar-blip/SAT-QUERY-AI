@@ -11,7 +11,11 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: CORS_ORIGINS
-        value: "http://localhost:3000,http://localhost:5173,https://*.vercel.app,*"
+        value: "https://sat-query-gamma.vercel.app,http://localhost:3000,http://localhost:5173"
+      - key: HF_SPACE_ID
+        value: Astro406/satquery-qwen-vl
+      - key: LOG_LEVEL
+        value: INFO
       - key: DEVICE
         value: cpu
       - key: GEMINI_API_KEY

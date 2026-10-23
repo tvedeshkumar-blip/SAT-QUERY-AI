@@ -210,9 +210,11 @@ export async function checkChatHealth(): Promise<import('../types').ChatHealthRe
     return {
       status: 'offline',
       available: false,
-      provider: 'LM Studio',
-      base_url: 'http://127.0.0.1:1234/v1',
-      configured_model: 'unavailable'
+      provider: 'Hugging Face Space (ZeroGPU)',
+      base_url: 'https://huggingface.co/spaces/Astro406/satquery-qwen-vl',
+      configured_model: 'Qwen/Qwen2.5-VL-3B-Instruct',
+      space_id: 'Astro406/satquery-qwen-vl',
+      stage: 'OFFLINE'
     };
   }
 }

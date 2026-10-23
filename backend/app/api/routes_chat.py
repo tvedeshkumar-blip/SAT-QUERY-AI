@@ -1,5 +1,5 @@
 import logging
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from app.chatbot.schemas import ChatRequest, ChatResponse
 from app.chatbot.satquery_chatbot import satquery_chatbot
 
@@ -9,10 +9,17 @@ router = APIRouter()
 @router.post("/chat", response_model=ChatResponse)
 def satquery_chat(request: ChatRequest):
     """
-    Dedicated SatQuery AI Chatbot endpoint powered by a local LLM via LM Studio.
+    Dedicated SatQuery AI Chatbot endpoint powered by Qwen2.5-VL-3B-Instruct
+    hosted on the Hugging Face Spaces public microservice (ZeroGPU).
     Accepts user message, multi-turn history, and optional SatQuery specialist evidence.
-    Gracefully handles offline LM Studio server without fabricating responses.
+    Gracefully handles cold starts, GPU queue delays, and Space states without fabricating responses.
     """
+    if len(request.message) > 8000:
+        raise HTTPException(
+            status_code=400,
+            detail="User query exceeds the maximum allowed length of 8000 characters."
+        )
+
     return satquery_chatbot.chat(
         message=request.message,
         history=request.history,
@@ -27,13 +34,7 @@ def satquery_chat(request: ChatRequest):
 @router.get("/chat/health")
 def satquery_chat_health():
     """
-    Status probe for the local LM Studio chatbot backend.
+    Lightweight status probe for the Hugging Face Space model inference backend.
+    Checks runtime stage and reachability without triggering GPU inference.
     """
-    available = satquery_chatbot.is_available()
-    return {
-        "status": "online" if available else "offline",
-        "available": available,
-        "provider": "LM Studio",
-        "base_url": satquery_chatbot.client.base_url,
-        "configured_model": satquery_chatbot.client.default_model or "dynamic_lookup"
-    }
+    return satquery_chatbot.get_health_status()

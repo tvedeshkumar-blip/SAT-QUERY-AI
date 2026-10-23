@@ -499,11 +499,13 @@ export interface ChatResponsePayload {
 }
 
 export interface ChatHealthResponse {
-  status: 'online' | 'offline';
+  status: 'online' | 'offline' | 'standby';
   available: boolean;
   provider: string;
   base_url: string;
   configured_model: string;
+  space_id?: string;
+  stage?: string;
 }
 
 export interface STACAssetSummary {

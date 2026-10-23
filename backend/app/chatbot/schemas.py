@@ -68,8 +68,8 @@ class ChatResponse(BaseModel):
         description="The model name or identifier used/configured in LM Studio"
     )
     provider: str = Field(
-        default="LM Studio", 
-        description="Designation of the inference engine (strictly 'LM Studio')"
+        default="Hugging Face Space (ZeroGPU)", 
+        description="Designation of the inference engine"
     )
     status: str = Field(
         ..., 
