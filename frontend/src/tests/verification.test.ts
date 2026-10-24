@@ -104,13 +104,13 @@ describe('Stage 7 Evidence-Grounded Scientific Verification', () => {
     assert.strictEqual(mockVerification.contradictions?.length, 1);
   });
 
-  test('validates not_run state when local LLM is offline, preserving deterministic result', () => {
+  test('validates not_run state when verification LLM service is offline, preserving deterministic result', () => {
     const mockVerification: VerificationResponse = {
       verification_status: 'not_run',
       deterministic_passed: true,
       deterministic_failures: [],
       claims: [],
-      summary_explanation: 'LLM verification was not run: local LLM service is offline or unreachable.',
+      summary_explanation: 'LLM verification was not run: inference LLM service is offline or unreachable.',
       is_interpretive_only: true,
       llm_run: false
     };

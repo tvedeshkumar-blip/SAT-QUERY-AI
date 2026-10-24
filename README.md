@@ -293,9 +293,11 @@ CORS_ORIGINS=http://localhost:3000,http://localhost:5173
 GEMINI_API_KEY=your_gemini_api_key_here
 GEMINI_MODEL=gemini-3.8-flash
 
-# Optional Local LM Studio Checkpoint
-LMSTUDIO_BASE_URL=http://127.0.0.1:1234/v1
-LMSTUDIO_VLM_MODEL=qwen2.5-vl-3b-instruct
+# Deployed Backend & Hugging Face Spaces Chatbot Subsystem
+VITE_API_BASE_URL=https://sat-query-backend.onrender.com
+HF_SPACE_ID=Astro406/satquery-qwen-vl
+HF_VLM_MODEL=Qwen/Qwen2.5-VL-3B-Instruct
+HF_SPACE_URL=https://astro406-satquery-qwen-vl.hf.space
 
 # Optional Local Checkpoint Paths
 RS_VLM_MODEL_ID=microsoft/Florence-2-base

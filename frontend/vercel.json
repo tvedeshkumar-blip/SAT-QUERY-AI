@@ -3,9 +3,13 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "env": {
-    "VITE_API_BASE_URL": "https://sat-query-ai-xz8j.onrender.com"
+    "VITE_API_BASE_URL": "https://sat-query-backend.onrender.com"
   },
   "rewrites": [
+    {
+      "source": "/api/:match*",
+      "destination": "https://sat-query-backend.onrender.com/api/:match*"
+    },
     {
       "source": "/(.*)",
       "destination": "/index.html"

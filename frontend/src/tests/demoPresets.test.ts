@@ -40,11 +40,11 @@ describe('Demo Presets: Dynamic Orchestration & Preset Verification', () => {
     );
   });
 
-  test('Demo 4 load() returns orchestration mode, verified query, and empty files list without synthetic PNGs', () => {
+  test('Demo 4 load() returns orchestration mode, verified query, and empty files list without synthetic PNGs', async () => {
     const demo4 = DEMO_PRESETS.find((p) => p.id === 'demo4');
     assert.ok(demo4);
 
-    const config = demo4.load();
+    const config = await demo4.load();
     assert.equal(config.mode, 'orchestration');
     assert.equal(
       config.query,
@@ -67,14 +67,14 @@ describe('Demo Presets: Dynamic Orchestration & Preset Verification', () => {
     assert.equal(hasFabricatedTif, false);
   });
 
-  test('preserves behavior of Demo 1 (Single-Image VQA)', () => {
+  test('preserves behavior of Demo 1 (Single-Image VQA)', async () => {
     const demo1 = DEMO_PRESETS.find((p) => p.id === 'demo1');
     assert.ok(demo1);
     assert.equal(demo1.mode, 'single');
     assert.equal(demo1.badge, 'VQA');
     assert.equal(demo1.query, 'What type of surface feature dominates this scene?');
 
-    const config = demo1.load();
+    const config = await demo1.load();
     assert.equal(config.mode, 'single');
     assert.equal(config.files.length, 1);
     assert.equal(config.files[0].filename, 'cartosat_optical_canopy.tif');
@@ -82,14 +82,14 @@ describe('Demo Presets: Dynamic Orchestration & Preset Verification', () => {
     assert.equal(config.files[0].isGeoTIFF, true);
   });
 
-  test('preserves behavior of Demo 2 (Single-Image Captioning)', () => {
+  test('preserves behavior of Demo 2 (Single-Image Captioning)', async () => {
     const demo2 = DEMO_PRESETS.find((p) => p.id === 'demo2');
     assert.ok(demo2);
     assert.equal(demo2.mode, 'single');
     assert.equal(demo2.badge, 'CAPTION');
     assert.equal(demo2.query, 'Describe this satellite image and summarize its land cover layout.');
 
-    const config = demo2.load();
+    const config = await demo2.load();
     assert.equal(config.mode, 'single');
     assert.equal(config.files.length, 1);
     assert.equal(config.files[0].filename, 'cartosat_multispectral_scene.tif');
@@ -137,27 +137,27 @@ describe('Demo Presets: Dynamic Orchestration & Preset Verification', () => {
     );
   });
 
-  test('preserves behavior of Demo 5 (Conflict & Reanalysis)', () => {
+  test('preserves behavior of Demo 5 (Conflict & Reanalysis)', async () => {
     const demo5 = DEMO_PRESETS.find((p) => p.id === 'demo5');
     assert.ok(demo5);
     assert.equal(demo5.mode, 'single');
     assert.equal(demo5.badge, 'REANALYSIS');
     assert.equal(demo5.query, 'Locate and outline all urban building structures with bounding boxes.');
 
-    const config = demo5.load();
+    const config = await demo5.load();
     assert.equal(config.mode, 'single');
     assert.equal(config.files.length, 1);
     assert.equal(config.files[0].filename, 'coastal_estuary_test.tif');
     assert.equal(config.files[0].role, 'primary');
   });
 
-  test('simulates WorkspacePage submission payload for Demo 4 (empty files & orchestration mode)', () => {
+  test('simulates WorkspacePage submission payload for Demo 4 (empty files & orchestration mode)', async () => {
     const demo4 = DEMO_PRESETS.find((p) => p.id === 'demo4');
     assert.ok(demo4);
-    const config = demo4.load();
+    const config = await demo4.load();
 
     // Replicate WorkspacePage.handleSubmitAnalysis payload construction
-    const imagePayloads: AnalyzePayload['images'] = config.files.map((f) => ({
+    const imagePayloads: AnalyzePayload['images'] = config.files.map((f: any) => ({
       data: f.dataUrl,
       mimeType: f.isGeoTIFF ? 'image/tiff' : 'image/png',
       filename: f.filename,

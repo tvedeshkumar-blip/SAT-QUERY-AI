@@ -65,6 +65,9 @@ describe('Single-Image VQA Frontend Workflow & Repair Tests', () => {
 
   test('correctly parses genuine VQA response with truthful fallback metadata', () => {
     const mockVqaResponse: AnalysisResponse = {
+      id: 'vqa_resp_test_1',
+      mode: 'single',
+      trace: { task: 'vqa', models_selected: ['GenericVLMOrchestrator'], steps: [], parameters: {}, execution_time_ms: 120 },
       query: 'Describe the visible land cover in this satellite image.',
       task: 'vqa',
       models: ['GenericVLMOrchestrator'],

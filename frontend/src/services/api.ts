@@ -1,15 +1,17 @@
 import type { AnalysisMode, AnalysisResponse, BenchmarkResult, UploadedFileState } from '../types/index.ts';
 
-function getApiBaseUrl(): string {
+export const DEFAULT_RENDER_BACKEND_URL = 'https://sat-query-backend.onrender.com';
+
+export function getApiBaseUrl(): string {
   const env = typeof import.meta !== 'undefined' ? (import.meta as any).env : undefined;
-  const envUrl = (env?.VITE_API_BASE_URL || (typeof process !== 'undefined' ? process.env?.VITE_API_BASE_URL : '') || '').trim().replace(/\/+$/, '');
-  if (!envUrl) {
-    if (typeof window === 'undefined') {
-      return 'http://127.0.0.1:8000/api/v1';
-    }
-    return '/api/v1';
-  }
-  return envUrl.endsWith('/api/v1') ? envUrl : `${envUrl}/api/v1`;
+  const envUrl = (
+    env?.VITE_API_BASE_URL ||
+    (typeof process !== 'undefined' ? process.env?.VITE_API_BASE_URL : '') ||
+    ''
+  ).trim().replace(/\/+$/, '');
+
+  const base = envUrl || DEFAULT_RENDER_BACKEND_URL;
+  return base.endsWith('/api/v1') ? base : `${base}/api/v1`;
 }
 
 export const API_BASE = getApiBaseUrl();
@@ -187,34 +189,63 @@ export async function runOfficialEvaluation(): Promise<any> {
 }
 
 export async function sendChatMessage(payload: import('../types').ChatRequestPayload): Promise<import('../types').ChatResponsePayload> {
-  const res = await fetch(`${API_BASE}/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  try {
+    const res = await fetch(`${API_BASE}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
 
-  if (!res.ok) {
-    const errorData = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(errorData.detail || `Chat request failed (${res.status})`);
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(errorData.detail || `Chat request failed (${res.status})`);
+    }
+
+    return await res.json();
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error('Chat inference request timed out after 60 seconds.');
+    }
+    throw err;
   }
-
-  return await res.json();
 }
 
 export async function checkChatHealth(): Promise<import('../types').ChatHealthResponse> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
   try {
-    const res = await fetch(`${API_BASE}/chat/health`);
-    if (!res.ok) throw new Error('Chat health check failed');
-    return await res.json();
-  } catch (err) {
+    const res = await fetch(`${API_BASE}/chat/health`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!res.ok) throw new Error(`Chat health check failed: HTTP ${res.status}`);
+    const data = await res.json();
+    return {
+      status: data.status || 'offline',
+      available: Boolean(data.available),
+      provider: data.provider || 'Hugging Face Spaces',
+      space_id: data.space_id,
+      configured_model: data.configured_model || 'Qwen/Qwen2.5-VL-3B-Instruct',
+      stage: data.stage,
+      base_url: data.base_url || `${DEFAULT_RENDER_BACKEND_URL}/api/v1`,
+      hardware: data.hardware,
+    };
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    console.warn('Chat health check error:', err?.message || err);
     return {
       status: 'offline',
       available: false,
-      provider: 'Hugging Face Space (ZeroGPU)',
-      base_url: 'https://huggingface.co/spaces/Astro406/satquery-qwen-vl',
+      provider: 'Hugging Face Spaces',
       configured_model: 'Qwen/Qwen2.5-VL-3B-Instruct',
       space_id: 'Astro406/satquery-qwen-vl',
-      stage: 'OFFLINE'
+      stage: 'OFFLINE',
+      base_url: `${DEFAULT_RENDER_BACKEND_URL}/api/v1`,
     };
   }
 }

@@ -35,7 +35,7 @@ export function getFallbackRealDemo3Preset() {
         role: 'primary' as const,
         isGeoTIFF: true,
         size: 3149278,
-        assetCategory: 'scientific_raster',
+        assetCategory: 'scientific_raster' as const,
         stacProvenance: {
           provider: 'Element84 Earth Search (AWS)',
           catalog_url: 'https://earth-search.aws.element84.com/v1',
@@ -73,7 +73,7 @@ export function getFallbackRealDemo3Preset() {
         role: 'secondary' as const,
         isGeoTIFF: true,
         size: 3149278,
-        assetCategory: 'scientific_raster',
+        assetCategory: 'scientific_raster' as const,
         stacProvenance: {
           provider: 'Element84 Earth Search (AWS)',
           catalog_url: 'https://earth-search.aws.element84.com/v1',

@@ -65,7 +65,7 @@ export const ReportPreviewModal: React.FC<ReportPreviewModalProps> = ({
                 </span>
               </div>
               <p className="text-xs text-slate-400 font-mono">
-                Report ID: {rep?.report_id || response.id} | Generated: {response.created_at.slice(0, 19)}Z
+                Report ID: {rep?.report_id || response.id} | Generated: {(response.created_at || new Date().toISOString()).slice(0, 19)}Z
               </p>
             </div>
           </div>

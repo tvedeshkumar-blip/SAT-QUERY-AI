@@ -92,14 +92,15 @@ export interface GeoTIFFMetadata {
 
 export interface VisualEvidence {
   id: string;
-  type: 'original' | 'processed' | 'overlay' | 'mask' | 'boxes' | 'change_map' | 'fused' | 'composite_inspector';
+  type: 'original' | 'processed' | 'overlay' | 'mask' | 'boxes' | 'change_map' | 'fused' | 'composite_inspector' | 'classification';
   title: string;
   description?: string;
   artifact_url?: string;
   data_base64?: string;
   boxes?: BoundingBox[];
-  statistics?: Record<string, number | string>;
+  statistics?: Record<string, number | string | boolean | null>;
   inspector_data?: CompositeInspectorData;
+  metadata?: Record<string, any>;
 }
 
 export interface ExecutionTraceStep {
@@ -231,6 +232,7 @@ export interface ClassificationResult {
 
 export interface AnalysisResponse {
   id: string;
+  status?: string;
   task: TaskType;
   mode: AnalysisMode;
   query?: string;
@@ -256,8 +258,8 @@ export interface AnalysisResponse {
   is_clarification_required?: boolean;
   missing_parameters?: string[];
   suggested_examples?: string[];
-  execution_time_ms: number;
-  created_at: string;
+  execution_time_ms?: number;
+  created_at?: string;
 }
 
 export interface PhysicalMeasurementReportItem {
@@ -493,19 +495,22 @@ export interface ChatResponsePayload {
   response: string;
   model: string;
   provider: string;
-  status: 'success' | 'unavailable' | 'error';
-  conversation_id?: string;
+  status: 'success' | 'unavailable' | 'error' | 'standby';
+  conversation_id?: string | null;
   error?: string | null;
+  space_id?: string | null;
+  duration_sec?: number | null;
 }
 
 export interface ChatHealthResponse {
   status: 'online' | 'offline' | 'standby';
   available: boolean;
   provider: string;
-  base_url: string;
-  configured_model: string;
+  base_url?: string;
+  configured_model?: string;
   space_id?: string;
   stage?: string;
+  hardware?: string;
 }
 
 export interface STACAssetSummary {
